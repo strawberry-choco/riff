@@ -1578,3 +1578,127 @@ fn a_rename_of_a_deleted_list_commits_a_no_op_and_bumps_nothing() {
         "and emits nothing beside that no bump"
     );
 }
+
+// --- the enumeration read: which lists exist, in creation order ------------
+//
+// [`LibraryQueryStore::custom_smart_playlists`] is the read the sidebar's
+// custom rows and the Settings page's list column enumerate from: id, name
+// and `created_at` for every saved row, in creation order, and nothing else.
+// It is asserted here because every row it answers is written by the saves
+// this suite already holds fixtures for.
+
+/// A savable one-Rule tree: a saved tree always holds at least one Rule, and
+/// the enumeration does not care which.
+fn single_rule_tree() -> SmartPlaylistTree {
+    tree(vec![year_rule()])
+}
+
+#[test]
+fn a_fresh_store_enumerates_no_custom_lists() {
+    let (_dir, _path, store, _changes) = fresh_store();
+    assert!(
+        store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .is_empty(),
+        "the six Built-in Smart Playlists are code, not rows, so a store with \
+         no saves enumerates nothing at all"
+    );
+}
+
+#[test]
+fn the_enumeration_holds_every_saved_list_in_creation_order() {
+    let (_dir, _path, mut store, _changes) = fresh_store();
+    let first = store
+        .save_smart_playlist(None, "Alpha", &single_rule_tree())
+        .expect("the first save");
+    let second = store
+        .save_smart_playlist(None, "Beta", &single_rule_tree())
+        .expect("the second save");
+    let third = store
+        .save_smart_playlist(None, "Gamma", &single_rule_tree())
+        .expect("the third save");
+
+    let listed = store
+        .custom_smart_playlists()
+        .expect("the enumeration reads");
+    let ids: Vec<PlaylistId> = listed.iter().map(|list| list.id.clone()).collect();
+    assert_eq!(
+        ids,
+        vec![first, second, third],
+        "every saved list is enumerated, once each, under the ids its own save returned"
+    );
+    let names: Vec<&str> = listed.iter().map(|list| list.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Alpha", "Beta", "Gamma"],
+        "the saved names round-trip, in creation order — not alphabetical order"
+    );
+    let stamps: Vec<std::time::SystemTime> = listed.iter().map(|list| list.created_at).collect();
+    assert!(
+        stamps.windows(2).all(|pair| pair[0] <= pair[1]),
+        "each row's creation stamp rides along and never runs backwards"
+    );
+}
+
+#[test]
+fn a_re_save_and_a_rename_move_neither_a_list_nor_its_place() {
+    let (_dir, _path, mut store, _changes) = fresh_store();
+    let older = store
+        .save_smart_playlist(None, "Older", &single_rule_tree())
+        .expect("the first save");
+    let newer = store
+        .save_smart_playlist(None, "Newer", &single_rule_tree())
+        .expect("the second save");
+
+    store
+        .save_smart_playlist(Some(&older), "Older", &authored_tree())
+        .expect("a re-save replaces the tree, not the row");
+    store
+        .rename_smart_playlist(&older, "Renamed")
+        .expect("the rename finds the row");
+
+    let listed = store
+        .custom_smart_playlists()
+        .expect("the enumeration reads");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|list| list.id.clone())
+            .collect::<Vec<_>>(),
+        vec![older, newer],
+        "the re-saved list keeps its FIRST position: neither a re-save nor a \
+         rename re-creates its row"
+    );
+    assert_eq!(
+        listed[0].name, "Renamed",
+        "and the enumeration carries the CURRENT name, not the name at creation"
+    );
+}
+
+#[test]
+fn a_delete_leaves_the_rest_enumerated_untouched() {
+    let (_dir, _path, mut store, _changes) = fresh_store();
+    let kept = store
+        .save_smart_playlist(None, "Kept", &single_rule_tree())
+        .expect("the first save");
+    let gone = store
+        .save_smart_playlist(None, "Gone", &single_rule_tree())
+        .expect("the second save");
+    assert!(
+        store.delete_smart_playlist(&gone).expect("the delete runs"),
+        "the row was there to delete"
+    );
+
+    let listed = store
+        .custom_smart_playlists()
+        .expect("the enumeration reads");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|list| list.id.clone())
+            .collect::<Vec<_>>(),
+        vec![kept],
+        "only the deleted list drops out of the enumeration"
+    );
+}

@@ -19,10 +19,10 @@ use riff_persistence::errors::StoreError;
 use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
-    FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
-    Page, PlaylistEntry, PlaylistStore, RuleTree, ScalarSettings, Settings, SettingsStore,
-    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, StoreMigrations,
-    TrackListOrder, WatchState,
+    CustomSmartPlaylist, FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore,
+    LibraryQueryStore, Page, PlaylistEntry, PlaylistStore, RuleTree, ScalarSettings, Settings,
+    SettingsStore, SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration,
+    StoreMigrations, TrackListOrder, WatchState,
 };
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{
@@ -3108,6 +3108,31 @@ impl LibraryQueryStore for SqliteStore {
         id: &PlaylistId,
     ) -> Result<Option<SmartPlaylistTree>, StoreError> {
         self.read_smart_playlist_tree(id)
+    }
+
+    /// One bounded read of the `smart_playlists` row list: id, name, and the
+    /// creation stamp, ordered by what the save path wrote. `created_at` is
+    /// first because it is the listener's creation order; `rowid` breaks a
+    /// same-stamp tie in insertion order, so the answer is a total order even
+    /// when two lists land on one clock tick. A save-in-place and a rename
+    /// move neither, which is what makes this the enumeration the sidebar and
+    /// the Settings page's list column can key a stable row order on.
+    fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, name, created_at FROM smart_playlists
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(CustomSmartPlaylist {
+                    id: PlaylistId(row.get::<_, String>(0)?),
+                    name: row.get::<_, String>(1)?,
+                    created_at: system_time_from_nanos(row.get::<_, i64>(2)?),
+                })
+            })?;
+            rows.collect()
+        })
+        .map_err(|e| op_error("failed to list the Custom Smart Playlists", e))
     }
 }
 

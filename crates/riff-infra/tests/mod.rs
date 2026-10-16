@@ -40,8 +40,8 @@ pub use riff_persistence::field_catalog::{LOSSLESS_EXTENSIONS, LOSSY_EXTENSIONS}
 pub use riff_persistence::playlist::{Playlist, PlaylistId};
 pub use riff_persistence::rule::{CivilDateTime, RuleValue};
 pub use riff_persistence::store::{
-    LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, Page, PlaylistEntry,
-    PlaylistStore, RuleTree, ScalarSettings, ScanOptions, Settings, SettingsStore,
+    CustomSmartPlaylist, LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, Page,
+    PlaylistEntry, PlaylistStore, RuleTree, ScalarSettings, ScanOptions, Settings, SettingsStore,
     SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, StoreMigrations,
     TrackListOrder, UnreadableRule, WatchState,
 };

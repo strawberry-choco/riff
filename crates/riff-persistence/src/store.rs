@@ -597,6 +597,39 @@ impl SmartPlaylistTree {
     }
 }
 
+/// One Custom Smart Playlist as the surfaces that *enumerate* lists identify
+/// it: the store's id, its saved name, and when it was first saved.
+///
+/// This is the row half of a Custom Smart Playlist — what
+/// [`LibraryQueryStore::custom_smart_playlists`] answers. It deliberately
+/// carries no Tracks and no Rule tree: which Tracks match is a separate
+/// bounded read, and the tree is [`LibraryQueryStore::smart_playlist_tree`].
+/// A consumer that needs more than id, name and creation order is holding the
+/// wrong read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomSmartPlaylist {
+    /// The store-generated id — what Save minted, never reused.
+    pub id: PlaylistId,
+    /// The list's saved name, as stored (already trimmed by the write path).
+    pub name: String,
+    /// When the row was first created. A rename or a re-save never moves it,
+    /// which is what makes creation order stable.
+    pub created_at: SystemTime,
+}
+
+impl CustomSmartPlaylist {
+    /// One enumerated list, as the store's row holds it — the read's own
+    /// constructor.
+    #[must_use]
+    pub fn new(id: PlaylistId, name: String, created_at: SystemTime) -> Self {
+        Self {
+            id,
+            name,
+            created_at,
+        }
+    }
+}
+
 /// Port for writing the Library collection section of the Application Store.
 ///
 /// Implemented by infrastructure over a real `SQLite` connection. Every call
@@ -1442,6 +1475,17 @@ pub trait LibraryQueryStore {
     /// reports as an error rather than inventing a box for.
     fn smart_playlist_tree(&self, id: &PlaylistId)
     -> Result<Option<SmartPlaylistTree>, StoreError>;
+
+    /// Every Custom Smart Playlist the listener has saved — id, name and
+    /// `created_at` — in **creation order**: the order the listener made them.
+    ///
+    /// This is the *which lists exist* question, and nothing else: no Tracks,
+    /// no Rule tree, no counts. A re-save or a rename keeps the row's
+    /// `created_at` and therefore its position, so the order a listener built
+    /// is the order every consumer — the sidebar's custom rows and the
+    /// Settings page's list column — shows. The six Built-in Smart Playlists
+    /// are code, not rows, and never appear here.
+    fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

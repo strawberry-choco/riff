@@ -3520,6 +3520,14 @@ mod scan_service_tests {
                 "rule tree read boom".to_string(),
             ))
         }
+
+        fn custom_smart_playlists(
+            &self,
+        ) -> Result<Vec<riff_persistence::store::CustomSmartPlaylist>, StoreError> {
+            Err(StoreError::InvalidOperation(
+                "custom list enumeration read boom".to_string(),
+            ))
+        }
     }
 
     /// [`LibraryMutationStore`] whose scan batches always fail to commit —
@@ -5411,6 +5419,12 @@ mod tag_edit_service_tests {
             _id: &PlaylistId,
         ) -> Result<Option<SmartPlaylistTree>, StoreError> {
             Ok(None)
+        }
+
+        fn custom_smart_playlists(
+            &self,
+        ) -> Result<Vec<riff_persistence::store::CustomSmartPlaylist>, StoreError> {
+            Ok(Vec::new())
         }
     }
 

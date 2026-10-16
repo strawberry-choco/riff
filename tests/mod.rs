@@ -420,7 +420,9 @@ pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 pub use riff_infra::media::metadata_reader::parse_replaygain_gain;
 pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
-pub use riff_persistence::store::{RuleTree, ScanOptions, SmartPlaylistTree, UnreadableRule};
+pub use riff_persistence::store::{
+    CustomSmartPlaylist, RuleTree, ScanOptions, SmartPlaylistTree, UnreadableRule,
+};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::path::PathBuf;
@@ -571,8 +573,8 @@ pub mod mocks {
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
-        LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings, SettingsStore,
-        SmartPlaylistTree, SortDirection,
+        CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings,
+        SettingsStore, SmartPlaylistTree, SortDirection,
     };
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_backend::app::traits::{
@@ -1698,6 +1700,7 @@ pub mod mocks {
             usize,
         ),
         SmartPlaylistTree(PlaylistId),
+        CustomSmartPlaylists,
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1716,6 +1719,7 @@ pub mod mocks {
         PickerTexts,
         PickerNumbers,
         SmartPlaylistTree,
+        CustomSmartPlaylists,
         TracksWindow,
         TracksCount,
         SearchWindow,
@@ -1865,6 +1869,10 @@ pub mod mocks {
         /// is not listed answers `None` — no row — which is the state most
         /// suites want.
         pub smart_playlist_trees: std::collections::HashMap<PlaylistId, SmartPlaylistTree>,
+        /// Answer served by `custom_smart_playlists`, in the order the mock
+        /// was loaded — the mock hands back creation order exactly as a test
+        /// staged it.
+        pub custom_smart_playlists: Vec<CustomSmartPlaylist>,
 
         // --- failure injection -------------------------------------------------
         /// Queries that fail while listed here.
@@ -2671,6 +2679,16 @@ pub mod mocks {
             }
             Ok(self.smart_playlist_trees.get(id).cloned())
         }
+
+        fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError> {
+            self.record(LibraryQueryCall::CustomSmartPlaylists);
+            if self.failing.contains(&FailingQuery::CustomSmartPlaylists) {
+                return Err(StoreError::InvalidOperation(
+                    "custom list enumeration read boom".to_string(),
+                ));
+            }
+            Ok(self.custom_smart_playlists.clone())
+        }
     }
 
     /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
@@ -3001,6 +3019,10 @@ pub mod mocks {
             id: &PlaylistId,
         ) -> Result<Option<SmartPlaylistTree>, StoreError> {
             self.0.lock().unwrap().smart_playlist_tree(id)
+        }
+
+        fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError> {
+            self.0.lock().unwrap().custom_smart_playlists()
         }
     }
 

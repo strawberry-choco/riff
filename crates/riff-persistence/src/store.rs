@@ -239,6 +239,12 @@ pub struct PlaylistEntry {
 /// enforced link to tracks: dangling references stay listed and resolve again
 /// once the referenced files return. Implemented by infrastructure over a
 /// real `SQLite` connection.
+///
+/// A name is how the listener finds its row, so it is unique across the whole
+/// sidebar — `playlists` and `smart_playlists` together — and both writes that
+/// carry a name ([`PlaylistStore::create_playlist`] and
+/// [`PlaylistStore::rename_playlist`]) enforce that one rule. It cannot be a
+/// table constraint, because no single table holds both kinds of row.
 pub trait PlaylistStore {
     /// Load every Playlist in creation order, each with its entries in
     /// playlist order. A fresh store yields an empty `Vec`.
@@ -253,9 +259,20 @@ pub trait PlaylistStore {
 
     /// Create a Playlist named `name` (trimmed) with optional initial Track
     /// references (exact duplicates dropped, order preserved). The generated
-    /// id is made unique against existing playlists so same-millisecond
-    /// creation of same-named playlists cannot collide; duplicate names are
-    /// allowed.
+    /// id is made unique against existing playlists by suffixing its slug, so
+    /// two distinct names that slug alike in one millisecond cannot collide.
+    ///
+    /// A name is how the listener finds its sidebar row, so one name belongs
+    /// to one row across the WHOLE sidebar: creation is refused when any
+    /// Playlist or Custom Smart Playlist already answers to `name`, compared
+    /// trimmed and lowercased with Rust's full Unicode folding — see
+    /// [`Self::rename_playlist`], which enforces the same rule on the other
+    /// half of the sidebar. Duplicate names are therefore not allowed, in
+    /// either table, under either spelling; `smart_playlists`' own `UNIQUE`
+    /// constraint is only a same-case backstop that cannot see across the two
+    /// tables. The six Built-in Smart Playlist display names are not part of
+    /// this rule — they exist only as code, so refusing them is the
+    /// application layer's job.
     fn create_playlist(
         &mut self,
         name: &str,
@@ -263,7 +280,9 @@ pub trait PlaylistStore {
     ) -> Result<PlaylistId, StoreError>;
 
     /// Rename the Playlist with `id` to `new_name` (trimmed). Returns
-    /// whether the playlist was found.
+    /// whether the playlist was found. The same sidebar-wide name rule as
+    /// [`Self::create_playlist`] applies, with this Playlist's own row exempt
+    /// so a rename that changes nothing never refuses the row it started from.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError>;
 
     /// Delete the Playlist with `id` together with its entries. Returns

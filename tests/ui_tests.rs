@@ -19950,6 +19950,754 @@ mod whole_frame_tests {
             "the clicked row reports its own id as the typed sidebar intent"
         );
     }
+
+    // --- Ticket 13: a Custom list opens as an ordinary Track listing -----------
+    //
+    // The listing is `RiffApp::render_custom_smart_list_view`: the flat
+    // listing's paging shape over the Custom-list read, every row drawn by the
+    // shared `interactive_track_row` and the header by the shared slots. These
+    // tests drive the REAL gestures over the composed shell — the sidebar row's
+    // click, a real double-click at a row's own hit area, the heart, a
+    // secondary click, the titlebar's search box, the header's sort control and
+    // its whole-list menu. Every assertion reads what the gesture DID; the
+    // ports' recorded calls carry the seam-shape claims (the needle in the
+    // query, one read per window, the whole-set batch).
+
+    /// The real-store shell for the listing tests: `titles.len()` scanned
+    /// Tracks (paths `00.mp3`…, titles as given), one saved Custom Smart
+    /// Playlist carrying `tree`, a recording transport kept beside the shell,
+    /// and the store handle so a test can read back a committed write.
+    fn listing_store_shell_with(
+        titles: &[&str],
+        tree: &SmartPlaylistTree,
+    ) -> (
+        Shell,
+        tempfile::TempDir,
+        PlaylistId,
+        riff_infra::store::SqliteStore,
+        Arc<MockTransport>,
+    ) {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let db_path = dir.path().join("riff.sqlite3");
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_backend::app::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("opening a fresh store must work");
+
+        let tracks: Vec<_> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                let path = dir.path().join(format!("{i:02}.mp3"));
+                std::fs::write(&path, b"fake audio bytes").expect("scratch file writes");
+                create_test_track_with_metadata(
+                    &path.to_string_lossy(),
+                    &path.to_string_lossy(),
+                    "Artist",
+                    title,
+                    "Album",
+                )
+            })
+            .collect();
+        store
+            .apply_scan_batch(&tracks)
+            .expect("the seed scan commits");
+
+        let list_id = store
+            .save_smart_playlist(None, "Late night jazz", tree)
+            .expect("saving the list works");
+
+        let transport = Arc::new(MockTransport::new());
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
+            Box::new(store.clone()),
+            store.clone(),
+            store.library_generation(),
+            store.playlist_generation(),
+        );
+        let shell = build_at_step(
+            Box::new(transport.as_ref().clone()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(store.clone()),
+            views,
+            FAST_STEP,
+        );
+        (shell, dir, list_id, store, transport)
+    }
+
+    /// The three-Track shell whose list's one Rule (`Title is "alpha"`) matches
+    /// Alpha and nothing else.
+    fn listing_store_shell() -> (
+        Shell,
+        tempfile::TempDir,
+        PlaylistId,
+        riff_infra::store::SqliteStore,
+        Arc<MockTransport>,
+    ) {
+        listing_store_shell_with(&["Alpha", "Beta", "Gamma"], &one_rule_tree())
+    }
+
+    /// `Artist is "Artist"` — every seeded Track matches, so a test can see a
+    /// listing wider than one row.
+    fn all_matching_tree() -> SmartPlaylistTree {
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+            vec![RuleChild::Rule(Rule::new(
+                MatchableField::Artist,
+                Comparison::Is,
+                Some(RuleValue::Text("Artist".to_string())),
+            ))],
+        )))
+    }
+
+    /// Open the list by clicking its sidebar row and settle the frames the
+    /// gesture needs: the click's frame reports the action, the next applies
+    /// the slot, the third draws the listing it selected.
+    fn open_custom_list(shell: &mut Shell) {
+        shell.harness.get_by_label("Late night jazz").click();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+    }
+
+    /// Stories 52 and 63: opening the list replaces the Library's flat listing
+    /// with the list's own — the shared rows in the shared layout, with the
+    /// shared header slots (the name, the fresh total) and the shared sort
+    /// control. The list's Rule matched Alpha alone, so Beta's absence is the
+    /// proof the listing is the query's answer and never a copy of the Library.
+    #[test]
+    fn a_custom_list_opens_as_a_track_listing_in_the_shared_layout() {
+        let (mut shell, _dir, _id, _store, _transport) = listing_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_some(),
+            "the premise: the Library's flat listing draws every scanned Track"
+        );
+
+        open_custom_list(&mut shell);
+
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some(),
+            "the open list draws the Track its Rules match"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "and none the Rules do not: the listing is the query's answer"
+        );
+        assert_eq!(
+            shell.harness.query_all_by_label("Late night jazz").count(),
+            2,
+            "the heading wears the list's name beside the sidebar's own row"
+        );
+        assert!(
+            shell.harness.query(By::new().label("(1 tracks)")).is_some(),
+            "the header's count slot carries the fresh total"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Sort order: Track No. \u{2191}")
+                .is_some(),
+            "and the header's right edge carries the shared sort control"
+        );
+    }
+
+    /// Story 53: a custom list's rows are ordinary Track rows. Double-click
+    /// selects and plays through the same handler the flat listing reaches;
+    /// the heart commits the SAME durable setter; the right-click opens the
+    /// shared Track menu, and choosing from it reaches the shared host. The
+    /// spec's story 53 says "Add to Queue" where this ticket's box says "Add to
+    /// Playlist": the shipped shared menu is the authority and offers both, and
+    /// that divergence is recorded, never resolved by inventing a menu.
+    #[test]
+    fn a_custom_list_row_takes_the_shared_track_gestures() {
+        let (mut shell, dir, _id, store, transport) = listing_store_shell();
+        shell.harness.step();
+        open_custom_list(&mut shell);
+
+        let alpha = TrackId(dir.path().join("00.mp3").to_string_lossy().into_owned());
+        // The app's own launch hydration has already sent the volume command;
+        // what matters is that no PLAY intent arrives before the gesture.
+        assert!(
+            !transport
+                .recorded()
+                .iter()
+                .any(|intent| matches!(intent, TransportIntent::Play(_))),
+            "opening the list starts nothing, got {:?}",
+            transport.recorded()
+        );
+
+        // The heart, before anything is selected (so the only heart on screen
+        // is the row's own): one durable commit, and the row re-resolves from
+        // the committed state.
+        shell.harness.get_by_label("Add to Favorites").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            store
+                .get_track(&alpha)
+                .expect("the read")
+                .expect("the Track")
+                .favorite,
+            "the heart committed the flag through the library mutation port"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("Remove from Favorites")
+                .is_some(),
+            "and the row re-resolved from the committed state"
+        );
+
+        // Double-click: the same gesture body every listing's rows carry.
+        let before_play = transport.recorded().len();
+        let at = shell
+            .harness
+            .get_by_label("Artist - Alpha")
+            .rect()
+            .center();
+        double_click_at(&mut shell.harness, at, FAST_STEP);
+        shell.harness.step();
+        assert_eq!(
+            shell.library.lock_or_recover().selected_track,
+            Some(alpha.clone()),
+            "a double-click selects the Track"
+        );
+        assert_eq!(
+            &transport.recorded()[before_play..],
+            &[TransportIntent::Play(alpha.clone())],
+            "and plays it through the transport — the handler the flat listing reaches"
+        );
+
+        // Right-click: the shared Track menu, whole, and its items reach the
+        // shared handlers.
+        shell
+            .harness
+            .get_by_label("Artist - Alpha")
+            .click_secondary();
+        shell.harness.step();
+        shell.harness.step();
+        for item in ["Play", "Play Next", "Add to Queue"] {
+            assert!(
+                shell.harness.query_all_by_label(item).next().is_some(),
+                "the shared Track menu offers {item}"
+            );
+        }
+        assert!(
+            shell
+                .harness
+                .query_by_label("Add to Playlist \u{23f5}")
+                .is_some(),
+            "and the shipped 'Add to Playlist' targets, not a bespoke menu"
+        );
+        let before = transport.recorded().len();
+        shell
+            .harness
+            .query_all_by_label("Add to Queue")
+            .last()
+            .expect("the menu's own item")
+            .click();
+        shell.harness.step();
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::AddToQueue(alpha.clone())],
+            "choosing Add to Queue reaches the transport, like every other Track row"
+        );
+    }
+
+    /// Story 72's combination half: the titlebar needle and the Rule tree are
+    /// COMBINED, not chosen between. The needle "beta" matches Beta's search
+    /// text while the Rules match Alpha — so an empty listing is the proof that
+    /// neither replaced the other, and that the read which answered it carried
+    /// both (the needle is ANDed inside the query, never after paging).
+    #[test]
+    fn the_titlebar_needle_and_the_rule_tree_are_combined_not_chosen_between() {
+        let (mut shell, _dir, _id, _store, _transport) = listing_store_shell();
+        shell.harness.step();
+        open_custom_list(&mut shell);
+
+        // The needle arrives through the real search box: focus it and type,
+        // the gesture a listener makes.
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("beta");
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock_or_recover().search_query,
+            "beta",
+            "the box wrote the session's needle"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "the needle did not REPLACE the Rule tree: Beta matches the needle but not the Rules"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_none(),
+            "and the Rules did not replace the needle: Alpha matches the Rules but not the needle"
+        );
+        assert!(
+            shell.harness.query_by_label("No matching tracks").is_some(),
+            "the combined filter's empty answer is the shared empty state"
+        );
+    }
+
+    /// The other half of story 72: a needle the Rules also admit leaves the
+    /// matching row — the needle reaches the read, and the Rules still apply.
+    #[test]
+    fn a_needle_the_rules_also_admit_leaves_the_matching_row() {
+        let (mut shell, _dir, _id, _store, _transport) = listing_store_shell();
+        shell.harness.step();
+        open_custom_list(&mut shell);
+
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("alpha");
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some(),
+            "a needle the Rules admit keeps the row"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "and the Rules still exclude what they excluded"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("No matching tracks")
+                .is_none(),
+            "an answered filter is not the empty state"
+        );
+    }
+
+    /// Box 3: the header's sort control reorders the listing — the store's
+    /// ORDER BY follows the chosen mode, so the rows move.
+    #[test]
+    fn the_header_sort_control_reorders_a_custom_list() {
+        use riff_backend::app::state::TrackSort;
+
+        let (mut shell, _dir, _id, _store, _transport) =
+            listing_store_shell_with(&["Alpha", "Beta", "Gamma"], &all_matching_tree());
+        shell.harness.step();
+        open_custom_list(&mut shell);
+
+        let y = |shell: &Shell, label: &str| shell.harness.get_by_label(label).rect().center().y;
+        assert!(
+            y(&shell, "Artist - Alpha") < y(&shell, "Artist - Gamma"),
+            "the canonical order leads with Alpha"
+        );
+
+        shell
+            .harness
+            .get_by_label("Sort order: Track No. \u{2191}")
+            .click();
+        for _ in 0..4 {
+            shell.harness.step();
+        }
+        shell.harness.get_by_label("Title Z\u{2013}A").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock_or_recover().track_sort,
+            TrackSort::TitleDesc,
+            "the control wrote the session's sort"
+        );
+        assert!(
+            y(&shell, "Artist - Gamma") < y(&shell, "Artist - Beta")
+                && y(&shell, "Artist - Beta") < y(&shell, "Artist - Alpha"),
+            "and the listing re-read in the new order — every row, not just the first"
+        );
+    }
+
+    /// Box 5: a listing larger than one window pages one read at a time and
+    /// never repeats or skips a row — the read's total order (ending on the
+    /// unique path) is what makes the windows partition the answer. The cost is
+    /// asserted at the seam as the exact window reads the scroll issued.
+    #[test]
+    fn paging_a_custom_list_costs_one_read_per_window_and_skips_nothing() {
+        let rows: Vec<_> = (0..120)
+            .map(|i| track(&format!("{i:03}.mp3"), &format!("Track {i:03}")))
+            .collect();
+        let id = PlaylistId("spl-big-1".to_string());
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-big-1", "The big one")],
+            smart_playlist_trees: std::collections::HashMap::from([(id, one_rule_tree())]),
+            custom_page: rows,
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("The big one").click();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+        {
+            use riff_backend::app::state::TrackSort;
+            use riff_backend::app::store::StoreGeneration;
+            use riff_backend::app::views::SessionViews;
+            let mut views = SessionViews::new(
+                Box::new(SharedQueryStore(Arc::clone(&mock))),
+                Box::new(MockPlaylistStore::default()),
+                StoreGeneration::new(),
+                StoreGeneration::new(),
+            );
+            eprintln!(
+                "PROBE row0: {:?}",
+                views
+                    .custom_list_row(&PlaylistId("spl-big-1".to_string()), TrackSort::default(), None, 0)
+                    .map(|row| row.map(|t| t.id.clone()))
+            );
+        }
+
+        // Opening reads the tree, asks the Listing Page for the total ALONE
+        // (limit 0, the count sentinel), then fetches the one window the
+        // viewport needs — at the projection's own window size.
+        assert_eq!(
+            mock.lock().unwrap().custom_page_calls(),
+            vec![
+                (riff_backend::app::store::TrackListOrder::default(), None, 0, 0),
+                (riff_backend::app::store::TrackListOrder::default(), None, 0, 50),
+            ],
+            "one count read and ONE window read at open"
+        );
+        assert!(
+            shell.harness.query(By::new().label("Artist - Track 119")).is_none(),
+            "the tail is far outside the viewport"
+        );
+
+        // Scroll to the tail with real wheel events over a row of the listing
+        // itself (found by geometry: right of the sidebar, because "Track "
+        // also names nodes outside the listing).
+        for _ in 0..60 {
+            if shell.harness.query(By::new().label("Artist - Track 119")).is_some() {
+                break;
+            }
+            let Some(row) = shell
+                .harness
+                .query_all_by_label_contains("Artist - Track ")
+                .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            else {
+                break;
+            };
+            shell.harness.hover_at(row.rect().center());
+            shell.harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -800.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            shell.harness.step();
+        }
+        let visible: Vec<String> = shell
+            .harness
+            .query_all_by_label_contains("Artist - Track ")
+            .filter_map(|node| node.value())
+            .collect();
+        let any_track: Vec<String> = shell
+            .harness
+            .query_all_by_label_contains("Track")
+            .filter_map(|node| node.value())
+            .collect();
+        let count_line = shell
+            .harness
+            .query(By::new().label("(120 tracks)"))
+            .is_some();
+        assert!(
+            shell.harness.query(By::new().label("Artist - Track 119")).is_some(),
+            "the scroll reached the tail; visible rows: {visible:?}; any Track nodes: {any_track:?}; \
+             count line on screen: {count_line}"
+        );
+
+        let windows: Vec<_> = mock
+            .lock()
+            .unwrap()
+            .custom_page_calls()
+            .into_iter()
+            .filter(|(_, _, _, limit)| *limit > 0)
+            .map(|(_, _, offset, limit)| (offset, limit))
+            .collect();
+        assert_eq!(
+            windows,
+            vec![(0, 50), (50, 50), (100, 50)],
+            "every window read exactly once, in order: no repeats and no gaps, which \
+             is only possible because the read's order is total"
+        );
+    }
+
+    /// Box 10: playback from a custom list queues EVERY matching Track in the
+    /// displayed order, not the window that happens to be loaded. The fixture's
+    /// list matches sixty Tracks — more than the projection's window — and the
+    /// header's whole-list menu is the surface; the batch is asserted through
+    /// the transport, in the order the (title-descending) listing displays.
+    #[test]
+    fn the_whole_list_menu_queues_every_matching_track_in_displayed_order() {
+        let sixty: Vec<String> = (0..60).map(|i| format!("Track {i:02}")).collect();
+        let titles: Vec<&str> = sixty.iter().map(String::as_str).collect();
+        let (mut shell, dir, _id, _store, transport) =
+            listing_store_shell_with(&titles, &all_matching_tree());
+        shell.harness.step();
+        open_custom_list(&mut shell);
+
+        // Display the listing title-descending, so "the displayed order" is a
+        // real reversal of the canonical one.
+        shell
+            .harness
+            .get_by_label("Sort order: Track No. \u{2191}")
+            .click();
+        for _ in 0..4 {
+            shell.harness.step();
+        }
+        shell.harness.get_by_label("Title Z\u{2013}A").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // Right-click the header. The name sits on the sidebar's row as well,
+        // so the listing's own node is found by geometry: right of the sidebar.
+        let heading = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the listing's own heading");
+        heading.click_secondary();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Shuffle").is_some(),
+            "the whole-list menu opened on the header"
+        );
+
+        let before = transport.recorded().len();
+        shell
+            .harness
+            .query_all_by_label("Play")
+            .last()
+            .expect("the menu's Play, the last node — popups append after the window")
+            .click();
+        shell.harness.step();
+
+        let first = TrackId(
+            dir.path()
+                .join("59.mp3")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let rest: Vec<TrackId> = (0..59)
+            .rev()
+            .map(|i| {
+                TrackId(
+                    dir.path()
+                        .join(format!("{i:02}.mp3"))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            &transport.recorded()[before..],
+            &[TransportIntent::PlayMany(first, rest)],
+            "one batch: every matching Track — sixty of them, not the loaded \
+             window — in the order the listing displays (title-descending)"
+        );
+    }
+
+    /// Stories 58, 59 and box 6: an Unreadable Rule makes the list match
+    /// nothing AND says so — both facts on screen, the shared empty state and
+    /// the reason line. The row cannot be produced by any in-repo write (the
+    /// store's CHECK list rejects it); the double holds what the read would
+    /// hand back, which is D9's `unreadable` side list.
+    #[test]
+    fn an_unreadable_rule_shows_the_empty_state_and_the_reason() {
+        use riff_backend::app::store::UnreadableRule;
+
+        let id = PlaylistId("spl-unreadable-1".to_string());
+        let tree = one_rule_tree().with_unreadable(vec![UnreadableRule::new(
+            vec![],
+            1,
+            "mystery_field".to_string(),
+            "is".to_string(),
+            false,
+            Some("x".to_string()),
+        )]);
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-unreadable-1", "Old list")],
+            smart_playlist_trees: std::collections::HashMap::from([(id, tree)]),
+            custom_page: vec![track("00.mp3", "Alpha")],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Old list").click();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        assert!(
+            shell
+                .harness
+                .query_by_label("This playlist is empty")
+                .is_some(),
+            "the list matches nothing, and the shared empty state says so"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("riff cannot read")
+                .next()
+                .is_some(),
+            "and the reason names the Unreadable Rule beside it — two facts, not one"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_none(),
+            "the listing never quietly shows everything instead (story 59)"
+        );
+        assert!(
+            mock.lock().unwrap().custom_page_calls().is_empty(),
+            "D13: an unreadable tree issues NO query at all"
+        );
+    }
+
+    /// Box 7 / story 74: a list the store cannot compute shows the REASON on
+    /// the listing — the same string the editor's count line gets from the same
+    /// read (one failure, two honest surfaces) — and neither the empty message
+    /// nor a "0 tracks" count, which are different answers about a different
+    /// situation.
+    #[test]
+    fn a_list_that_cannot_be_computed_shows_the_reason_not_an_empty_listing() {
+        use riff_backend::app::state::TrackSort;
+        use riff_backend::app::store::StoreGeneration;
+        use riff_backend::app::views::SessionViews;
+
+        let id = PlaylistId("spl-broken-1".to_string());
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-broken-1", "Broken list")],
+            smart_playlist_trees: std::collections::HashMap::from([(id.clone(), one_rule_tree())]),
+            custom_page: vec![track("00.mp3", "Alpha")],
+            failing: vec![
+                FailingQuery::CustomSmartPlaylistCount,
+                FailingQuery::CustomSmartPlaylistWindow,
+            ],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Broken list").click();
+        for _ in 0..3 {
+            shell.harness.step();
+        }
+
+        // The same reason, asked the way the editor's count line asks it: the
+        // reason channel's own string, over the same mock.
+        let mut views = SessionViews::new(
+            Box::new(SharedQueryStore(Arc::clone(&mock))),
+            Box::new(MockPlaylistStore::default()),
+            StoreGeneration::new(),
+            StoreGeneration::new(),
+        );
+        let reason = views
+            .custom_list_count(&id, TrackSort::default(), None)
+            .expect_err("the failing read answers through the reason channel")
+            .reason;
+
+        assert!(
+            shell.harness.query_by_label(&reason).is_some(),
+            "the listing shows exactly the reason the seam carries: {reason}"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("This playlist is empty")
+                .is_none(),
+            "'empty' and 'cannot tell' are different answers, and only one is a page"
+        );
+        assert!(
+            shell.harness.query_by_label("(0 tracks)").is_none(),
+            "a list riff cannot compute is never rendered as '0 tracks'"
+        );
+    }
+
+    /// Box 8: the six Built-in lists' listings are unchanged — their header
+    /// copy and their rows still render through the untouched path while a
+    /// Custom list exists beside them.
+    #[test]
+    fn the_built_in_listings_are_unchanged() {
+        use riff_backend::domain::SmartPlaylistKind;
+
+        let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
+            smart: vec![track("s.mp3", "Sunrise")],
+            smart_list_counts: vec![(SmartPlaylistKind::RecentlyAdded, 1)],
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Recently Added (1)").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label("(1 tracks, read-only)")
+                .is_some(),
+            "the Built-in header keeps its read-only copy"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Sunrise"))
+                .is_some(),
+            "and its own rows, through its own whole-list read"
+        );
+    }
 }
 
 // --- Context menus: shared item conventions and typed intents (issue 15) -----

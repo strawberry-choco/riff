@@ -13,8 +13,8 @@ use std::time::SystemTime;
 use crate::errors::StoreError;
 use crate::playlist::PlaylistId;
 use crate::store::{
-    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page, RuleTree,
-    SmartPlaylistTree, SortDirection, TrackListOrder,
+    CustomSmartPlaylist, FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
+    Page, RuleTree, SmartPlaylistTree, SortDirection, TrackListOrder,
 };
 use crate::track::{
     Album, Artist, GenreCount, METADATA_VERSION, SmartPlaylistKind, Track, TrackId,
@@ -350,6 +350,10 @@ impl LibraryQueryStore for StubLibraryQueryStore {
 
     fn smart_playlist_tree(&self, _id: &PlaylistId) -> Answer<Option<SmartPlaylistTree>> {
         self.answer(|| Ok(None))
+    }
+
+    fn custom_smart_playlists(&self) -> Answer<Vec<CustomSmartPlaylist>> {
+        self.answer(|| Ok(Vec::new()))
     }
 }
 

@@ -53,8 +53,8 @@ use crate::app::projection::{
 pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
 use crate::app::state::TrackSort;
 use crate::app::store::{
-    LibraryCounts, LibraryQueryStore, PlaylistStore, SmartPlaylistTree, SortDirection,
-    StoreGeneration, TrackListOrder,
+    CustomSmartPlaylist, LibraryCounts, LibraryQueryStore, PlaylistStore, SmartPlaylistTree,
+    SortDirection, StoreGeneration, TrackListOrder,
 };
 use crate::domain::{
     Album, Artist, GenreCount, MatchableField, Playlist, PlaylistId, SmartPlaylistKind, Track,
@@ -1014,6 +1014,26 @@ impl SessionViews {
                     field.stored_id()
                 )
             },
+            Vec::new,
+        )
+    }
+
+    // --- Custom Smart Playlists --------------------------------------------------
+
+    /// Every Custom Smart Playlist the listener has saved — id, name and
+    /// creation order — which is the D14 enumeration read (ticket 15's
+    /// Settings page lists them, ticket 12's sidebar rows wear them).
+    ///
+    /// Deliberately uncached at this seam: the read answers the *which lists
+    /// exist* question only (no Tracks, no Rule tree, no counts), the surfaces
+    /// that ask are the Settings pane and the sidebar section rather than a
+    /// paged listing, and a new projection would need the generation story
+    /// ticket 11's window cache owns. On a store error the list answers empty
+    /// behind a `tracing::warn!`, like every other degraded read.
+    pub fn custom_smart_playlists(&mut self) -> Vec<CustomSmartPlaylist> {
+        degrade(
+            self.queries.custom_smart_playlists(),
+            || "Failed to enumerate the Custom Smart Playlists from the store".to_string(),
             Vec::new,
         )
     }

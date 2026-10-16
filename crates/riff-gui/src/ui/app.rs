@@ -355,6 +355,12 @@ pub struct RiffApp {
     /// The section the Settings modal's left nav currently shows (Issue 11).
     /// Opens on Library, the pane the Library settings rewire builds on.
     pub(crate) settings_section: SettingsSection,
+    /// The Smart Playlists page's one editor draft (ticket 15): the list being
+    /// written, its typed name and its Rule rows. Frontend-local like
+    /// [`Self::settings_section`] — nothing here is persisted, which is what
+    /// keeps "a Custom Smart Playlist reaches the sidebar only at Save" true.
+    /// One owner-held optional draft, the inline tag editor's shape.
+    pub(crate) smart_playlists_editor: crate::ui::smart_playlists_page::SmartPlaylistsEditor,
     /// The structured feedback board the titlebar paints from (issue 11):
     /// independent persistent slots per source so a scan line cannot erase a
     /// playback error or a Tag Edit outcome, carrying severity, source, and any
@@ -495,6 +501,8 @@ impl RiffApp {
             },
             icons: riff_gui_theme::icons::IconCache::new(),
             settings_section: SettingsSection::Library,
+            smart_playlists_editor: crate::ui::smart_playlists_page::SmartPlaylistsEditor::default(
+            ),
             feedback: crate::ui::feedback::FeedbackBoard::default(),
             #[cfg(target_os = "linux")]
             settings_text_input: String::new(),
@@ -1047,6 +1055,8 @@ impl RiffApp {
                 playlist_create_error: &mut self.playlist_create_error,
                 playlist_rename_error: &mut self.playlist_rename_error,
                 playback_live: &self.playback,
+                settings_section: &mut self.settings_section,
+                smart_playlists_editor: &mut self.smart_playlists_editor,
                 #[cfg(target_os = "linux")]
                 settings_show_input: &mut self.settings_show_input,
                 #[cfg(target_os = "linux")]
@@ -2976,6 +2986,29 @@ impl RiffApp {
                     report.push(SidebarAction::ToggleSmartListsCollapsed);
                 }
                 response.on_hover_text(label);
+                // The section's `+` (ticket 15): the slot immediately left of
+                // the chevron, the same 24 px grid the Playlists header's `+`
+                // is placed on. It is a route, not a write — pressing it opens
+                // the Smart Playlists page on a new, empty, unsaved draft, so
+                // unlike the other two `+` controls nothing it does survives
+                // the frame at the store, and no row appears in this section
+                // until ticket 18's Save.
+                let plus_rect = egui::Rect::from_center_size(
+                    egui::pos2(ui.max_rect().right() - 12.0 - 28.0, ui.cursor().center().y),
+                    egui::vec2(24.0, 24.0),
+                );
+                if riff_gui_components::ghost_icon_button::ghost_icon_button(
+                    ui,
+                    &mut self.icons,
+                    &palette,
+                    plus_rect,
+                    ui.id().with("new_smart_playlist"),
+                    Icon::Plus,
+                    "New Smart Playlist",
+                    false,
+                ) {
+                    report.push(SidebarAction::NewSmartPlaylist);
+                }
             });
         });
     }

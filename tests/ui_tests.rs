@@ -5524,10 +5524,11 @@ mod tests {
 
     // --- Sectioned Settings modal + left nav (Issue 11) ------------------------
     //
-    // Settings becomes a sectioned modal with a left nav (Library, Playback,
-    // Appearance, Advanced, About) instead of one long scrolling stage. The
-    // seams: the pure `SettingsSection` type, and the headless renderer
-    // reporting `SettingsAction`s — the same shape the former stage used.
+    // Settings becomes a sectioned modal with a left nav (Library, Smart
+    // Playlists, Playback, Appearance, Advanced, About) instead of one long
+    // scrolling stage. The seams: the pure `SettingsSection` type, and the
+    // headless renderer reporting `SettingsAction`s — the same shape the
+    // former stage used.
 
     #[test]
     fn test_settings_sections_list_the_nav_entries_in_mockup_order() {
@@ -5536,7 +5537,14 @@ mod tests {
         let labels: Vec<&str> = SettingsSection::ALL.iter().map(|s| s.label()).collect();
         assert_eq!(
             labels,
-            vec!["Library", "Playback", "Appearance", "Advanced", "About",],
+            vec![
+                "Library",
+                "Smart Playlists",
+                "Playback",
+                "Appearance",
+                "Advanced",
+                "About",
+            ],
             "the left nav lists exactly the implemented sections in order"
         );
     }
@@ -5557,15 +5565,22 @@ mod tests {
         size: egui::Vec2,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
         use riff_gui::ui::settings::show_settings_modal;
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let mut editor = SmartPlaylistsEditor::default();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, actions: &mut Vec<SettingsAction>| {
                     actions.extend(show_settings_modal(
-                        ui, &mut cache, &palette, content, current,
+                        ui,
+                        &mut cache,
+                        &palette,
+                        content,
+                        current,
+                        &mut editor,
                     ));
                 },
                 Vec::new(),
@@ -6500,6 +6515,7 @@ mod tests {
             let content = sample_content();
             let palette = Palette::dark();
             let mut cache = icons::IconCache::new();
+            let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
             let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
                 egui_kittest::Harness::builder()
                     .with_size(egui::vec2(width, SHORT))
@@ -6512,6 +6528,7 @@ mod tests {
                                 &palette,
                                 &content,
                                 SettingsSection::Library,
+                                &mut editor,
                             ));
                         },
                         Vec::new(),
@@ -6800,6 +6817,18 @@ mod tests {
                 .contains(&SettingsAction::SelectSection(SettingsSection::Playback)),
             "every nav item is clickable"
         );
+
+        // The Smart Playlists entry (ticket 15) is a nav item like the rest:
+        // the label is the handle, so a golden can drive the pane by clicking
+        // it rather than by seeding a frontend-local field.
+        harness.get_by_label("Smart Playlists").click();
+        harness.run();
+        assert!(
+            harness.state().contains(&SettingsAction::SelectSection(
+                SettingsSection::SmartPlaylists
+            )),
+            "the Smart Playlists entry reports its section like the rest"
+        );
     }
 
     #[test]
@@ -6834,6 +6863,22 @@ mod tests {
             harness.query_by_label("Add Library").is_none(),
             "the Library card must not render in the Advanced pane"
         );
+
+        // Smart Playlists: the editor page replaces the library controls —
+        // its own New button and its one blank Rule row's Add control.
+        {
+            let section = SettingsSection::SmartPlaylists;
+            let mut harness = settings_modal_harness(&content, section);
+            harness.run();
+            assert!(
+                harness.query_by_label("Add rule").is_some(),
+                "the Smart Playlists pane shows the editor's own controls"
+            );
+            assert!(
+                harness.query_by_label("Add Library").is_none(),
+                "the Library card must not render in the Smart Playlists pane"
+            );
+        }
 
         // About has no existing content and shows a clear placeholder.
         {
@@ -6898,6 +6943,272 @@ mod tests {
                 .state()
                 .contains(&SettingsAction::SelectSection(SettingsSection::About)),
             "the last nav item is keyboard-activatable"
+        );
+    }
+
+    // --- Smart Playlists page (ticket 15) --------------------------------------
+    //
+    // The pane's own seam: `show_settings_modal` at the Smart Playlists
+    // section, over a `SettingsContent` with staged lists, with the editor
+    // draft held as the harness state — the same one-owner draft `RiffApp`
+    // gives it. Every gesture is asserted as the typed `SettingsAction` it
+    // reports (selection, a new draft); the name typed while writing is
+    // asserted as the buffer it is, because that is what ticket 18's Save
+    // will read (the inline tag editor's own shape).
+
+    /// One saved-list row for the pane's left column, as the D14 read
+    /// answers it. The id comes in named because `PlaylistId::new` mints a
+    /// fresh time-suffixed id, and a test comparing intents must compare
+    /// against the exact one it staged.
+    fn custom_list(id: &PlaylistId, name: &str) -> CustomSmartPlaylist {
+        CustomSmartPlaylist {
+            id: id.clone(),
+            name: name.to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// The sectioned modal on the Smart Playlists section, with the editor
+    /// draft kept across frames so typing lands in one draft.
+    fn smart_playlists_harness_sized(
+        content: &SettingsContent,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<
+        '_,
+        (
+            riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+            Vec<SettingsAction>,
+        ),
+    > {
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
+                    let (editor, actions) = state;
+                    actions.extend(show_settings_modal(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        content,
+                        SettingsSection::SmartPlaylists,
+                        editor,
+                    ));
+                },
+                (SmartPlaylistsEditor::default(), Vec::new()),
+            )
+    }
+
+    /// The left column lists every saved Custom Smart Playlist the D14 read
+    /// answers, by name — the read runs through `SettingsContent`, exactly
+    /// how the app fills it.
+    #[test]
+    fn test_smart_playlists_pane_lists_every_saved_list() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = SettingsContent {
+            custom_smart_playlists: vec![
+                custom_list(&PlaylistId::new("spl-morning-1"), "Morning drive"),
+                custom_list(&PlaylistId::new("spl-late-night-2"), "Late night jazz"),
+            ],
+            ..sample_content()
+        };
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Morning drive").is_some(),
+            "the first saved list is a row in the left column"
+        );
+        assert!(
+            harness.query_by_label("Late night jazz").is_some(),
+            "the second saved list is a row in the left column"
+        );
+        assert!(
+            harness.query_by_label("No smart playlists yet").is_none(),
+            "a page with lists does not show the empty state"
+        );
+    }
+
+    /// Picking a saved list is a typed intent — `SelectSmartPlaylist` carries
+    /// the D14 id, and loading the draft is the app's apply step, not the
+    /// pane's paint.
+    #[test]
+    fn test_a_saved_list_row_reports_select_smart_playlist() {
+        use egui_kittest::kittest::Queryable;
+
+        let id = PlaylistId::new("spl-late-night-2");
+        let content = SettingsContent {
+            custom_smart_playlists: vec![custom_list(&id, "Late night jazz")],
+            ..sample_content()
+        };
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        harness.get_by_label("Late night jazz").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SelectSmartPlaylist(id.clone())),
+            "clicking a saved list reports its exact D14 id as the list to edit"
+        );
+    }
+
+    /// The page's own "New smart playlist" button reports the same intent the
+    /// sidebar `+` does — the route for the listener who never finds it.
+    ///
+    /// Role-scoped on purpose: the editor column's title bears the same
+    /// words, so only the control is the handle.
+    #[test]
+    fn test_the_pages_own_button_reports_new_smart_playlist() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+            .click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::NewSmartPlaylist),
+            "the page's own button reports the new-draft intent"
+        );
+    }
+
+    /// The name typed while writing lands in the draft the Save will read —
+    /// a buffer edit, not an intent (the inline tag editor's own shape), and
+    /// the reason this type's `name` is a `String` on the draft.
+    #[test]
+    fn test_typing_the_name_edits_the_draft_buffer() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("Late night jazz");
+        harness.run();
+        assert_eq!(
+            harness.state().0.name,
+            "Late night jazz",
+            "the name typed is the draft's own buffer, ready for Save"
+        );
+    }
+
+    /// With nothing saved the page states its emptiness and still offers the
+    /// way to make the first list — the empty state is never a dead end.
+    #[test]
+    fn test_the_empty_pane_offers_the_route_to_the_first_list() {
+        use egui_kittest::kittest::Queryable;
+
+        let content = sample_content();
+        assert!(
+            content.custom_smart_playlists.is_empty(),
+            "the fixture starts from no saved lists"
+        );
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        assert!(
+            harness.query_by_label("No smart playlists yet").is_some(),
+            "an empty page says there are none yet"
+        );
+        let new_button =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist");
+        assert!(
+            new_button.rect().width() > 0.0 && new_button.rect().height() > 0.0,
+            "the route the empty state names is a real hit area, not a painted word"
+        );
+        new_button.click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::NewSmartPlaylist),
+            "the empty state's route reports the same intent as everywhere else"
+        );
+    }
+
+    /// The pane branches with the window exactly as the Library pane does:
+    /// two columns at a wide size — the listener's lists left, the editor
+    /// right — and one stacked column below the shared
+    /// `settings_pane_columns` boundary.
+    ///
+    /// Measured through the query tree at both widths, the same geometry
+    /// probe the Library pane's own split test uses: the pane is laid out
+    /// unclipped at a probe height tall enough that no scroll position can
+    /// move a probe between reads.
+    #[test]
+    fn test_the_smart_playlists_pane_splits_wide_and_stacks_narrow() {
+        use egui_kittest::kittest::Queryable;
+
+        /// Tall enough that the whole pane lays out unclipped at either
+        /// width, so every probed widget is visible in the first frame.
+        const PANE_PROBE_H: f32 = 1600.0;
+
+        let render = |width: f32| {
+            let content = sample_content();
+            let mut harness =
+                smart_playlists_harness_sized(&content, egui::vec2(width, PANE_PROBE_H));
+            harness.run();
+            let new_button = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .rect();
+            let name = harness.get_by_role(egui::accesskit::Role::TextInput).rect();
+            let save = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+                .rect();
+            (new_button, name, save)
+        };
+
+        // Wide: the two-column branch. The left column's button sits entirely
+        // left of the right column's name field and Save control.
+        let (new_button, name, save) = render(1280.0);
+        assert!(
+            new_button.right() < name.left(),
+            "wide: the name field must be in the right column, entirely right \
+             of the left column's button: {} vs {}",
+            new_button.right(),
+            name.left()
+        );
+        assert!(
+            new_button.right() < save.left(),
+            "wide: Save reads in the right column too"
+        );
+
+        // Narrow: below the boundary the editor stacks under the lists — the
+        // name field and Save move below the left column instead of beside
+        // it.
+        let (new_button, name, save) = render(700.0);
+        assert!(
+            name.top() >= new_button.bottom(),
+            "narrow: the editor must stack below the left column, not sit \
+             beside it: {} vs {}",
+            name.top(),
+            new_button.bottom()
+        );
+        assert!(
+            save.top() > name.top(),
+            "narrow: Save still reads inside the editor, under the name field"
         );
     }
 
@@ -10783,12 +11094,15 @@ mod browser_column_ui_tests {
             .build_ui_state(
                 |ui, ()| {
                     let mut cache = riff_gui_theme::icons::IconCache::new();
+                    let mut editor =
+                        riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
                     show_settings_modal(
                         ui,
                         &mut cache,
                         &palette,
                         &content,
                         SettingsSection::Library,
+                        &mut editor,
                     );
                 },
                 (),
@@ -14250,13 +14564,13 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{By, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
     use riff_backend::app::store::{
-        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
+        CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
     };
     use riff_backend::app::transport::Transport;
     use riff_backend::app::views::SessionViews;
@@ -18250,6 +18564,228 @@ mod whole_frame_tests {
                 "a settled, closed Folders tree must ask the frame loop for nothing"
             );
         }
+    }
+
+    // --- Ticket 15: the Smart Playlists page is reachable and reachable back -----
+    //
+    // Both routes into the page are measured in a composed frame with the
+    // pane's real hit areas: a control that paints but cannot be clicked is
+    // this repo's twice-recorded trap, so every assertion here reads what the
+    // click DID — the view switch, the section's pane on screen — not that a
+    // label exists.
+
+    /// The SMART LISTS header's `+` (ticket 15): a route, not a write. It
+    /// switches into Settings, SELECTS the Smart Playlists section (its pane
+    /// draws on the same frame — the sidebar slot applies before the stage
+    /// paints), opens a new empty draft, and writes nothing anywhere: the
+    /// store gains no Custom Smart Playlist, and no settings write commits.
+    #[test]
+    fn test_the_smart_lists_plus_opens_the_page_on_a_new_draft_and_writes_nothing() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+
+        // Before: the sidebar's built-ins are all there (four visible; the
+        // two advanced-gated rows appear under Advanced mode).
+        let built_ins = [
+            "Recently Added",
+            "Recently Played",
+            "Most Played",
+            "Favorites",
+        ];
+        for label in built_ins {
+            assert!(
+                shell
+                    .harness
+                    .query_all_by_label_contains(label)
+                    .next()
+                    .is_some(),
+                "the {label} built-in row is in the sidebar before the click"
+            );
+        }
+
+        shell.harness.get_by_label("New Smart Playlist").click();
+        // The click's frame applies the sidebar slot; the next frames settle
+        // the stage the slot re-planned.
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Settings,
+            "the + switches the view into Settings"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .is_some(),
+            "the Smart Playlists pane — not just Settings — is on screen"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("No smart playlists yet")
+                .is_some(),
+            "with nothing saved the page opens on its empty state"
+        );
+
+        // The one `+` in riff that writes nothing.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert!(
+            lists.is_empty(),
+            "the + stores no Custom Smart Playlist: a list appears only at Save"
+        );
+        assert!(
+            shell.settings_calls.lock().unwrap().is_empty(),
+            "the + commits no settings write either"
+        );
+
+        // The built-ins are untouched — same rows, same sidebar.
+        for label in built_ins {
+            assert!(
+                shell
+                    .harness
+                    .query_all_by_label_contains(label)
+                    .next()
+                    .is_some(),
+                "the {label} built-in row survives the + unchanged"
+            );
+        }
+    }
+
+    /// The nav entry (ticket 15) selects the section by clicking its label in
+    /// a composed frame — the property that makes the pane golden-testable.
+    /// The section is frontend-local, so the click is the only honest route
+    /// in, and the assertion reads the pane's own controls rather than a
+    /// seeded field.
+    #[test]
+    fn test_the_smart_playlists_nav_entry_selects_the_page_from_a_composed_frame() {
+        let mut shell = mock_shell();
+        // Opening Settings is session state; the section still has to be
+        // reached by the gesture.
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
+                .is_some(),
+            "the nav opens on the Library section"
+        );
+
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
+                .is_none(),
+            "the Library pane is gone — the click switched the section"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .is_some(),
+            "the Smart Playlists pane is drawn in the composed frame"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("No smart playlists yet")
+                .is_some(),
+            "its empty state is what the frame really shows"
+        );
+        assert!(
+            shell.settings_calls.lock().unwrap().is_empty(),
+            "which section was last selected stays frontend-local: no write"
+        );
+    }
+
+    /// The page's whole loop inside a composed frame: a saved list's row
+    /// loads its name into the editor draft (through the D14 read and the
+    /// ticket-11 tree read), and the page's own "New smart playlist" button
+    /// returns the editor to a new, empty draft — the same state the
+    /// sidebar `+` opens.
+    #[test]
+    fn test_selecting_a_list_loads_its_name_and_the_pages_button_starts_fresh() {
+        let id = PlaylistId::new("spl-late-night-2");
+        let mock = MockLibraryQueryStore {
+            custom_smart_playlists: vec![CustomSmartPlaylist {
+                id: id.clone(),
+                name: "Late night jazz".to_string(),
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            ..MockLibraryQueryStore::default()
+        };
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // Pick the saved list: the draft that was empty now wears its name.
+        // The value is scoped to the text input on purpose — the list's own
+        // sidebar-style row is a `Role::Label` node, whose accesskit value is
+        // its label text, so a bare value query matches two nodes here.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_some(),
+            "the name field shows the saved list's name after the click"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "the editor says it is editing, not creating"
+        );
+
+        // The page's own route back to a new draft.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_none(),
+            "the page's button clears the draft — a new, empty, unsaved list"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "New smart playlist")
+                .is_some(),
+            "the editor says it is creating again"
+        );
     }
 }
 

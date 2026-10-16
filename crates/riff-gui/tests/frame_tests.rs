@@ -48,7 +48,9 @@ use riff_gui::ui::frame::{
 use riff_gui::ui::now_playing::NowPlayingAction;
 use riff_gui::ui::playerbar::PlayerBarAction;
 use riff_gui::ui::scroll_memory::ScrollMemory;
+use riff_gui::ui::settings::SettingsSection;
 use riff_gui::ui::sidebar::PlaylistRowAction;
+use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
 use riff_gui_components::prompts::PromptOutcome;
 use riff_gui_theme::theme;
 use riff_persistence::test_support::StubLibraryQueryStore;
@@ -325,6 +327,12 @@ struct Harness {
     clear_cache_in_flight: bool,
     global_search_focus: bool,
     title_key: TitleKey,
+    /// The Settings modal's selected section: the sidebar's SMART LISTS `+`
+    /// writes it through the frame (ticket 15), so the harness holds it too.
+    settings_section: SettingsSection,
+    /// The Smart Playlists page's frontend-local draft, held for the same
+    /// reason: the `+` opens a new one through the frame.
+    smart_playlists_editor: SmartPlaylistsEditor,
     /// The app-wide quit intent, cleared: a headless frame has no tray to set
     /// it, and only the macOS native-close step reads it.
     #[cfg(target_os = "macos")]
@@ -420,6 +428,8 @@ impl Harness {
             clear_cache_in_flight: false,
             global_search_focus: false,
             title_key: TitleKey::Unset,
+            settings_section: SettingsSection::Library,
+            smart_playlists_editor: SmartPlaylistsEditor::default(),
             #[cfg(target_os = "macos")]
             quit_flag: std::sync::atomic::AtomicBool::new(false),
             #[cfg(target_os = "linux")]
@@ -478,6 +488,8 @@ impl Harness {
             playlist_create_error: &mut self.playlist_create_error,
             playlist_rename_error: &mut self.playlist_rename_error,
             playback_live: &self.playback_live,
+            settings_section: &mut self.settings_section,
+            smart_playlists_editor: &mut self.smart_playlists_editor,
             #[cfg(target_os = "linux")]
             settings_show_input: &mut self.settings_show_input,
             #[cfg(target_os = "linux")]

@@ -3292,6 +3292,17 @@ mod scan_service_tests {
             Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
+        fn custom_smart_playlist_page(
+            &self,
+            _tree: &riff_persistence::store::RuleTree,
+            _order: riff_persistence::store::TrackListOrder,
+            _needle: Option<&str>,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
+        }
+
         fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, StoreError> {
             Ok(Vec::new())
         }
@@ -5118,6 +5129,17 @@ mod tag_edit_service_tests {
             &self,
             _query: &str,
             _order: riff_persistence::store::TrackListOrder,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
+        }
+
+        fn custom_smart_playlist_page(
+            &self,
+            _tree: &riff_persistence::store::RuleTree,
+            _order: riff_persistence::store::TrackListOrder,
+            _needle: Option<&str>,
             _offset: usize,
             _limit: usize,
         ) -> Result<riff_persistence::store::Page<Track>, StoreError> {

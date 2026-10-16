@@ -420,7 +420,7 @@ pub use riff_infra::audio::{CpalAudioOutput, SymphoniaDecoder};
 pub use riff_infra::filesystem::{AudioFileScanner, FilesystemWatcher};
 pub use riff_infra::media::metadata_reader::parse_replaygain_gain;
 pub use riff_infra::media::{ImageCoverLoader, LoftyMetadataReader, LoftyMetadataWriter};
-pub use riff_persistence::store::ScanOptions;
+pub use riff_persistence::store::{RuleTree, ScanOptions};
 
 // Standard-library names referenced unqualified in some suites.
 pub use std::path::PathBuf;
@@ -1635,6 +1635,13 @@ pub mod mocks {
         GenresPage(SortDirection, usize, usize),
         ArtistsInGenrePage(String, SortDirection, usize, usize),
         ArtistAlbumsInGenrePage(String, String, SortDirection, usize, usize),
+        CustomSmartPlaylistPage(
+            riff_persistence::store::RuleTree,
+            riff_persistence::store::TrackListOrder,
+            Option<String>,
+            usize,
+            usize,
+        ),
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1683,6 +1690,8 @@ pub mod mocks {
         ArtistsInGenreCount,
         ArtistAlbumsInGenreWindow,
         ArtistAlbumsInGenreCount,
+        CustomSmartPlaylistWindow,
+        CustomSmartPlaylistCount,
     }
 
     /// Canned [`LibraryQueryStore`] fake standing in for the Application
@@ -2041,6 +2050,37 @@ pub mod mocks {
                 .cloned()
                 .collect();
             Ok(riff_persistence::store::Page::new(total, rows))
+        }
+
+        fn custom_smart_playlist_page(
+            &self,
+            tree: &riff_persistence::store::RuleTree,
+            order: riff_persistence::store::TrackListOrder,
+            needle: Option<&str>,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.record(LibraryQueryCall::CustomSmartPlaylistPage(
+                tree.clone(),
+                order,
+                needle.map(str::to_string),
+                offset,
+                limit,
+            ));
+            if self.page_fails(
+                FailingQuery::CustomSmartPlaylistWindow,
+                FailingQuery::CustomSmartPlaylistCount,
+                limit,
+            ) {
+                return Err(StoreError::InvalidOperation(
+                    "custom smart playlist boom".to_string(),
+                ));
+            }
+            // Canned rows belong to whichever suite needs them: the mock
+            // answers an empty Listing Page, which is all a port-contract
+            // test can ask of a fake that never compiles SQL. Matching
+            // behaviour is the store seam's proof, never this double's.
+            Ok(riff_persistence::store::Page::new(0, Vec::new()))
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
@@ -2569,6 +2609,20 @@ pub mod mocks {
                 .lock()
                 .unwrap()
                 .search_page(query, order, offset, limit)
+        }
+
+        fn custom_smart_playlist_page(
+            &self,
+            tree: &riff_persistence::store::RuleTree,
+            order: riff_persistence::store::TrackListOrder,
+            needle: Option<&str>,
+            offset: usize,
+            limit: usize,
+        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .custom_smart_playlist_page(tree, order, needle, offset, limit)
         }
 
         fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {

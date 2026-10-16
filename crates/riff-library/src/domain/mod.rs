@@ -3,7 +3,7 @@
 pub use riff_persistence::playlist::{Playlist, PlaylistId};
 pub use riff_persistence::store::{
     LOST_GEMS_THRESHOLD, LibraryMutationStore, LibraryQueryStore, PlaylistEntry, PlaylistStore,
-    ScalarSettings, Settings, StoreChanged, StoreGeneration, WatchState,
+    RuleTree, ScalarSettings, Settings, StoreChanged, StoreGeneration, WatchState,
 };
 pub use riff_persistence::track::{
     Album, Artist, CoverSource, GenreCount, SmartPlaylistKind, Track, TrackId, TrackMetadata,

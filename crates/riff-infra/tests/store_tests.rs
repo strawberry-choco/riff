@@ -7041,3 +7041,1088 @@ fn a_failed_mutation_reports_its_own_operation_context() {
     );
     assert!(changes_rx.is_empty(), "a failed mutation emits no notice");
 }
+// --- Application Store: Rule trees as SQL (ticket 09) ----------------------
+
+// The Custom Smart Playlist oracle: a seeded Library, the store's own answer
+// through the compiled predicate, and a Rust-only walk of the same tree that
+// must agree with it. `rules_reference`'s module doc states the one rule that
+// makes this arrangement worth anything — read it before unifying anything.
+
+use riff_persistence::rule::{Comparison, MatchableField};
+
+/// A row of the Rule corpus: a stored path plus every Matchable Field the path
+/// and its tags can carry. Every field is `None` / absent unless a test shape
+/// needs a value, so one row names only what it pins.
+#[derive(Default)]
+struct RulesRow {
+    /// The file name under `r:\rules\`; its extension is the `lossless` fact.
+    name: &'static str,
+    title: Option<&'static str>,
+    artist: Option<&'static str>,
+    album: Option<&'static str>,
+    album_artist: Option<&'static str>,
+    composer: Option<&'static str>,
+    comment: Option<&'static str>,
+    genre: Option<&'static str>,
+    year: Option<u32>,
+    /// Whole milliseconds — the unit a duration Rule holds. The corpus stores
+    /// no fractional millisecond, which is what makes the 1 ms = 1e6 ns
+    /// translation exact on both sides.
+    duration_millis: Option<u64>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    play_count: u32,
+    /// The favorite flag, seeded through the mutation port rather than the
+    /// scan — it is a user fact, not tag data.
+    favorite: bool,
+    /// A local civil `before` / `after` instant is what a history Rule holds,
+    /// so the corpus names its history dates in the same domain.
+    last_played: Option<CivilDateTime>,
+    date_added: Option<CivilDateTime>,
+    /// Days back from the read, for the `in_last` window. Kept apart from the
+    /// civil instants above because a window moves with the clock and a stored
+    /// boundary does not.
+    last_played_days_ago: Option<u64>,
+    date_added_days_ago: Option<u64>,
+}
+
+/// The civil instant a corpus row names, spelled as the parts a Rule stores.
+fn civil(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> CivilDateTime {
+    CivilDateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    }
+}
+
+/// The Rule corpus. One comment per row naming what it pins, and every shape
+/// the spec's fixture minimum asks for.
+fn rules_fixtures() -> Vec<RulesRow> {
+    vec![
+        // The `;`-separated genre tag, and the local-midnight pair's earlier
+        // half: last played 23:30 on the 1st, added 09:00 on the 1st.
+        RulesRow {
+            name: "one.flac",
+            title: Some("Alpha"),
+            artist: Some("Known Artist"),
+            album: Some("First"),
+            album_artist: Some("AA"),
+            composer: Some("Bach"),
+            comment: Some("liner notes"),
+            genre: Some("Art Rock;Progressive Rock"),
+            year: Some(1975),
+            duration_millis: Some(300_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 3,
+            favorite: true,
+            last_played: Some(civil(2024, 3, 1, 23, 30, 0)),
+            date_added: Some(civil(2024, 6, 1, 9, 0, 0)),
+            ..RulesRow::default()
+        },
+        // The same genre tag with a TAB padding the second segment: the genres
+        // view trims it and shows "Progressive Rock"; a Rule does not, so it
+        // matches nothing. The documented disagreement, and the only `.wav`.
+        // Also the later half of both local-midnight pairs.
+        RulesRow {
+            name: "two.wav",
+            title: Some("Beta"),
+            artist: Some("Known Artist"),
+            album: Some("First"),
+            album_artist: Some("AA"),
+            composer: Some("Vivaldi"),
+            comment: Some("liner notes"),
+            genre: Some("Art Rock;\tProgressive Rock"),
+            year: Some(1990),
+            // Exactly one hour: the round-millisecond threshold this row and
+            // the next one split. `> 3_600_000` must leave this out.
+            duration_millis: Some(3_600_000),
+            sample_rate: Some(48_000),
+            channels: Some(5),
+            last_played: Some(civil(2024, 3, 2, 0, 30, 0)),
+            date_added: Some(civil(2024, 6, 2, 9, 0, 0)),
+            ..RulesRow::default()
+        },
+        // One millisecond over an hour — the other half of the round threshold.
+        // Its genre is the EMPTY STRING, which `is missing` must answer the
+        // same way as the NULL genre on the next row.
+        RulesRow {
+            name: "three.mp3",
+            title: Some("Gamma"),
+            artist: Some("Known Artist"),
+            album: Some("Second"),
+            album_artist: Some("BB"),
+            genre: Some(""),
+            year: Some(2001),
+            duration_millis: Some(3_600_001),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 7,
+            favorite: true,
+            date_added_days_ago: Some(2),
+            ..RulesRow::default()
+        },
+        // `.m4a` — pinned NOT lossless (an ALAC in an m4a container reports as
+        // lossy), a NULL genre beside the empty-string one above, an absent
+        // artist tag, no duration, and a date_added with no last_played.
+        RulesRow {
+            name: "four.m4a",
+            title: Some("Delta"),
+            album: Some("Second"),
+            album_artist: Some("BB"),
+            composer: Some("Bach"),
+            year: Some(1975),
+            sample_rate: Some(96_000),
+            channels: Some(1),
+            last_played: Some(civil(2024, 1, 5, 12, 0, 0)),
+            date_added_days_ago: Some(60),
+            ..RulesRow::default()
+        },
+        // An UPPERCASE `.FLAC` — lossless is a case-insensitive suffix match on
+        // the stored path. Carries the only literally-tagged `Unknown Artist`
+        // beside the absent-artist rows above, and a `date_added` far enough
+        // back to fall outside every window the corpus asks about.
+        RulesRow {
+            name: "five.FLAC",
+            title: Some("Echo"),
+            artist: Some("Unknown Artist"),
+            album: Some("Third"),
+            album_artist: Some("CC"),
+            comment: Some("notes"),
+            genre: Some("Ambient"),
+            year: Some(1988),
+            duration_millis: Some(120_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 1,
+            date_added_days_ago: Some(400),
+            ..RulesRow::default()
+        },
+        // A file with NO extension at all: not lossless, and absent year,
+        // duration, sample rate, channels and `date_added` — the row that
+        // answers `is missing` for every numeric and date field.
+        RulesRow {
+            name: "six",
+            title: Some("Foxtrot"),
+            artist: Some("Known Artist"),
+            album: Some("Third"),
+            album_artist: Some("CC"),
+            comment: Some("notes"),
+            genre: Some("Ambient"),
+            ..RulesRow::default()
+        },
+        // Absent artist tag again, with a title, so `artist is not "Unknown
+        // Artist"` has to include it — the promise a bare `NOT` in SQL breaks.
+        RulesRow {
+            name: "seven.mp3",
+            title: Some("Golf"),
+            album: Some("Fourth"),
+            album_artist: Some("AA"),
+            genre: Some("Electronic"),
+            year: Some(1975),
+            duration_millis: Some(500_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 3,
+            favorite: true,
+            date_added_days_ago: Some(20),
+            ..RulesRow::default()
+        },
+        // The literal `Unknown Artist` tag, pickable; the row above only looks
+        // like it because of the display fallback, and a Rule reads the tag.
+        RulesRow {
+            name: "eight.mp3",
+            title: Some("Hotel"),
+            artist: Some("Unknown Artist"),
+            album: Some("Fourth"),
+            album_artist: Some("AA"),
+            genre: Some("Electronic"),
+            year: Some(2010),
+            duration_millis: Some(500_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            date_added_days_ago: Some(20),
+            ..RulesRow::default()
+        },
+        // A non-Latin tag in UPPERCASE, and the same tag in lowercase two rows
+        // down: SQLite's `lower()` folds ASCII only (ADR 0020), so `genre is
+        // "Électronique"` picks the lowercase row and not this one. The
+        // limitation, pinned.
+        RulesRow {
+            name: "nine.mp3",
+            title: Some("India"),
+            artist: Some("Known Artist"),
+            album: Some("Fifth"),
+            album_artist: Some("DD"),
+            genre: Some("ÉLECTRONIQUE"),
+            year: Some(1999),
+            sample_rate: Some(22_050),
+            channels: Some(1),
+            play_count: 2,
+            date_added_days_ago: Some(20),
+            ..RulesRow::default()
+        },
+        // The lowercase half of the non-Latin pair.
+        RulesRow {
+            name: "ten.mp3",
+            title: Some("Juliet"),
+            artist: Some("Known Artist"),
+            album: Some("Fifth"),
+            album_artist: Some("DD"),
+            genre: Some("électronique"),
+            year: Some(1999),
+            sample_rate: Some(22_050),
+            channels: Some(1),
+            date_added_days_ago: Some(20),
+            ..RulesRow::default()
+        },
+        // Every tag absent, no history, no plays, not a favorite: the row that
+        // makes "is not" and "is missing" mean something on all sixteen fields.
+        RulesRow {
+            name: "eleven.mp3",
+            ..RulesRow::default()
+        },
+        // A title and a comment holding a quote, a `%` and a `_`: needles for
+        // those must match literally, with no wildcard and no escape in sight.
+        RulesRow {
+            name: "quote.mp3",
+            title: Some("He said \"yes\" 100%"),
+            artist: Some("Known Artist"),
+            album: Some("Sixth"),
+            album_artist: Some("EE"),
+            comment: Some("50%_off"),
+            genre: Some("Trance"),
+            year: Some(2020),
+            duration_millis: Some(61_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 3,
+            date_added_days_ago: Some(3),
+            ..RulesRow::default()
+        },
+        // The needle trap's other half: `%_` in a title, which a `LIKE` would
+        // read as "anything, then any one character".
+        RulesRow {
+            name: "oddball.mp3",
+            title: Some("100%_done"),
+            artist: Some("Known Artist"),
+            album: Some("Sixth"),
+            album_artist: Some("EE"),
+            genre: Some("Trance"),
+            year: Some(2020),
+            duration_millis: Some(61_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            favorite: true,
+            date_added_days_ago: Some(3),
+            ..RulesRow::default()
+        },
+        // Played and added two days ago: inside every short window, outside
+        // none of the boundaries.
+        RulesRow {
+            name: "recent.mp3",
+            title: Some("November"),
+            artist: Some("Known Artist"),
+            album: Some("Seventh"),
+            album_artist: Some("FF"),
+            genre: Some("Ambient"),
+            year: Some(2024),
+            duration_millis: Some(180_000),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            play_count: 1,
+            last_played_days_ago: Some(2),
+            date_added_days_ago: Some(1),
+            ..RulesRow::default()
+        },
+        // Played 400 days ago and added 500 days ago: the long-window tail.
+        RulesRow {
+            name: "aged.mp3",
+            title: Some("Oscar"),
+            artist: Some("Known Artist"),
+            album: Some("Seventh"),
+            album_artist: Some("FF"),
+            genre: Some("Ambient"),
+            year: Some(2019),
+            duration_millis: Some(180_000),
+            sample_rate: Some(44_100),
+            channels: Some(1),
+            play_count: 12,
+            last_played_days_ago: Some(400),
+            date_added_days_ago: Some(500),
+            ..RulesRow::default()
+        },
+    ]
+}
+
+/// The store's signed UTC epoch-nanosecond encoding, restated for seeding (the
+/// adapter's own copy is crate-private, and the corpus names its history in
+/// `SystemTime`s like every other fixture does).
+fn signed_nanos(time: SystemTime) -> i64 {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(forward) => i64::try_from(forward.as_nanos()).unwrap_or(i64::MAX),
+        Err(back) => -i64::try_from(back.duration().as_nanos()).unwrap_or(i64::MAX),
+    }
+}
+
+/// Days back from `now`, at the same hour the corpus names, so a window's
+/// margin from its boundary is whole days rather than a few seconds.
+fn days_ago(now: SystemTime, days: u64) -> SystemTime {
+    now - Duration::from_secs(days * 86_400)
+}
+
+/// The machine's own UTC offset in seconds, read from the same clock the store
+/// stamps history with. `strftime('%s', …, 'localtime')` re-reads a local civil
+/// value as if it were UTC, so the difference *is* the offset; rounding to the
+/// whole minute keeps a second of slop out of the arithmetic.
+///
+/// This is a measurement of the environment, not of the compiler: the two sides
+/// convert a zone-less Rule value into an instant by different mechanisms (the
+/// store renders the column as local civil text inside SQL, the reference does
+/// integer arithmetic here) and share only this number.
+fn local_offset_seconds(store: &SqliteStore) -> i64 {
+    let raw = store
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT CAST(strftime('%s', 'now', 'localtime') AS INTEGER) \
+                    - CAST(strftime('%s', 'now', 'utc') AS INTEGER)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("reading the machine's zone must work");
+    raw.div_euclid(60) * 60
+}
+
+/// Days since 1970-01-01 for a proleptic-Gregorian civil date — the civil↔epoch
+/// arithmetic the store does inside `strftime`, restated in Rust so the
+/// reference can name the same instant without SQLite's help.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_shift = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_shift + 2) / 5 + day - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The instant a zone-less civil value names *on this machine*: the listener's
+/// own clock is the whole of its meaning, which is why no zone is stored.
+fn local_instant(civil: &CivilDateTime, offset_seconds: i64) -> SystemTime {
+    let seconds = days_from_civil(i64::from(civil.year), i64::from(civil.month), i64::from(civil.day))
+        * 86_400
+        + i64::from(civil.hour) * 3_600
+        + i64::from(civil.minute) * 60
+        + i64::from(civil.second)
+        - offset_seconds;
+    let offset = Duration::from_secs(seconds.unsigned_abs());
+    if seconds >= 0 {
+        SystemTime::UNIX_EPOCH + offset
+    } else {
+        SystemTime::UNIX_EPOCH - offset
+    }
+}
+
+/// The corpus as stored `Track`s, with every history instant resolved against
+/// the machine's own zone (the same resolution a `before` Rule is read at).
+fn rules_tracks(rows: &[RulesRow], offset_seconds: i64, now: SystemTime) -> Vec<Track> {
+    rows.iter()
+        .map(|row| {
+            let path = format!("r:\\rules\\{}", row.name);
+            let last_played = row
+                .last_played
+                .as_ref()
+                .map(|instant| local_instant(instant, offset_seconds))
+                .or_else(|| {
+                    row.last_played_days_ago
+                        .map(|days| days_ago(now, days))
+                });
+            let date_added = row
+                .date_added
+                .as_ref()
+                .map(|instant| local_instant(instant, offset_seconds))
+                .or_else(|| {
+                    row.date_added_days_ago
+                        .map(|days| days_ago(now, days))
+                });
+            Track {
+                id: TrackId::from_path(std::path::Path::new(&path)),
+                file_path: PathBuf::from(&path),
+                metadata: TrackMetadata {
+                    title: row.title.map(str::to_string),
+                    artist: row.artist.map(str::to_string),
+                    album: row.album.map(str::to_string),
+                    album_artist: row.album_artist.map(str::to_string),
+                    composer: row.composer.map(str::to_string),
+                    comment: row.comment.map(str::to_string),
+                    genre: row.genre.map(str::to_string),
+                    year: row.year,
+                    ..TrackMetadata::default()
+                },
+                duration: row.duration_millis.map(Duration::from_millis),
+                sample_rate: row.sample_rate,
+                channels: row.channels,
+                play_count: row.play_count,
+                last_played,
+                date_added,
+                favorite: row.favorite,
+                search_text: String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Seed the Rule corpus. The scan batch persists tags, format facts and
+/// `date_added`; play history is written by a raw `UPDATE` (the scan commit
+/// deliberately never touches it) and the favorite flag through the mutation
+/// port, because that is what each fact actually is. `rules_tracks` preserves
+/// the corpus order, so a row and its `Track` can be walked together.
+fn seeded_rules_store(db_path: &std::path::Path) -> (SqliteStore, Vec<Track>) {
+    let now = SystemTime::now();
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let mut store =
+        riff_infra::store::SqliteStore::open_and_migrate(db_path, changes_tx)
+            .expect("store opens");
+    let offset = local_offset_seconds(&store);
+    let rows = rules_fixtures();
+    let tracks = rules_tracks(&rows, offset, now);
+
+    store
+        .apply_scan_batch(&tracks)
+        .expect("fixtures apply");
+
+    for (row, track) in rows.iter().zip(&tracks) {
+        let last_nanos = track.last_played.map(signed_nanos);
+        store
+            .with_connection(|conn| {
+                conn.execute(
+                    "UPDATE tracks SET play_count = ?1, last_played_nanos = ?2 WHERE path = ?3",
+                    rusqlite::params![i64::from(row.play_count), last_nanos, track.id.0],
+                )
+            })
+            .expect("seeding history must work");
+    }
+    for (row, track) in rows.iter().zip(&tracks) {
+        if row.favorite {
+            store
+                .set_track_favorite(&track.id, true)
+                .expect("seeding a favorite must work");
+        }
+    }
+    (store, tracks)
+}
+
+/// An independent Rust-only restatement of what a Rule tree *means*, walked
+/// over the fixture list with no help from the query compiler: no shared
+/// helper, no shared field-id → column table, and no `riff_infra` import at
+/// all. The store's compiled predicate must agree with this, Track for Track
+/// and in order.
+///
+/// **THE TRAP, stated because a future refactor will try to unify the two
+/// sides.** SQL's `NOT` on a missing value answers *missing*, and a `WHERE`
+/// reads missing as false, so an untagged Track silently disappears from a
+/// negated Rule — the opposite of the promise. If this reference answered a
+/// missing value with `false` (the obvious Rust spelling, and the one that
+/// reads as "coalescing is a detail"), it would agree with exactly the broken
+/// SQL the compiler must not produce, and the whole arrangement would prove
+/// nothing. So the fold is spelled here by hand and by type, and it is
+/// *deliberately* the same decision the compiler makes for a different reason:
+///
+/// * absent **text** is the empty string, at the value — so `is` and `contains`
+///   fail it and `is not` takes it in;
+/// * absent **number, duration or date** makes the *test* false, and a
+///   `column IS NULL` answers `is missing`;
+/// * a **Box** of two-valued arms is two-valued, because `and` / `or` here are
+///   Rust's, over `bool` — there is no third answer to propagate.
+///
+/// The same discipline is why the case fold is spelled twice rather than
+/// shared: the column side folds ASCII only (what SQLite's `lower()` does,
+/// ADR 0020) and the needle side folds fully (what Rust's `to_lowercase()`
+/// does). One helper doing both would hide the asymmetry the non-Latin case
+/// pins.
+mod rules_reference {
+    use super::*;
+    use riff_persistence::field_catalog::{self, LOSSLESS_EXTENSIONS};
+    use riff_persistence::rule::{Combine, MatchableField, RuleValue, Semantic};
+
+    /// The clock the read is answered at: the instant a `in_last` window counts
+    /// back from, and the machine's zone offset a zone-less boundary is read in.
+    pub struct Clock {
+        pub now: SystemTime,
+        pub offset_seconds: i64,
+    }
+
+    /// What one field holds for one Track, in the unit the Rule speaks. The
+    /// mapping from a stored id to a Track fact is spelled out here by hand,
+    /// in this module's own order, because sharing the compiler's column table
+    /// would make the comparison a tautology.
+    enum Held<'a> {
+        /// A tag. `None` is absent and folds to the empty string.
+        Tag(Option<&'a str>),
+        /// The `;`-separated genre set.
+        Set(Option<&'a str>),
+        /// A whole number in its own unit.
+        Whole(Option<i64>),
+        /// A duration, in whole milliseconds.
+        Millis(Option<u64>),
+        /// A history instant.
+        Moment(Option<SystemTime>),
+        /// A fact with no absent state.
+        Flag(bool),
+        /// An id, or an id-and-test pair, this walk cannot read.
+        Unreadable,
+    }
+
+    /// ASCII-only case fold — SQLite's `lower()`, not Rust's.
+    fn sql_lower(text: &str) -> String {
+        text.to_ascii_lowercase()
+    }
+
+    /// The fold every text test runs on: absent becomes the empty string, and
+    /// what is there is folded the way the column is.
+    fn folded_text(held: &Held<'_>) -> Option<String> {
+        match held {
+            Held::Tag(value) | Held::Set(value) => Some(sql_lower(value.unwrap_or(""))),
+            _ => None,
+        }
+    }
+
+    /// What one field id holds for one Track.
+    fn held<'a>(field_id: &str, track: &'a Track) -> Held<'a> {
+        let metadata = &track.metadata;
+        match field_id {
+            "genre" => Held::Set(metadata.genre.as_deref()),
+            "artist" => Held::Tag(metadata.artist.as_deref()),
+            "album_artist" => Held::Tag(metadata.album_artist.as_deref()),
+            "album" => Held::Tag(metadata.album.as_deref()),
+            "title" => Held::Tag(metadata.title.as_deref()),
+            "composer" => Held::Tag(metadata.composer.as_deref()),
+            "comment" => Held::Tag(metadata.comment.as_deref()),
+            "year" => Held::Whole(metadata.year.map(i64::from)),
+            // This side compares whole milliseconds against the Track's own
+            // `Duration`; the store compares nanoseconds against a rule value
+            // scaled into nanoseconds. The corpus holds whole milliseconds,
+            // which is what makes 1 ms = 1e6 ns exact on both sides.
+            "duration" => Held::Millis(track.duration.map(|length| {
+                u64::try_from(length.as_millis()).unwrap_or(u64::MAX)
+            })),
+            "play_count" => Held::Whole(Some(i64::from(track.play_count))),
+            "last_played" => Held::Moment(track.last_played),
+            "date_added" => Held::Moment(track.date_added),
+            "favorite" => Held::Flag(track.favorite),
+            "sample_rate" => Held::Whole(track.sample_rate.map(i64::from)),
+            "channels" => Held::Whole(track.channels.map(i64::from)),
+            // A case-insensitive suffix match on the *stored path*, which is
+            // what the predicate tests — not the file's extension as `Path`
+            // parses it, and no codec is ever read.
+            "lossless" => Held::Flag(
+                LOSSLESS_EXTENSIONS
+                    .iter()
+                    .any(|format| track.id.0.to_lowercase().ends_with(&format!(".{format}"))),
+            ),
+            _ => Held::Unreadable,
+        }
+    }
+
+    /// One leaf's answer, or `None` when this build cannot read the leaf at all
+    /// (an unknown id, a test its field does not permit, a missing value, or a
+    /// value of the wrong kind). `None` is a refusal, never an answer: a tree
+    /// that cannot be read must not be walked into "nothing matched".
+    fn leaf(
+        field_id: &str,
+        operator_id: &str,
+        value: Option<&RuleValue>,
+        track: &Track,
+        clock: &Clock,
+    ) -> Option<bool> {
+        let field = MatchableField::from_stored_id(field_id)?;
+        let comparison = riff_persistence::rule::Comparison::from_stored_id(operator_id)?;
+        let row = field_catalog::spec(field);
+        if !row.permits(comparison) {
+            return None;
+        }
+        let held = held(field_id, track);
+        if matches!(held, Held::Unreadable) {
+            return None;
+        }
+        let semantic = comparison.semantic();
+
+        // The one test that takes no value.
+        if row.value_widgets(comparison).is_empty() {
+            return match &held {
+                // On text the empty string *is* the absence — one test serves
+                // `is ""` and `is missing`, and that is what lets a negated `is`
+                // sweep the untagged up.
+                Held::Tag(_) | Held::Set(_) => Some(folded_text(&held)?.is_empty()),
+                // A number, a duration and a date have no empty value to fold
+                // into, so absence is asked of the column itself.
+                Held::Whole(number) => Some(number.is_none()),
+                Held::Millis(length) => Some(length.is_none()),
+                Held::Moment(moment) => Some(moment.is_none()),
+                // A flag has no absent state, and a path is always a path: the
+                // catalog never offers this row for either.
+                Held::Flag(_) | Held::Unreadable => None,
+            };
+        }
+
+        let value = value?;
+        if value.value_type() != row.value_type() {
+            return None;
+        }
+        match (&held, semantic) {
+            // ---- text ------------------------------------------------------
+            (Held::Tag(_), Semantic::Equality) => {
+                let needle = text(value)?.to_lowercase();
+                Some(folded_text(&held)? == needle)
+            }
+            (Held::Tag(_), Semantic::Containment) => {
+                let needle = text(value)?.to_lowercase();
+                Some(folded_text(&held)?.contains(&needle))
+            }
+            (Held::Set(_), Semantic::Equality) => {
+                // One whole segment: split on `;`, strip spaces from both sides,
+                // and compare — which is exactly what the store's
+                // delimiter-wrapped `instr` asks for, arrived at differently.
+                let target = text(value)?.to_lowercase().replace(' ', "");
+                Some(
+                    folded_text(&held)?
+                        .replace(' ', "")
+                        .split(';')
+                        .any(|segment| segment == target),
+                )
+            }
+            (Held::Set(_), Semantic::Containment) => {
+                let needle = text(value)?.to_lowercase();
+                Some(folded_text(&held)?.contains(&needle))
+            }
+
+            // ---- numbers ---------------------------------------------------
+            // Both arms fold the same way and are spelled twice on purpose: an
+            // absent column makes the *test* false, so a negated test is true
+            // and the Track stays in. That sentence is the whole promise, and it
+            // is what a `held.unwrap_or_default()` spelling would quietly break
+            // (an absent duration would read as zero seconds long).
+            (Held::Whole(number), _) => {
+                Some(numeric(*number, semantic, number_value(value)?))
+            }
+            (Held::Millis(length), _) => {
+                Some(numeric(*length, semantic, duration_value(value)?))
+            }
+
+            // ---- history ---------------------------------------------------
+            (Held::Moment(moment), _) => match semantic {
+                Semantic::WithinDays => {
+                    let days = days_value(value)?;
+                    let cutoff = clock
+                        .now
+                        .checked_sub(Duration::from_secs(u64::from(days).saturating_mul(86_400)))
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    Some(moment.is_some_and(|played| played >= cutoff))
+                }
+                Semantic::EarlierThan | Semantic::LaterThan => {
+                    // Second granularity, because that is all a zone-less
+                    // boundary carries: a stamp inside the boundary's own
+                    // second is neither before nor after it.
+                    let instant = date_value(value)?;
+                    let boundary = epoch_seconds(&local_instant(instant, clock.offset_seconds));
+                    let Some(played) = moment else {
+                        return Some(false);
+                    };
+                    let played = epoch_seconds(played);
+                    Some(match semantic {
+                        Semantic::EarlierThan => played < boundary,
+                        _ => played > boundary,
+                    })
+                }
+                _ => return None,
+            },
+
+            // ---- yes / no --------------------------------------------------
+            (Held::Flag(flag), Semantic::Equality) => Some(*flag == yes_no(value)?),
+            _ => None,
+        }
+    }
+
+    /// One Box, and everything under it, answered for one Track.
+    fn answers(tree: &RuleTree, track: &Track, needle: Option<&str>, clock: &Clock) -> Option<bool> {
+        match tree {
+            RuleTree::Rule {
+                field_id,
+                operator_id,
+                negated,
+                value,
+            } => {
+                let answer = leaf(field_id, operator_id, value.as_ref(), track, clock)?;
+                Some(if *negated { !answer } else { answer })
+            }
+            RuleTree::Box { combine, children } => {
+                let combine = Combine::from_stored_id(combine)?;
+                if children.is_empty() {
+                    return None;
+                }
+                let mut arms = Vec::with_capacity(children.len());
+                for child in children {
+                    arms.push(answers(child, track, needle, clock)?);
+                }
+                Some(match combine {
+                    Combine::All => arms.iter().all(|arm| *arm),
+                    Combine::Any => arms.iter().any(|arm| *arm),
+                })
+            }
+        }
+    }
+
+    /// Whether this walk can read the whole tree — the reference's own share of
+    /// the refusal the compiler makes before producing SQL.
+    pub fn can_read(tree: &RuleTree, clock: &Clock) -> bool {
+        // Any Track will do: readability is a question about the tree, not the
+        // row, and the leaf walk answers both at once.
+        let probe = Track {
+            id: TrackId("probe".to_string()),
+            file_path: PathBuf::from("probe.mp3"),
+            metadata: TrackMetadata::default(),
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            play_count: 0,
+            last_played: None,
+            date_added: None,
+            favorite: false,
+            search_text: String::new(),
+        };
+        answers(tree, &probe, None, clock).is_some()
+    }
+
+    /// Every Track the tree matches, in the store's canonical flat order (path
+    /// ascending, byte-wise), which is the order the read is asked for.
+    pub fn matches(tracks: &[Track], tree: &RuleTree, needle: Option<&str>, clock: &Clock) -> Vec<TrackId> {
+        let mut ids: Vec<TrackId> = tracks
+            .iter()
+            .filter(|track| {
+                answers(tree, track, needle, clock)
+                    .expect("the tree must be readable before its answer is asked for")
+                // The needle is ANDed with the tree, never chosen against it.
+                && track
+                    .metadata
+                    .search_text()
+                    .contains(&needle.map_or_else(String::new, str::to_lowercase))
+            })
+            .map(|track| track.id.clone())
+            .collect();
+        ids.sort_by(|left, right| left.0.cmp(&right.0));
+        ids
+    }
+
+    /// One ordering test over a nullable numeric column, folded the way the
+    /// compiler folds it: no value, no truth.
+    fn numeric<T: Ord + Copy>(held: Option<T>, semantic: Semantic, target: T) -> bool {
+        held.is_some_and(|value| ordered_with(value, semantic, target))
+    }
+
+    fn ordered_with<T: Ord>(held: T, semantic: Semantic, target: T) -> bool {
+        match semantic {
+            Semantic::GreaterThan => held > target,
+            Semantic::LessThan => held < target,
+            _ => held == target,
+        }
+    }
+
+    /// Whole seconds since the epoch, floored — the same resolution a
+    /// `strftime('%Y-%m-%d %H:%M:%S')` rendering carries.
+    fn epoch_seconds(time: &SystemTime) -> i64 {
+        match time.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(forward) => i64::try_from(forward.as_secs()).unwrap_or(i64::MAX),
+            Err(back) => -(i64::try_from(back.duration().as_secs()).unwrap_or(i64::MAX)),
+        }
+    }
+
+    fn text(value: &RuleValue) -> Option<&str> {
+        match value {
+            RuleValue::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn number_value(value: &RuleValue) -> Option<i64> {
+        match value {
+            RuleValue::Number(number) => Some(*number),
+            _ => None,
+        }
+    }
+
+    fn duration_value(value: &RuleValue) -> Option<u64> {
+        match value {
+            RuleValue::DurationMillis(millis) => Some(*millis),
+            _ => None,
+        }
+    }
+
+    fn days_value(value: &RuleValue) -> Option<u32> {
+        match value {
+            RuleValue::Days(days) => Some(*days),
+            _ => None,
+        }
+    }
+
+    fn date_value(value: &RuleValue) -> Option<&CivilDateTime> {
+        match value {
+            RuleValue::DateTime(instant) => Some(instant),
+            _ => None,
+        }
+    }
+
+    fn yes_no(value: &RuleValue) -> Option<bool> {
+        match value {
+            RuleValue::YesNo(answer) => Some(*answer),
+            _ => None,
+        }
+    }
+}
+
+// --- Rule-tree case builders ----------------------------------------------
+//
+// These build the *input* the two sides share, exactly as `smart_fixtures` is
+// the shared input of the built-in lists: data, no logic, and no field id that
+// the compiler's own table owns.
+
+fn needle(text: &str) -> Option<RuleValue> {
+    Some(RuleValue::Text(text.to_string()))
+}
+
+fn number(value: i64) -> Option<RuleValue> {
+    Some(RuleValue::Number(value))
+}
+
+fn millis(value: u64) -> Option<RuleValue> {
+    Some(RuleValue::DurationMillis(value))
+}
+
+fn days(value: u32) -> Option<RuleValue> {
+    Some(RuleValue::Days(value))
+}
+
+fn boundary(instant: CivilDateTime) -> Option<RuleValue> {
+    Some(RuleValue::DateTime(instant))
+}
+
+fn yes(value: bool) -> Option<RuleValue> {
+    Some(RuleValue::YesNo(value))
+}
+
+/// One Rule, in the store's own spelling, at the given polarity.
+fn rule(field: MatchableField, comparison: Comparison, value: Option<RuleValue>) -> RuleTree {
+    RuleTree::Rule {
+        field_id: field.stored_id().to_string(),
+        operator_id: comparison.stored_id().to_string(),
+        negated: false,
+        value,
+    }
+}
+
+/// The same test inverted — the one spelling of "is not" there is.
+fn rule_not(
+    field: MatchableField,
+    comparison: Comparison,
+    value: Option<RuleValue>,
+) -> RuleTree {
+    RuleTree::Rule {
+        field_id: field.stored_id().to_string(),
+        operator_id: comparison.stored_id().to_string(),
+        negated: true,
+        value,
+    }
+}
+
+fn all_of(children: Vec<RuleTree>) -> RuleTree {
+    RuleTree::Box {
+        combine: "all".to_string(),
+        children,
+    }
+}
+
+fn any_of(children: Vec<RuleTree>) -> RuleTree {
+    RuleTree::Box {
+        combine: "any".to_string(),
+        children,
+    }
+}
+
+/// A Rule tree in the store's spelling, built from a Root Box the frontend
+/// would hold. Used by the cases that must prove the two spellings agree.
+fn from_root(boxed: riff_persistence::rule::RootBox) -> RuleTree {
+    RuleTree::from_root_box(&boxed)
+}
+
+/// One probe value per case the matrix asks: a needle, a fragment, a threshold,
+/// a window or a boundary that this corpus *splits*, so a case that silently
+/// answered "everything" or "nothing" would be visible in the fixture rather
+/// than hidden in the assertion. The catalog still decides which comparisons are
+/// asked at all — this table only answers what value to write.
+fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
+    use Comparison as C;
+    use MatchableField as F;
+    match (field, comparison) {
+        (F::Genre, C::Is) => needle("Progressive Rock"),
+        (F::Genre, C::Contains) => needle("rock;progressive"),
+        (F::Artist, C::Is) => needle("Unknown Artist"),
+        (F::Artist, C::Contains) => needle("known"),
+        (F::AlbumArtist, C::Is) => needle("AA"),
+        (F::AlbumArtist, C::Contains) => needle("e"),
+        (F::Album, C::Is) => needle("First"),
+        (F::Album, C::Contains) => needle("eo"),
+        (F::Title, C::Is) => needle("Alpha"),
+        (F::Title, C::Contains) => needle("lph"),
+        (F::Composer, C::Is) => needle("Bach"),
+        (F::Composer, C::Contains) => needle("iva"),
+        (F::Comment, C::Is) => needle("notes"),
+        (F::Comment, C::Contains) => needle("liner"),
+        (F::Year, C::EqualTo) => number(1975),
+        (F::Year, C::GreaterThan) => number(1990),
+        (F::Year, C::LessThan) => number(1990),
+        // The round-millisecond pair: exactly one hour, and one millisecond
+        // over it. Equality and both orderings land on opposite rows.
+        (F::Duration, C::EqualTo) => millis(3_600_000),
+        (F::Duration, C::GreaterThan) => millis(3_600_000),
+        (F::Duration, C::LessThan) => millis(300_000),
+        (F::PlayCount, C::EqualTo) => number(3),
+        (F::PlayCount, C::GreaterThan) => number(3),
+        (F::PlayCount, C::LessThan) => number(3),
+        (F::LastPlayed, C::InLast) => days(7),
+        // The local-midnight boundary: one row's stamp is 23:30 the evening
+        // before it and one is 00:30 the morning after.
+        (F::LastPlayed, C::Before) => boundary(civil(2024, 3, 2, 0, 0, 0)),
+        (F::LastPlayed, C::After) => boundary(civil(2024, 3, 2, 0, 0, 0)),
+        (F::DateAdded, C::InLast) => days(30),
+        (F::DateAdded, C::Before) => boundary(civil(2024, 6, 2, 0, 0, 0)),
+        (F::DateAdded, C::After) => boundary(civil(2024, 6, 2, 0, 0, 0)),
+        (F::Favorite, C::Is) => yes(true),
+        (F::SampleRate, C::EqualTo) => number(44_100),
+        (F::SampleRate, C::GreaterThan) => number(48_000),
+        (F::SampleRate, C::LessThan) => number(44_100),
+        (F::Channels, C::EqualTo) => number(2),
+        (F::Channels, C::GreaterThan) => number(2),
+        (F::Channels, C::LessThan) => number(2),
+        (F::Lossless, C::Is) => yes(true),
+        // `is missing` takes no value, and the catalog is what says so.
+        (_, C::IsMissing) => None,
+        _ => None,
+    }
+}
+
+// --- Rule-tree reads -------------------------------------------------------
+
+/// The Rule listing's window, unwrapped, in the canonical flat order.
+fn rule_window(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> Vec<TrackId> {
+    let page = store
+        .custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX);
+    match page {
+        Ok(page) => page.rows().iter().map(|track| track.id.clone()).collect(),
+        Err(error) => panic!("the Rule tree must be answerable: {error}"),
+    }
+}
+
+/// The Rule listing's total, unwrapped — the same Listing Page's other half.
+fn rule_total(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> usize {
+    store
+        .custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX)
+        .expect("the Rule tree must be answerable")
+        .total()
+}
+
+/// The clock a reference walk answers at: the instant `in_last` counts back
+/// from, and the machine's own zone, which is what a zone-less boundary means.
+fn rule_clock(store: &SqliteStore) -> rules_reference::Clock {
+    rules_reference::Clock {
+        now: SystemTime::now(),
+        offset_seconds: local_offset_seconds(store),
+    }
+}
+
+/// The one assertion every Rule case makes: the store's compiled predicate
+/// answers exactly what the independent walk answers — Track identity in the
+/// canonical order, and a total that counts the rows the window came from.
+/// Never SQL text, never table internals.
+fn assert_rule_membership(
+    store: &SqliteStore,
+    tracks: &[Track],
+    tree: &RuleTree,
+    needle_text: Option<&str>,
+    clock: &rules_reference::Clock,
+    why: &str,
+) {
+    let expected = rules_reference::matches(tracks, tree, needle_text, clock);
+    assert_eq!(
+        rule_window(store, tree, needle_text),
+        expected,
+        "{why}: the store's answer must be the reference's"
+    );
+    assert_eq!(
+        rule_total(store, tree, needle_text),
+        expected.len(),
+        "{why}: the total must count the same rows the window came from"
+    );
+}
+
+#[test]
+fn test_every_field_and_comparison_the_catalog_permits_matches_the_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+    let (store, tracks) = seeded_rules_store(&db_path);
+    let clock = rule_clock(&store);
+
+    let mut cases = 0;
+    for field in MatchableField::ALL {
+        let row = riff_persistence::field_catalog::spec(field);
+        for comparison in row.comparisons() {
+            // The catalog's own widget answer decides whether a value is
+            // written at all — the matrix never restates it.
+            let draws_a_value = !row.value_widgets(*comparison).is_empty();
+            let value = probe(field, *comparison);
+            assert_eq!(
+                value.is_some(),
+                draws_a_value,
+                "the probe table must write a value for exactly the cases \
+                 the catalog draws one for: {field:?} / {comparison:?}"
+            );
+            for negated in [false, true] {
+                let tree = if negated {
+                    rule_not(field, *comparison, value.clone())
+                } else {
+                    rule(field, *comparison, value.clone())
+                };
+                assert!(
+                    rules_reference::can_read(&tree, &clock),
+                    "a case the catalog permits must be readable by both sides: {tree:?}"
+                );
+                let polarity = if negated { "is not" } else { "is" };
+                assert_rule_membership(
+                    &store,
+                    &tracks,
+                    &tree,
+                    None,
+                    &clock,
+                    &format!("{} {polarity} {:?}", row.display_name(), *comparison),
+                );
+                cases += 1;
+            }
+        }
+    }
+    assert!(
+        cases >= 70,
+        "sixteen fields across every comparison they permit, both polarities, \
+         is at least seventy cases — the matrix silently skipped rows: {cases}"
+    );
+}

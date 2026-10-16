@@ -1251,6 +1251,43 @@ pub mod geometry {
         /// the pane — the selector's horizontal-overflow contract.
         pub const TEXT_END_PAD: f32 = 8.0;
     }
+
+    /// The rule editor's one Rule row (`riff_gui::ui::rule_row`): the four
+    /// parts a listener reads left to right — field, comparison, the single
+    /// Not control, value — and the inline lists each part discloses below
+    /// itself. The row owns no visual decision: every number here is the
+    /// rhythm the row is drawn at, and the catalog (`riff_backend::domain`)
+    /// owns every answer about *which* parts appear.
+    pub mod rule_row {
+        /// Horizontal gap between the row's parts.
+        pub const PART_GAP: f32 = 8.0;
+        /// Height of one disclosure header — the control that names the part
+        /// and opens its list. Rides
+        /// [`option_list::ROW_H`](super::option_list::ROW_H) so a header and
+        /// the option row it opens look like one scale.
+        pub const HEADER_H: f32 = 28.0;
+        /// Height of one typed-value well, the same scale as a header so the
+        /// row reads as one line.
+        pub const WELL_H: f32 = 28.0;
+        /// Width of a free-text value well (the needle a text Rule takes).
+        pub const TEXT_VALUE_W: f32 = 220.0;
+        /// Width of a whole-number well (a year, a play count).
+        pub const NUMBER_W: f32 = 96.0;
+        /// Width of one of the duration's three wells. Three of these plus
+        /// the unit words still read as one value, not three.
+        pub const DURATION_PART_W: f32 = 64.0;
+        /// Gap between the duration's three wells.
+        pub const DURATION_PART_GAP: f32 = 4.0;
+        /// Vertical gap between a disclosure header's line and the inline
+        /// list it opens.
+        pub const LIST_TOP_GAP: f32 = 6.0;
+        /// Vertical gap the row leaves under itself, so two sibling rows do
+        /// not print against each other.
+        pub const ROW_BOTTOM_GAP: f32 = 10.0;
+        /// Pad added to a disclosure header's measured label for its chevron
+        /// and the button's own horizontal padding.
+        pub const HEADER_LABEL_PAD: f32 = 44.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

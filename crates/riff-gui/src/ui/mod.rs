@@ -10,6 +10,8 @@ pub mod feedback;
 pub mod frame;
 pub mod now_playing;
 pub mod playerbar;
+pub mod rule_date;
+pub mod rule_row;
 pub mod scroll_memory;
 pub mod selection;
 pub mod settings;

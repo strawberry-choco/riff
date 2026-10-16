@@ -2311,9 +2311,7 @@ mod tests {
                 use egui_kittest::kittest::Queryable as _;
                 let row = shell
                     .query_all_by_label("Morning drive")
-                    .find(|node| {
-                        node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W
-                    })
+                    .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
                     .expect("the pane's own row for the saved list");
                 row.click();
                 shell.remove_cursor();

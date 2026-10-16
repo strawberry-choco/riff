@@ -101,7 +101,9 @@ use super::feedback::{Feedback, FeedbackBoard};
 use super::now_playing::NowPlayingAction;
 use super::playerbar::PlayerBarAction;
 use super::scroll_memory::ScrollMemory;
+use super::settings::SettingsSection;
 use super::sidebar::PlaylistRowAction;
+use super::smart_playlists_page::SmartPlaylistsEditor;
 use riff_backend::app::pass_service::Passes;
 use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::replaygain_pass::PassReport;
@@ -344,6 +346,15 @@ pub struct FrameParts<'a> {
     /// an ungated import would be an `unused_imports` there).
     #[cfg(target_os = "macos")]
     pub quit_flag: &'a std::sync::atomic::AtomicBool,
+    /// The Settings modal's currently selected section. The sidebar's SMART
+    /// LISTS `+` writes it — the one route into the Smart Playlists page that
+    /// does not start from the nav rail (ticket 15).
+    pub settings_section: &'a mut SettingsSection,
+    /// The Smart Playlists page's frontend-local draft (ticket 15). The
+    /// sidebar's `+` opens a new, empty, unsaved one through it; a Save is
+    /// ticket 18's and writes the store, never this slot's persistence —
+    /// there is none.
+    pub smart_playlists_editor: &'a mut SmartPlaylistsEditor,
 }
 
 /// One frame, borrowed: the decision half's state and the frame's two sessions.
@@ -954,6 +965,20 @@ impl<'a> Frame<'a> {
                 // earlier refusal.
                 *self.parts.playlist_create_error = None;
             }
+            SidebarAction::NewSmartPlaylist => {
+                // Ticket 15: this `+` is a route, not a write. It switches to
+                // the Settings stage (the same enactment the Linux folder flow
+                // uses, and it must happen at an apply slot so this frame's
+                // stage already draws the page), selects the Smart Playlists
+                // section, and hands the pane a fresh empty draft. Nothing
+                // reaches the store and nothing appears in the sidebar — a
+                // Custom Smart Playlist is saved, and so listed, only through
+                // ticket 18's Save.
+                crate::ui::chrome::NavDestination::Settings
+                    .apply(&mut self.library.view_mode, &mut self.library.browse_mode);
+                *self.parts.settings_section = SettingsSection::SmartPlaylists;
+                self.parts.smart_playlists_editor.start_new();
+            }
             SidebarAction::PlaylistRow { id, action } => {
                 super::app::apply_playlist_row_action(
                     action,
@@ -1202,6 +1227,10 @@ pub enum SidebarAction {
     OpenSmartList(SmartPlaylistKind),
     /// The Playlists header's "+": open the empty name prompt.
     NewPlaylist,
+    /// The SMART LISTS header's "+": open the Smart Playlists page on a new,
+    /// empty, unsaved draft. The one `+` in the sidebar that writes nothing —
+    /// a Custom Smart Playlist reaches the sidebar only at Save (ticket 18).
+    NewSmartPlaylist,
     /// A playlist row's own hover-revealed action, through the store flows.
     PlaylistRow {
         /// The row's playlist.

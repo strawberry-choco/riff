@@ -4,7 +4,8 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
-use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary};
+use riff_backend::domain::PlaylistId;
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
 use riff_gui_theme::icons::{Icon, IconCache};
@@ -277,6 +278,7 @@ impl Readiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsSection {
     Library,
+    SmartPlaylists,
     Playback,
     Appearance,
     Advanced,
@@ -285,8 +287,9 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section in left-nav (and focus) order.
-    pub const ALL: [SettingsSection; 5] = [
+    pub const ALL: [SettingsSection; 6] = [
         Self::Library,
+        Self::SmartPlaylists,
         Self::Playback,
         Self::Appearance,
         Self::Advanced,
@@ -298,6 +301,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::Library => "Library",
+            Self::SmartPlaylists => "Smart Playlists",
             Self::Playback => "Playback",
             Self::Appearance => "Appearance",
             Self::Advanced => "Advanced",
@@ -479,6 +483,11 @@ pub struct SettingsContent {
     /// the seam); `Some(t)` measures from the pinned instant. Only the scan
     /// card's "Last full scan" line consumes it.
     pub now: Option<std::time::SystemTime>,
+    /// The listener's saved Custom Smart Playlists, in creation order — the
+    /// Smart Playlists page's left column. Read through the Session Views
+    /// seam like every other store-backed list; the six Built-ins are code
+    /// and never appear here.
+    pub custom_smart_playlists: Vec<CustomSmartPlaylist>,
 }
 
 /// What the user did to the Settings stage this frame. The app applies these
@@ -536,6 +545,23 @@ pub enum SettingsAction {
     /// Set whether the title-bar close button quits instead of minimizing to
     /// the tray.
     SetCloseQuitsApp(bool),
+    /// The Smart Playlists page's left column: show the saved list with this
+    /// id in the editor. Selection is frontend-local — the draft, not the
+    /// store.
+    SelectSmartPlaylist(PlaylistId),
+    /// The Smart Playlists page's own "New smart playlist" button: open a
+    /// new, empty, unsaved draft. Like the sidebar's `+`, it writes nothing;
+    /// the list appears in the sidebar only at Save.
+    NewSmartPlaylist,
+    /// The editor's "Add rule" control: append one blank Rule row.
+    AddSmartPlaylistRule,
+    /// The editor's Save control. **The decision is ticket 18's** — this pane
+    /// only puts the button down and reports the intent; dirtiness, the
+    /// reconcile hook and every refusal reason live there.
+    SaveSmartPlaylist,
+    /// The editor's Cancel control, with the same boundary as Save: the
+    /// intent is here, the meaning is ticket 18's.
+    CancelSmartPlaylist,
 }
 
 // --- Pure helpers ------------------------------------------------------------------
@@ -2552,6 +2578,7 @@ fn section_pane(
     palette: &Palette,
     content: &SettingsContent,
     current: SettingsSection,
+    editor: &mut super::smart_playlists_page::SmartPlaylistsEditor,
     actions: &mut Vec<SettingsAction>,
 ) {
     egui::ScrollArea::vertical()
@@ -2563,6 +2590,16 @@ fn section_pane(
                 .show(ui, |ui| match current {
                     SettingsSection::Library => {
                         library_pane(ui, cache, palette, content, actions);
+                    }
+                    SettingsSection::SmartPlaylists => {
+                        super::smart_playlists_page::smart_playlists_pane(
+                            ui,
+                            cache,
+                            palette,
+                            content,
+                            editor,
+                            actions,
+                        );
                     }
                     SettingsSection::Advanced => {
                         // "Quit on close" is offered only where a tray exists:
@@ -2617,6 +2654,7 @@ pub fn show_settings_modal(
     palette: &Palette,
     content: &SettingsContent,
     current: SettingsSection,
+    editor: &mut super::smart_playlists_page::SmartPlaylistsEditor,
 ) -> Vec<SettingsAction> {
     let mut actions = Vec::new();
 
@@ -2664,7 +2702,7 @@ pub fn show_settings_modal(
 
             // Current section's pane (dispatch added with the pane slices).
             ui.scope_builder(egui::UiBuilder::new().max_rect(rects.pane), |ui| {
-                section_pane(ui, cache, palette, content, current, &mut actions);
+                section_pane(ui, cache, palette, content, current, editor, &mut actions);
             });
         });
 
@@ -3037,6 +3075,28 @@ impl super::app::RiffApp {
             SettingsAction::ClearThumbnailCache => {
                 self.clear_thumbnail_cache_confirm = true;
             }
+            // --- Smart Playlists page (ticket 15) ---
+            // Picking a saved list loads its name and Root Box Rules into the
+            // frontend-local draft. Nothing is written: the draft is what the
+            // listener edits, the store is what ticket 18's Save commits.
+            SettingsAction::SelectSmartPlaylist(id) => {
+                let lists = self.views.custom_smart_playlists();
+                let list = lists.iter().find(|list| list.id == id);
+                let tree = self.views.smart_playlist_tree(&id);
+                if let Some(list) = list {
+                    self.smart_playlists_editor
+                        .load_saved(list, tree.as_ref().map(|tree| &tree.root));
+                }
+            }
+            // The page's own button: the same new, empty, unsaved draft the
+            // sidebar's `+` opens, reached from inside the page.
+            SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
+            SettingsAction::AddSmartPlaylistRule => self.smart_playlists_editor.add_rule(),
+            // Save, Cancel and every refusal reason are ticket 18's decision.
+            // This pane puts the controls down and reports the intent; nothing
+            // here writes the store or discards the draft.
+            SettingsAction::SaveSmartPlaylist => {}
+            SettingsAction::CancelSmartPlaylist => {}
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }
@@ -3276,6 +3336,7 @@ impl super::app::RiffApp {
                 .map(crate::ui::frame::pass_outcome_line),
             last_scan: self.views.last_full_scan_summary(),
             now: self.now,
+            custom_smart_playlists: self.views.custom_smart_playlists(),
         };
 
         let palette = self.theme.active;
@@ -3285,8 +3346,27 @@ impl super::app::RiffApp {
             &palette,
             &content,
             self.settings_section,
+            &mut self.smart_playlists_editor,
         ) {
             self.apply_settings_action(action, library, playback);
+        }
+
+        // The one read the open library picker owes (ticket 14's host duty): a
+        // Rule row asks exactly once, on the frame its list opens, and the
+        // values reach the row back as a prop. Nothing on the paint path
+        // touches a store.
+        if let Some(field) = self.smart_playlists_editor.pending_picker {
+            let values = if super::smart_playlists_page::picker_is_numeric(field) {
+                super::smart_playlists_page::SmartPlaylistPickerValues::Numbers(
+                    self.views
+                        .picker_numbers(field, super::rule_row::PICKER_LIMIT),
+                )
+            } else {
+                super::smart_playlists_page::SmartPlaylistPickerValues::Texts(
+                    self.views.picker_texts(field, super::rule_row::PICKER_LIMIT),
+                )
+            };
+            self.smart_playlists_editor.picker_answered(values);
         }
 
         // Transient rows beneath the stage column.

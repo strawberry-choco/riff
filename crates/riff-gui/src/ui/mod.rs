@@ -16,6 +16,7 @@ pub mod scroll_memory;
 pub mod selection;
 pub mod settings;
 pub mod sidebar;
+pub mod smart_playlists_page;
 pub mod traffic_lights;
 pub mod tray;
 pub mod window_visibility;

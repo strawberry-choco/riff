@@ -375,13 +375,20 @@ impl SmartPlaylistsEditor {
     /// Box holds its Rules and Boxes in one `Vec`, so the list's order *is*
     /// the shared `position` sequence Save spells.
     pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) {
-        self.root.move_child(parent, from, to);
+        let reordered = self.root.move_child(parent, from, to);
         // A Box strictly under a reordered list answers to a different
         // address once its siblings shift, so an open combine list down
         // there would name whichever Box now sits at that address — close it
         // rather than paint a different Box's list (the one-list-open
-        // invariant `remove_child` keeps for the dangling case).
-        if let Some(open) = &self.open_combine
+        // invariant `remove_child` keeps for the dangling case). Only a real
+        // reorder does that: an empty gesture (the model answers `false`)
+        // renumbers nothing. The drag wiring reports a self-drop on every
+        // plain press-release of a draggable row — egui begins a drag on the
+        // press under a drag-only sense — and without this gate that empty
+        // drop would close the combine list the very same click had just
+        // opened, leaving a nested Box's control unopenable by pointer.
+        if reordered
+            && let Some(open) = &self.open_combine
             && open != parent
             && open.indices().starts_with(parent.indices())
         {

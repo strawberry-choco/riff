@@ -461,6 +461,14 @@ fn editor_column(
 /// allocated, and the control registered under its own id — a painted rect
 /// is not a control, and every clickable thing in this pane goes through
 /// the component's own `ui.interact` with a fresh id.
+///
+/// The measurement is `text_button_size`'s plus the leading glyph's own
+/// room: the component's paint charges 16px of glyph and an 8px gap before
+/// the label and centres the pair in the rect, a charge
+/// `text_button_size(label)` does not know about — so an icon button sized
+/// by its label alone clips its own words at `painter_at`'s rect edges.
+/// The `16.0 + 8.0` is the button component's arithmetic, spelled out here
+/// exactly as the Settings header's Back control spells it.
 fn pane_button(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -471,7 +479,10 @@ fn pane_button(
     icon: Option<Icon>,
     variant: Variant,
 ) -> bool {
-    let size = text_button_size(ui, palette, label, false);
+    let mut size = text_button_size(ui, palette, label, false);
+    if icon.is_some() {
+        size.x += 16.0 + 8.0;
+    }
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     text_button(
         ui,

@@ -13,6 +13,7 @@
 pub mod errors;
 pub mod levels;
 pub mod playlist;
+pub mod rule;
 pub mod store;
 pub mod sync;
 pub mod test_support;

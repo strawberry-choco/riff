@@ -20112,30 +20112,35 @@ mod whole_frame_tests {
             "and it is its own row, not a rename"
         );
 
-        // The page opens on the COPY: its row wears the selected band
-        // (AccessKit reads egui's `selected` as `Toggled`), and the custom
-        // listing replaced the Library's own one.
+        // The page opens on the COPY: its row is the selected one, and the
+        // custom listing replaced the Library's own one.
         assert!(
-            shell.harness.query(By::new().label("Artist - Beta")).is_none(),
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
             "a custom list's listing replaced the Library's flat one"
         );
-        assert_eq!(
-            shell
+        // `register_row_a11y` registers a sidebar row's `selected` through
+        // egui's `WidgetInfo::labeled` — whose second slot is the ENABLED
+        // flag, the harness's measured shape — so the open row is the enabled
+        // one and every idle row reads disabled. (`toggled()` is the
+        // OptionList's projection, not a row's.)
+        assert!(
+            !shell
                 .harness
                 .get_by_label("Copy of Late night jazz")
                 .accesskit_node()
-                .toggled(),
-            Some(egui::accesskit::Toggled::True),
+                .is_disabled(),
             "the copy's row is the selected one — the page opened on the copy"
         );
-        assert_ne!(
+        assert!(
             shell
                 .harness
                 .get_by_label("Late night jazz")
                 .accesskit_node()
-                .toggled(),
-            Some(egui::accesskit::Toggled::True),
-            "not on the original"
+                .is_disabled(),
+            "not on the original: its row is idle"
         );
 
         // A second Duplicate of the same original: the name collision is
@@ -20244,6 +20249,13 @@ mod whole_frame_tests {
                 .expect("the enumeration reads")
                 .is_empty(),
             "the confirmed delete is one durable store transaction"
+        );
+        assert!(
+            store
+                .smart_playlist_tree(&id)
+                .expect("the tree read works")
+                .is_none(),
+            "and its whole tree went with it: no Box or Rule answers under the id"
         );
         assert!(
             shell

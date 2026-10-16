@@ -4,5 +4,6 @@ pub use riff_persistence::errors::StoreError;
 pub use riff_persistence::store::{
     FullScanSummary, GenerationCache, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore,
     LibraryQueryStore, Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings,
-    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, TrackListOrder, UnreadableRule,
+    SmartPlaylistTree, SortDirection, StoreChanged, StoreGeneration, TrackListOrder,
+    UnreadableRule,
 };

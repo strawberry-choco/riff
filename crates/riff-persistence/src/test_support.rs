@@ -13,8 +13,8 @@ use std::time::SystemTime;
 use crate::errors::StoreError;
 use crate::playlist::PlaylistId;
 use crate::store::{
-    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page, SmartPlaylistTree,
-    SortDirection, TrackListOrder,
+    FullScanSummary, LibraryCounts, LibraryMutationStore, LibraryQueryStore, Page,
+    SmartPlaylistTree, SortDirection, TrackListOrder,
 };
 use crate::track::{
     Album, Artist, GenreCount, METADATA_VERSION, SmartPlaylistKind, Track, TrackId,

@@ -267,7 +267,7 @@ pub struct RiffApp {
     /// section can open either.
     /// Transient UI state (precedent: `tag_edit`); the playlist contents are
     /// re-computed from library data on every frame, so nothing is cached.
-    smart_playlist_view: Option<SmartListIdentity>,
+    pub(crate) smart_playlist_view: Option<SmartListIdentity>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
     /// The playing track's id whose cover the Now Playing stage last
@@ -312,11 +312,22 @@ pub struct RiffApp {
     /// Why the rename prompt's last write was refused. One slot because one
     /// rename prompt can be open at a time — `playlist_rename` is keyed by id.
     playlist_rename_error: Option<String>,
-    /// Transient Clear Library confirmation (`true` = awaiting confirm).
-    /// Grouped with the other transient prompts on `RiffApp`.
-    pub(crate) clear_library_confirm: bool,
-    /// Transient Clear Thumbnail cache confirmation, same shape as the one above.
-    pub(crate) clear_thumbnail_cache_confirm: bool,
+    /// Transient Custom Smart Playlist rename prompt: (list id, draft name).
+    /// The same shape as [`Self::playlist_rename`], owned here rather than
+    /// sharing that slot because the two renames commit through different
+    /// ports — a playlist through [`PlaylistStore`], a smart list through
+    /// [`LibraryMutationStore::rename_smart_playlist`].
+    custom_smart_list_rename: Option<(PlaylistId, String)>,
+    /// Why the Custom Smart Playlist rename prompt's last write was refused,
+    /// shown under that prompt. One slot, for the same reason the playlist
+    /// pair has one.
+    custom_smart_list_rename_error: Option<String>,
+    /// The one destructive confirmation currently pending, naming what it
+    /// would destroy ([`PendingDestructive`]). One slot rather than a flag
+    /// per wipe, so the confirmation can say *which* list or collection it is
+    /// asking about — the widening ticket 21 needed to name a Custom Smart
+    /// Playlist in its delete question. `None` = nothing is being asked.
+    pub(crate) pending_destructive: Option<PendingDestructive>,
     /// A Thumbnail-cache clear the worker has not answered yet. The frame drains
     /// its outcome while this is set, and a second press is ignored — the way the
     /// Tag Edit controller holds one outstanding record.
@@ -488,8 +499,9 @@ impl RiffApp {
             playlist_rename: None,
             playlist_create_error: None,
             playlist_rename_error: None,
-            clear_library_confirm: false,
-            clear_thumbnail_cache_confirm: false,
+            custom_smart_list_rename: None,
+            custom_smart_list_rename_error: None,
+            pending_destructive: None,
             clear_cache_in_flight: false,
             global_search_focus: false,
             watcher_manager,
@@ -1049,6 +1061,7 @@ impl RiffApp {
                 prefs: &mut self.prefs,
                 settings_store: self.settings_store.as_mut(),
                 playlist_store: self.playlist_store.as_mut(),
+                library_mutations: self.library_mutations.as_mut(),
                 clear_cache_in_flight: &mut self.clear_cache_in_flight,
                 global_search_focus: &mut self.global_search_focus,
                 title_key: &mut self.last_title_key,
@@ -1058,6 +1071,9 @@ impl RiffApp {
                 playlist_create_name: &mut self.playlist_create_name,
                 playlist_create_error: &mut self.playlist_create_error,
                 playlist_rename_error: &mut self.playlist_rename_error,
+                custom_smart_list_rename: &mut self.custom_smart_list_rename,
+                custom_smart_list_rename_error: &mut self.custom_smart_list_rename_error,
+                pending_destructive: &mut self.pending_destructive,
                 playback_live: &self.playback,
                 settings_section: &mut self.settings_section,
                 smart_playlists_editor: &mut self.smart_playlists_editor,
@@ -1373,24 +1389,33 @@ impl RiffApp {
         let mut report = StageReport::default();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
-            .show(ui, |ui| match library.view_mode {
-                ViewMode::Library => {
-                    // The elastic column stage (elastic-column spec): the
-                    // section-driven column sequence plus the collapsible
-                    // inspector replace the fixed three-pane explorer.
-                    self.render_elastic_stage(ui, library, playback);
+            .show(ui, |ui| {
+                match library.view_mode {
+                    ViewMode::Library => {
+                        // The elastic column stage (elastic-column spec): the
+                        // section-driven column sequence plus the collapsible
+                        // inspector replace the fixed three-pane explorer.
+                        self.render_elastic_stage(ui, library, playback);
+                    }
+                    ViewMode::NowPlaying => {
+                        self.show_now_playing_view(
+                            ui,
+                            playback,
+                            library.ui_flags.reduce_motion,
+                            &mut report,
+                        );
+                    }
+                    ViewMode::Settings => {
+                        self.show_settings_view(ui, library, playback);
+                    }
                 }
-                ViewMode::NowPlaying => {
-                    self.show_now_playing_view(
-                        ui,
-                        playback,
-                        library.ui_flags.reduce_motion,
-                        &mut report,
-                    );
-                }
-                ViewMode::Settings => {
-                    self.show_settings_view(ui, library, playback);
-                }
+                // The one destructive confirmation renders for EVERY view:
+                // the sidebar raises a Custom Smart Playlist's Delete and the
+                // sidebar is shared chrome, so the question must show whatever
+                // is on stage. For the Settings wipes this is the same slot in
+                // the same `ui` the modal drew into, so their pixels and order
+                // are unchanged.
+                self.render_pending_destructive(ui, library);
             });
         self.frame(playback, library).apply_stage(out, &report);
     }
@@ -2403,6 +2428,82 @@ pub enum SmartListIdentity {
     Custom(PlaylistId),
 }
 
+/// What one Custom Smart Playlist row's context menu offers (ticket 21):
+/// exactly the three things a listener does most often with a list they own.
+///
+/// Deliberately closed to three. Editing the Rule set is not reachable from
+/// here — a Custom list is edited on the Settings page — and there is no
+/// "fork a Built-in into a Rule set" route, which is also why a Built-in row
+/// gets no menu at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomSmartListAction {
+    /// Copy the list through the store and open the page on the copy.
+    Duplicate,
+    /// Open the inline rename prompt on the row.
+    Rename,
+    /// Raise the destructive confirmation, naming the list in the question.
+    Delete,
+}
+
+/// What the one destructive confirmation is currently asking about
+/// (ticket 21's widening): the pending identity, not a boolean per wipe.
+///
+/// The identity carries what the question needs to say — the Custom list's
+/// name — and answers the two facts the surface keys on: the copy for the
+/// warning line and the widget id that keeps this confirmation's affirmative
+/// action distinct from any other. The three wipes share one render site
+/// ([`RiffApp::render_pending_destructive`]), so a fourth confirmation
+/// inherits the surface instead of forking it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDestructive {
+    /// The Clear Library wipe.
+    ClearLibrary,
+    /// The Thumbnail-cache wipe, one gap below Clear Library in the pane.
+    ClearThumbnailCache,
+    /// Deleting one Custom Smart Playlist, named in the question because a
+    /// hand-built Rule tree is unrecoverable in a way a Playlist's
+    /// drag-built rows are not.
+    CustomSmartList {
+        /// The list the confirmation would delete.
+        id: PlaylistId,
+        /// Its name, as read when the confirmation was raised.
+        name: String,
+    },
+}
+
+impl PendingDestructive {
+    /// The question this confirmation asks, composed by the host: the two
+    /// wipe copies are the component crate's own consts, and a Custom Smart
+    /// Playlist's names the list, which is why this cannot be a `'static`
+    /// const for every arm.
+    pub(crate) fn copy(&self) -> String {
+        match self {
+            Self::ClearLibrary => {
+                riff_gui_components::prompts::CLEAR_LIBRARY_CONFIRM_COPY.to_string()
+            }
+            Self::ClearThumbnailCache => {
+                riff_gui_components::prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY.to_string()
+            }
+            Self::CustomSmartList { name, .. } => format!(
+                "Delete the Custom Smart Playlist \u{201c}{name}\u{201d}? Its Rules are gone for good."
+            ),
+        }
+    }
+
+    /// The widget id whose affirmative action this confirmation's is, so two
+    /// confirmations can never share one (the component's contract: copy
+    /// belongs to the action, the id to the call site's identity).
+    pub(crate) fn confirm_id(&self) -> egui::Id {
+        match self {
+            Self::ClearLibrary => egui::Id::new("clear_library_confirm_action"),
+            Self::ClearThumbnailCache => egui::Id::new("clear_thumbnail_cache_confirm_action"),
+            Self::CustomSmartList { .. } => {
+                egui::Id::new("delete_custom_smart_list_confirm_action")
+            }
+        }
+    }
+}
+
 /// The transient playlist-prompt slots the sidebar's playlist rows act on,
 /// grouped so [`apply_playlist_row_action`] stays readable. They live on
 /// [`RiffApp`] between frames; this borrow bundle is built per frame.
@@ -2462,9 +2563,18 @@ pub fn smart_list_openable(kind: SmartPlaylistKind, advanced: bool) -> bool {
 /// a Custom count would cost one filtered pass per list per generation on
 /// every scan refresh.
 ///
+/// **The row senses both buttons** (ticket 21). `tree_row`'s response is
+/// `Sense::click()`, which in egui 0.35 already includes the secondary
+/// button; attaching `context_menu` to it is the whole change — no Sense
+/// widening, and the primary-click open gesture below is untouched. The menu
+/// offers exactly [`CustomSmartListAction`]'s three items and reports the
+/// chosen one as a typed intent; the painted menu touches no store.
+///
 /// A free function rather than an app method so the UI seam is assertable on
 /// its own: the rows report [`SidebarAction::OpenSmartList`] with the
-/// identity they opened, and nothing else.
+/// identity they opened, [`SidebarAction::CustomSmartList`] with the menu
+/// choice, and [`SidebarAction::CustomSmartListRename`] with the prompt's
+/// outcome — and nothing else.
 pub fn custom_smart_list_rows(
     ui: &mut egui::Ui,
     cache: &mut riff_gui_theme::icons::IconCache,
@@ -2472,6 +2582,8 @@ pub fn custom_smart_list_rows(
     reduce_motion: bool,
     lists: &[CustomSmartPlaylist],
     open: Option<&SmartListIdentity>,
+    rename: &mut Option<(PlaylistId, String)>,
+    rename_error: Option<&str>,
     report: &mut crate::ui::frame::SidebarReport,
 ) {
     use crate::ui::sidebar::{self, TreeRow};
@@ -2493,10 +2605,63 @@ pub fn custom_smart_list_rows(
                 selected,
             ),
         );
+
+        // The context menu (ticket 21): reported, never performed in the
+        // paint. A secondary click only ever opens the popup — `clicked()` is
+        // the primary button's report, so the row's open gesture below cannot
+        // fire off a right-click.
+        let mut chosen = None;
+        row.response.context_menu(|ui| {
+            use riff_gui_components::menu::{Item, item};
+            if item(ui, palette, &Item::new("Duplicate")) {
+                chosen = Some(CustomSmartListAction::Duplicate);
+            }
+            if item(ui, palette, &Item::new("Rename")) {
+                chosen = Some(CustomSmartListAction::Rename);
+            }
+            if item(ui, palette, &Item::destructive("Delete")) {
+                chosen = Some(CustomSmartListAction::Delete);
+            }
+        });
+        if let Some(action) = chosen {
+            report.push(crate::ui::frame::SidebarAction::CustomSmartList {
+                id: list.id.clone(),
+                name: list.name.clone(),
+                action,
+            });
+        }
+
         if row.response.clicked() {
             report.push(crate::ui::frame::SidebarAction::OpenSmartList(
                 SmartListIdentity::Custom(list.id.clone()),
             ));
+        }
+
+        // The rename prompt renders directly under the row it belongs to (the
+        // playlist rows' own shape), pre-filled with the current name. A
+        // refused write leaves the typed draft in the slot and the store's
+        // reason under the prompt — the reporting ticket 05 built. It gets
+        // its own id scope: the widget keys its focus and Escape bookkeeping
+        // on the enclosing `ui`'s id, and the playlist rows' prompt is called
+        // from the same panel, so without the scope the two would share it
+        // when both are open.
+        let renaming = rename.as_ref().is_some_and(|(rid, _)| *rid == list.id);
+        if renaming {
+            let Some((_, draft)) = rename.as_mut() else {
+                continue;
+            };
+            ui.push_id("custom_smart_list_rename_prompt", |ui| {
+                let outcome = riff_gui_components::prompts::playlist_rename_prompt(ui, draft);
+                if let Some(reason) = rename_error {
+                    ui.colored_label(palette.error, reason);
+                }
+                if let Some(outcome) = outcome {
+                    report.push(crate::ui::frame::SidebarAction::CustomSmartListRename {
+                        id: list.id.clone(),
+                        outcome,
+                    });
+                }
+            });
         }
     }
 }
@@ -2592,6 +2757,31 @@ pub fn commit_playlist_rename(
         // The `bool` is the store's "this playlist existed" verdict. A rename
         // of a row that is gone closes the prompt exactly as it did before
         // this refusal reporting existed; only the error has a reason to show.
+        Ok(_found) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Commit the Custom Smart Playlist rename prompt's Save: the same trim and
+/// one-durable-transaction shape as [`commit_playlist_rename`], against the
+/// Library mutation port instead of the Playlist one
+/// ([`LibraryMutationStore::rename_smart_playlist`] — a sidebar Rename names a
+/// list without touching its tree, which is why it is not a save).
+///
+/// `Err(reason)` is the refusal the caller must render: the store's sidebar
+/// name rule refuses a name another row holds, and the prompt stays open with
+/// the reason under it.
+#[must_use = "a refused rename has to reach the listener, not the log"]
+pub fn commit_custom_smart_list_rename(
+    store: &mut dyn LibraryMutationStore,
+    id: &PlaylistId,
+    draft: &str,
+) -> Result<(), String> {
+    let draft = draft.trim().to_string();
+    if draft.is_empty() {
+        return Ok(());
+    }
+    match store.rename_smart_playlist(id, &draft) {
         Ok(_found) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
@@ -3191,6 +3381,8 @@ impl RiffApp {
             library.ui_flags.reduce_motion,
             &lists,
             self.smart_playlist_view.as_ref(),
+            &mut self.custom_smart_list_rename,
+            self.custom_smart_list_rename_error.as_deref(),
             report,
         );
     }

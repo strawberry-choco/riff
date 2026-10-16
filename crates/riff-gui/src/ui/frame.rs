@@ -83,14 +83,17 @@ use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
     BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, ViewMode,
 };
-use riff_backend::app::store::{PlaylistStore, SettingsStore};
+use riff_backend::app::store::{LibraryMutationStore, PlaylistStore, SettingsStore};
 use riff_backend::app::traits::RequestedSize;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
 use riff_backend::app::{MutexExt, Transport};
 use riff_backend::domain::PlaylistId;
 
-use super::app::{InlineTagEditor, SmartListIdentity, ThemeInputs, ThemeState};
+use super::app::{
+    CustomSmartListAction, InlineTagEditor, PendingDestructive, SmartListIdentity, ThemeInputs,
+    ThemeState,
+};
 // Gated with the one caller: nothing on Windows or Linux resolves a native
 // close, and an ungated import would be an `unused_imports` there.
 #[cfg(target_os = "macos")]
@@ -312,6 +315,11 @@ pub struct FrameParts<'a> {
     pub settings_store: &'a mut dyn SettingsStore,
     /// The Application Store's playlists section.
     pub playlist_store: &'a mut dyn PlaylistStore,
+    /// The Application Store's Library collection mutation port. The sidebar's
+    /// Custom Smart Playlist menu reaches it for Duplicate (a store
+    /// operation, never a read-then-save) and for the rename prompt's one
+    /// durable transaction.
+    pub library_mutations: &'a mut dyn LibraryMutationStore,
     /// A Thumbnail-cache clear the worker has not answered yet.
     pub clear_cache_in_flight: &'a mut bool,
     /// Ctrl+K landed: one-shot focus request for the global search field.
@@ -333,6 +341,18 @@ pub struct FrameParts<'a> {
     pub playlist_create_error: &'a mut Option<String>,
     /// Why the rename prompt's last write was refused, shown under that prompt.
     pub playlist_rename_error: &'a mut Option<String>,
+    /// The inline Custom Smart Playlist rename prompt: (list id, draft name).
+    /// Its own slot rather than the playlist one's, because the two renames
+    /// commit through different ports.
+    pub custom_smart_list_rename: &'a mut Option<(PlaylistId, String)>,
+    /// Why the Custom Smart Playlist rename prompt's last write was refused,
+    /// shown under that prompt.
+    pub custom_smart_list_rename_error: &'a mut Option<String>,
+    /// The one destructive confirmation currently pending, naming what it
+    /// would destroy. The sidebar's Delete raises it with the list's id and
+    /// name; the Settings wipes raise their own identities; one dispatch site
+    /// renders whichever is pending.
+    pub pending_destructive: &'a mut Option<PendingDestructive>,
     /// The live playback session, re-locked by [`Frame::finish`] to write the
     /// six UI-owned fields back.
     pub playback_live: &'a Mutex<PlaybackSession>,
@@ -1007,6 +1027,12 @@ impl<'a> Frame<'a> {
             }
             SidebarAction::PlaylistCreate(outcome) => self.apply_playlist_create(outcome),
             SidebarAction::PlaylistRename { outcome, .. } => self.apply_playlist_rename(outcome),
+            SidebarAction::CustomSmartList { id, name, action } => {
+                self.apply_custom_smart_list(&id, &name, action);
+            }
+            SidebarAction::CustomSmartListRename { outcome, .. } => {
+                self.apply_custom_smart_list_rename(outcome);
+            }
             SidebarAction::AddFolderRequested => {
                 // The native folder picker is an OS dialog, so it is performed
                 // by the draw half (`FrameOutput::pick_folder`) rather than
@@ -1095,6 +1121,84 @@ impl<'a> Frame<'a> {
             Err(reason) => {
                 *self.parts.playlist_rename = Some((rid, typed));
                 *self.parts.playlist_rename_error = Some(reason);
+            }
+        }
+    }
+
+    /// Apply one Custom Smart Playlist row's menu choice (ticket 21).
+    ///
+    /// The report carries the name the row painted with, so the Rename prompt
+    /// opens pre-filled and the Delete question names the list without any
+    /// second read here.
+    fn apply_custom_smart_list(
+        &mut self,
+        id: &PlaylistId,
+        name: &str,
+        action: CustomSmartListAction,
+    ) {
+        match action {
+            CustomSmartListAction::Duplicate => {
+                // Duplicate is the STORE's operation, not a read-then-save
+                // replay: only inside its single transaction can the copy's
+                // name (`Copy of X`, then `Copy of X 2`, …) be chosen against
+                // the names that exist at that instant. Two transactions
+                // could collide, so nothing here reads a tree first.
+                match self.parts.library_mutations.duplicate_smart_playlist(id) {
+                    Ok(Some(copy)) => {
+                        // The page opens on the copy so the listener can start
+                        // varying it — the same slot and landing an open
+                        // gesture performs. A copy can never be empty, so
+                        // there is no draft step to go through first.
+                        self.land_on_library();
+                        *self.parts.smart_playlist_view = Some(SmartListIdentity::Custom(copy));
+                        *self.parts.playlist_view = None;
+                    }
+                    // The list is gone between paint and apply: nothing to copy.
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("Failed to duplicate Custom Smart Playlist: {e}"),
+                }
+            }
+            CustomSmartListAction::Rename => {
+                *self.parts.custom_smart_list_rename = Some((id.clone(), name.to_string()));
+                // A freshly opened prompt never wears a reason from an
+                // earlier refusal.
+                *self.parts.custom_smart_list_rename_error = None;
+            }
+            CustomSmartListAction::Delete => {
+                // The confirmation NAMES the list, so the pending identity
+                // carries the name. Nothing is deleted here: the deletion is
+                // the confirmation's Confirm arm.
+                *self.parts.pending_destructive = Some(PendingDestructive::CustomSmartList {
+                    id: id.clone(),
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Commit the Custom Smart Playlist rename prompt's draft, or report the
+    /// store's refusal under the prompt that asked — the playlist rename's
+    /// shape against the Library mutation port.
+    fn apply_custom_smart_list_rename(&mut self, outcome: PromptOutcome) {
+        if outcome == PromptOutcome::Cancel {
+            *self.parts.custom_smart_list_rename = None;
+            *self.parts.custom_smart_list_rename_error = None;
+            return;
+        }
+        let Some((rid, typed)) = self.parts.custom_smart_list_rename.take() else {
+            return;
+        };
+        match super::app::commit_custom_smart_list_rename(
+            self.parts.library_mutations,
+            &rid,
+            &typed,
+        ) {
+            Ok(()) => *self.parts.custom_smart_list_rename_error = None,
+            // As with the playlist rename: the draft and the prompt both stay,
+            // un-trimmed as typed, and the reason is the store's own words.
+            Err(reason) => {
+                *self.parts.custom_smart_list_rename = Some((rid, typed));
+                *self.parts.custom_smart_list_rename_error = Some(reason);
             }
         }
     }
@@ -1247,6 +1351,27 @@ pub enum SidebarAction {
     /// the reported id and the slot's own are the same fact).
     PlaylistRename {
         /// The prompt's playlist.
+        id: PlaylistId,
+        /// What the prompt reported.
+        outcome: PromptOutcome,
+    },
+    /// A Custom Smart Playlist row's context-menu choice (ticket 21). The
+    /// `id` names the row the menu was attached to, and `name` is the label
+    /// the row painted with — the same read the listener saw, so the Rename
+    /// prompt opens pre-filled and the Delete question names the list without
+    /// a second read at apply time.
+    CustomSmartList {
+        /// The row's list.
+        id: PlaylistId,
+        /// The row's name as painted.
+        name: String,
+        /// What the menu reported.
+        action: CustomSmartListAction,
+    },
+    /// The inline Custom Smart Playlist rename prompt resolved (keyed by list
+    /// id, like the playlist prompt's report).
+    CustomSmartListRename {
+        /// The prompt's list.
         id: PlaylistId,
         /// What the prompt reported.
         outcome: PromptOutcome,

@@ -1337,16 +1337,19 @@ fn test_store_entry_add_remove_semantics_and_dangling_survival() {
 }
 
 #[test]
-fn test_store_duplicate_names_allowed_with_unique_ids() {
+fn test_store_distinct_names_that_slug_alike_still_get_unique_ids() {
     let (_dir, mut store, _changes_rx) = open_store();
-    // Same-millisecond creation of same-named playlists must not collide:
-    // ids dedupe, names may repeat (today's behavior).
-    let a = store.create_playlist("Mix", &[]).unwrap();
-    let b = store.create_playlist("Mix", &[]).unwrap();
-    assert_ne!(a, b, "ids must be unique even for identical names");
+    // Names are unique across the sidebar now (ticket 03), so the id-dedup
+    // loop can no longer be reached by two rows sharing a name. It is still
+    // reachable: two *different* names can slug alike inside one millisecond,
+    // and then the suffixing loop is what keeps their ids apart.
+    let a = store.create_playlist("Mix A", &[]).unwrap();
+    let b = store.create_playlist("Mix.A", &[]).unwrap();
+    assert_ne!(a, b, "ids must be unique even for slugs that agree");
     let playlists = store.load_playlists().unwrap();
     assert_eq!(playlists.len(), 2);
-    assert!(playlists.iter().all(|p| p.name == "Mix"));
+    assert_eq!(playlists[0].name, "Mix A", "each row keeps its own name");
+    assert_eq!(playlists[1].name, "Mix.A", "unchanged by the id suffixing");
 }
 
 // --- Application Store: playlist drag-reorder persistence (Issue 12) --------
@@ -7163,9 +7166,7 @@ mod smart_picker_reads {
     fn genre_picker_offers_the_distinct_genre_entries_without_empty_or_absent_tags() {
         let (_dir, store) = seeded_picker_store();
 
-        let offered = store
-            .picker_texts("genre", 50)
-            .expect("genre picker read");
+        let offered = store.picker_texts("genre", 50).expect("genre picker read");
 
         assert_eq!(
             offered,
@@ -7259,7 +7260,9 @@ mod smart_picker_reads {
             "the picker reads tracks.artist, which the absent tag leaves NULL"
         );
         assert_eq!(
-            store.picker_texts("album_artist", 50).expect("album artist read"),
+            store
+                .picker_texts("album_artist", 50)
+                .expect("album artist read"),
             vec!["Bj\u{f6}rk".to_string()],
             "and the same holds for the album-artist column the fallback derives from"
         );
@@ -7438,7 +7441,9 @@ mod smart_picker_reads {
             .collect();
         store.apply_scan_batch(&tracks).expect("fixtures apply");
 
-        let texts = store.picker_texts("artist", BOUND).expect("bounded artist read");
+        let texts = store
+            .picker_texts("artist", BOUND)
+            .expect("bounded artist read");
         assert_eq!(
             texts.len(),
             BOUND,
@@ -7446,10 +7451,14 @@ mod smart_picker_reads {
         );
         assert_eq!(
             texts,
-            (0..BOUND).map(|index| format!("value {index:02}")).collect::<Vec<String>>(),
+            (0..BOUND)
+                .map(|index| format!("value {index:02}"))
+                .collect::<Vec<String>>(),
             "the bounded answer is the deterministic ascending prefix of the full one"
         );
-        let genres = store.picker_texts("genre", BOUND).expect("bounded genre read");
+        let genres = store
+            .picker_texts("genre", BOUND)
+            .expect("bounded genre read");
         assert_eq!(
             genres.len(),
             BOUND,
@@ -7469,7 +7478,9 @@ mod smart_picker_reads {
             ],
             "entries are ordered and truncated as entries: `value NN` sorts after              `extra NN` byte-wise, so no `value` entry can reach a bound of 8"
         );
-        let rates = store.picker_numbers("sample_rate", BOUND).expect("bounded rate read");
+        let rates = store
+            .picker_numbers("sample_rate", BOUND)
+            .expect("bounded rate read");
         assert_eq!(
             rates,
             (0..BOUND)
@@ -7481,11 +7492,20 @@ mod smart_picker_reads {
         // The bound is the store's, and it is not a hint: asking for more than
         // exists answers every value, and asking for none answers nothing.
         assert_eq!(
-            store.picker_numbers("channels", SEEDED + 10).expect("wide read").len(),
+            store
+                .picker_numbers("channels", SEEDED + 10)
+                .expect("wide read")
+                .len(),
             8,
             "eight distinct channel counts is the whole answer once the library has fewer"
         );
-        assert!(store.picker_texts("artist", 0).expect("zero bound").is_empty());
-        assert!(store.picker_numbers("channels", 0).expect("zero bound").is_empty());
+        assert_eq!(
+            store.picker_texts("artist", 0).expect("zero bound"),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            store.picker_numbers("channels", 0).expect("zero bound"),
+            [] as [i64; 0]
+        );
     }
 }

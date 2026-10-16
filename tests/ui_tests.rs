@@ -18751,9 +18751,7 @@ mod whole_frame_tests {
         let pane_row = shell
             .harness
             .query_all_by_label("Late night jazz")
-            .find(|node| {
-                node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W
-            })
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
             .expect("the page's own row for the saved list");
         pane_row.click();
         shell.harness.step();

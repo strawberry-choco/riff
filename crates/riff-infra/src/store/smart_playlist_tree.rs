@@ -143,13 +143,19 @@ impl SqliteStore {
     /// together: read-then-save across two transactions cannot promise the name
     /// is still free by the time the save runs.
     ///
-    /// The copy is **row-for-row**, ids aside — so a list carrying an Unreadable
-    /// Rule duplicates faithfully instead of losing the row or inventing one.
+    /// The copy is **row-for-row**, ids aside, so a Rule whose *value* this build
+    /// cannot re-type rides along untouched — the copy is as unreadable as the
+    /// original instead of losing the row or inventing one. A `field_id` or
+    /// `operator_id` this build does not know cannot be re-inserted at all (the
+    /// schema's `CHECK` list holds exactly the ids it enumerates), so that copy is
+    /// refused naming the Rule, in the save's own wording, before anything is
+    /// written.
     ///
     /// # Errors
     /// [`StoreError::InvalidOperation`] when the source's tree is not a whole
-    /// tree, or no copy name could be settled on. `Ok(None)` when no list carries
-    /// `id`, which commits nothing and bumps nothing.
+    /// tree, when it holds a Rule this build could not write, or when no copy name
+    /// could be settled on. `Ok(None)` when no list carries `id`, which commits
+    /// nothing and bumps nothing.
     pub(crate) fn duplicate_smart_playlist_write(
         &mut self,
         id: &PlaylistId,
@@ -449,6 +455,7 @@ fn duplicate_in_tx(conn: &Connection, id: &PlaylistId) -> rusqlite::Result<Optio
     let boxes = load_box_rows(conn, id)?;
     let rules = load_rule_rows(conn, id)?;
     let root_index = root_of(&boxes)?;
+    refuse_uncopyable_rule(&rules)?;
 
     let name = free_copy_name(conn, &source_name)?;
     let copy_id = new_smart_playlist_id(conn, &name)?;
@@ -463,8 +470,40 @@ fn duplicate_in_tx(conn: &Connection, id: &PlaylistId) -> rusqlite::Result<Optio
     Ok(Some(PlaylistId(copy_id)))
 }
 
-/// The first copy name no sidebar row holds: `Copy of X`, then `Copy of X 2`,
-/// `Copy of X 3` …
+/// Refuse a Duplicate whose source holds a Rule row this build could not write.
+///
+/// The copy is raw, so a `value` this build cannot re-type for its field rides
+/// along untouched — the copy is as unreadable as the original, and as honest. A
+/// `field_id` or `operator_id` outside this build's enums is a different matter:
+/// re-inserting it violates the schema's `CHECK` list, and a transaction that
+/// dies on a `CHECK` reports a column constraint to a listener who wanted a
+/// copy. So the copy is refused **naming that Rule**, in the save's own wording,
+/// before anything is written. The row's delete control is the way out there too.
+fn refuse_uncopyable_rule(rules: &[RuleRow]) -> rusqlite::Result<()> {
+    if let Some(row) = rules
+        .iter()
+        .find(|row| MatchableField::from_stored_id(&row.field_id).is_none())
+    {
+        return Err(store_refusal(format!(
+            "this list cannot be duplicated: it holds a rule testing {:?}, which this version of \
+             riff cannot understand — delete that rule before duplicating",
+            row.field_id
+        )));
+    }
+    if let Some(row) = rules
+        .iter()
+        .find(|row| Comparison::from_stored_id(&row.operator_id).is_none())
+    {
+        return Err(store_refusal(format!(
+            "this list cannot be duplicated: it holds a rule testing {:?} with {:?}, which this \
+             version of riff cannot understand — delete that rule before duplicating",
+            row.field_id, row.operator_id
+        )));
+    }
+    Ok(())
+}
+
+/// The first copy name no sidebar row holds: `Copy of X`, then `Copy of X 2`, `Copy of X 3` …
 ///
 /// Free-ness is decided by [`SqliteStore::reject_taken_sidebar_name`] itself, so
 /// this states no part of the name rule — it only asks the one helper whether a

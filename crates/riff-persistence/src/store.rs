@@ -768,9 +768,13 @@ pub trait LibraryMutationStore {
     /// it, tested against **both** sidebar tables by the same rule
     /// [`Self::rename_smart_playlist`] enforces.
     ///
-    /// The copy is a row-for-row copy of what is stored, so a list carrying an
-    /// [`UnreadableRule`] duplicates faithfully — the copy keeps that row and
-    /// keeps refusing a save until it is deleted. Nothing is repaired.
+    /// The copy is a row-for-row copy of what is stored, so a Rule whose **value**
+    /// this build cannot re-type duplicates faithfully — the copy keeps that row
+    /// and keeps refusing a save until it is deleted. Nothing is repaired. A Rule
+    /// whose `field_id` or `operator_id` this build does not know cannot be
+    /// re-inserted by any write (the schema's `CHECK` list holds exactly the ids
+    /// this build enumerates), so that Duplicate is refused naming the Rule rather
+    /// than dying on the constraint.
     fn duplicate_smart_playlist(
         &mut self,
         id: &PlaylistId,

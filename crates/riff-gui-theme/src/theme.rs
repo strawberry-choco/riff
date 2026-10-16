@@ -1304,6 +1304,22 @@ pub mod geometry {
         /// the time wells themselves — the parts of one stored pair.
         pub const PART_GAP: f32 = 4.0;
     }
+
+    /// The Rule Box tree (`riff_gui::ui::rule_box`, drawn by the Smart
+    /// Playlists pane): how far one nested Box indents its contents, and the
+    /// square a Rule's or a Box's own remove control occupies at its line's
+    /// end. Nesting goes to seven levels, so the indent is deliberately one
+    /// small step — the widest pane at the launch window still lays a
+    /// six-deep indented line out without clipping.
+    pub mod rule_box {
+        /// One nesting step: the x a Box's children and its own add controls
+        /// start at, one level below the Box's combine control.
+        pub const INDENT: f32 = 16.0;
+        /// Side of the square remove control at the end of a Rule's line and
+        /// of a nested Box's header line. The same 24px square the sidebar's
+        /// row affordances occupy, so a glyph is never squeezed.
+        pub const REMOVE_W: f32 = 24.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

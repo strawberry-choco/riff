@@ -7214,6 +7214,604 @@ mod tests {
         );
     }
 
+    // --- Smart Playlists page: the Rule Box tree (ticket 16) ----------------
+    //
+    // The pane's tree gestures, asserted as the typed `SettingsAction`s they
+    // report and as the draft shape they leave behind. The host here applies
+    // the four tree actions the way `RiffApp`'s apply step does — without
+    // that, a click could not grow the tree and nesting would be unpinnable —
+    // and every control is clicked at its real hit area through kittest's
+    // pointer, never queried and assumed reachable.
+
+    /// The pane over a state-owning editor, applying the tree gestures the
+    /// way `RiffApp::apply_settings_action` does. Selection, Save and Cancel
+    /// stay reported-but-unapplied exactly as the existing pane harness
+    /// keeps them.
+    fn smart_playlists_tree_harness(
+        content: &SettingsContent,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<
+        '_,
+        (
+            riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+            Vec<SettingsAction>,
+        ),
+    > {
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
+                    let (editor, actions) = state;
+                    let reported = show_settings_modal(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        content,
+                        SettingsSection::SmartPlaylists,
+                        editor,
+                    );
+                    for action in reported {
+                        match &action {
+                            SettingsAction::AddSmartPlaylistRule { parent } => {
+                                editor.add_rule(parent);
+                            }
+                            SettingsAction::AddSmartPlaylistBox { parent } => {
+                                editor.add_box(parent);
+                            }
+                            SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
+                                editor.remove_child(parent, *index);
+                            }
+                            SettingsAction::SetSmartPlaylistCombine { path, combine } => {
+                                editor.set_combine(path, *combine);
+                            }
+                            _ => {}
+                        }
+                        actions.push(action);
+                    }
+                },
+                (SmartPlaylistsEditor::default(), Vec::new()),
+            )
+    }
+
+    /// Click the `index`-th node bearing `label`, failing loudly with the
+    /// count when there is no such node — a control that is not in the frame
+    /// is not clickable, whatever a picture suggests.
+    fn click_nth(
+        harness: &mut egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        label: &str,
+        index: usize,
+    ) {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert!(
+            nodes.len() > index,
+            "{label:?} has no entry #{index} of {} in the frame",
+            nodes.len()
+        );
+        nodes[index].click();
+        harness.run();
+    }
+
+    /// Every Box path in the draft, in draw order — the test-side walk the
+    /// cap assertions count against.
+    fn box_paths(
+        boxed: &riff_gui::ui::rule_box::RuleBoxDraft,
+        path: riff_gui::ui::rule_box::BoxPath,
+    ) -> Vec<riff_gui::ui::rule_box::BoxPath> {
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let mut out = vec![path.clone()];
+        for (index, child) in boxed.children.iter().enumerate() {
+            if let RuleChildDraft::Box(nested) = child {
+                out.extend(box_paths(nested, path.child(index)));
+            }
+        }
+        out
+    }
+
+    /// A Rule Box added to the Root Box appears as a nested box with its own
+    /// combine control and its own add controls, drawn one indent step in —
+    /// measured, not inferred from a paint.
+    #[test]
+    fn test_a_rule_box_adds_its_own_combine_and_add_controls_one_step_in() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_gui::ui::rule_box::BoxPath;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        click_nth(&mut harness, "Add box", 0);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::AddSmartPlaylistBox {
+                    parent: BoxPath::root(),
+                }),
+            "the Root Box's add-box control reports the root as the parent"
+        );
+
+        let root = &harness.state().0.root;
+        assert_eq!(root.children.len(), 2, "the box joined the root's list");
+        assert_eq!(box_paths(root, BoxPath::root()).len(), 2);
+
+        // The new box draws its own combine control under the root's, and
+        // both its add controls. The nested row of them sits one indent step
+        // right of the root's — the measured indentation.
+        let headers: Vec<_> = harness.query_all_by_label("All of the following").collect();
+        assert_eq!(headers.len(), 2, "the root's and the nested box's");
+        assert!(
+            headers[1].rect().left() > headers[0].rect().left(),
+            "the nested box's control is indented: {} vs {}",
+            headers[1].rect().left(),
+            headers[0].rect().left()
+        );
+        let adds: Vec<_> = harness.query_all_by_label("Add rule").collect();
+        assert_eq!(adds.len(), 2, "one add-rule control per box");
+        assert!(
+            adds[0].rect().left() > adds[1].rect().left(),
+            "the nested box's add controls are indented too: {} vs {}",
+            adds[0].rect().left(),
+            adds[1].rect().left()
+        );
+    }
+
+    /// Adding a Rule inside a nested Box reports **that Box** as the parent,
+    /// and the click really grew that box — the reachability proof for a
+    /// control the root's own copy cannot stand in for.
+    #[test]
+    fn test_a_nested_boxes_add_rule_reports_that_box_as_the_parent() {
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        click_nth(&mut harness, "Add box", 0);
+
+        // The nested box's controls are drawn first (depth-first), so node 0
+        // of "Add rule" is the nested box's.
+        click_nth(&mut harness, "Add rule", 0);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::AddSmartPlaylistRule {
+                    parent: BoxPath::root().child(1),
+                }),
+            "the nested box's add-rule reports the nested path, not the root"
+        );
+
+        let root = &harness.state().0.root;
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the added box is a Box child");
+        };
+        assert_eq!(
+            nested.children.len(),
+            2,
+            "the Rule joined the nested box: its own blank row plus the added one"
+        );
+        // And the root's own list did not grow.
+        assert_eq!(root.children.len(), 2);
+    }
+
+    /// Removing a Rule reports its slot and takes exactly that row, leaving
+    /// its siblings' positions intact.
+    #[test]
+    fn test_removing_a_rule_reports_its_slot_and_leaves_siblings_in_place() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        click_nth(&mut harness, "Add rule", 0);
+        assert_eq!(harness.state().0.root.children.len(), 2);
+
+        click_nth(&mut harness, "Remove rule", 0);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::RemoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    index: 0,
+                }),
+            "the first row's remove control reports slot 0 of the Root Box"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(root.children.len(), 1, "exactly one row left");
+        assert!(matches!(root.children[0], RuleChildDraft::Rule(_)));
+        assert_eq!(
+            harness.query_all_by_label("Remove rule").count(),
+            1,
+            "the surviving row still offers its own remove control"
+        );
+    }
+
+    /// Removing a Box takes everything inside it in one gesture — no emptying
+    /// first — and the intent names the Box's own slot.
+    #[test]
+    fn test_removing_a_box_takes_its_children_with_it() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        click_nth(&mut harness, "Add box", 0);
+        click_nth(&mut harness, "Add rule", 0);
+        assert_eq!(harness.state().0.root.rule_count(), 3);
+
+        assert_eq!(
+            harness.query_all_by_label("Remove box").count(),
+            1,
+            "only the nested box is removable; the Root Box is not a child"
+        );
+        click_nth(&mut harness, "Remove box", 0);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::RemoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    index: 1,
+                }),
+            "the box's remove reports its own slot in the root's list"
+        );
+
+        let root = &harness.state().0.root;
+        assert_eq!(root.children.len(), 1, "the box and its subtree are gone");
+        assert_eq!(root.rule_count(), 1);
+        assert!(matches!(root.children[0], RuleChildDraft::Rule(_)));
+        assert_eq!(
+            harness.query_all_by_label("Remove box").count(),
+            0,
+            "no removable box is left in the frame"
+        );
+    }
+
+    /// Each Box's combine control offers all-of and any-of, and the choice
+    /// reported names the Box it was made in — the root's stays untouched.
+    #[test]
+    fn test_the_combine_choice_is_a_typed_intent_for_the_box_it_was_made_in() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::Combine;
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+
+        /// Click the one node of `role` labelled `label`, then settle.
+        fn click_role(
+            harness: &mut egui_kittest::Harness<
+                '_,
+                (
+                    riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                    Vec<SettingsAction>,
+                ),
+            >,
+            role: egui::accesskit::Role,
+            label: &str,
+        ) {
+            let nodes: Vec<_> = harness.query_all_by_role_and_label(role, label).collect();
+            assert_eq!(
+                nodes.len(),
+                1,
+                "{label:?} as {role:?} should be exactly one node, found {}",
+                nodes.len()
+            );
+            nodes[0].click();
+            harness.run();
+        }
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        // The root's own combine can be changed first: its header is the
+        // Button, the word it opens is the RadioButton option row.
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::Button,
+            "All of the following",
+        );
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::RadioButton,
+            "Any of the following",
+        );
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SetSmartPlaylistCombine {
+                    path: BoxPath::root(),
+                    combine: Combine::Any,
+                }),
+        );
+        assert_eq!(harness.state().0.root.combine, Combine::Any);
+
+        // Now a nested box: its header is the only all-of Button left.
+        click_nth(&mut harness, "Add box", 0);
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::Button,
+            "All of the following",
+        );
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::RadioButton,
+            "Any of the following",
+        );
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SetSmartPlaylistCombine {
+                    path: BoxPath::root().child(1),
+                    combine: Combine::Any,
+                }),
+            "the nested box's choice names the nested path"
+        );
+        let root = &harness.state().0.root;
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the added box is a Box child");
+        };
+        assert_eq!(nested.combine, Combine::Any);
+        assert_eq!(root.combine, Combine::Any, "the root keeps its own choice");
+    }
+
+    /// The seven-level cap is drawn, not refused: clicking add-box six times
+    /// builds exactly seven levels, the deepest box offers no add-box control
+    /// at all while every shallower one does, and clicking every remaining
+    /// add-box control never produces an eighth level or a message.
+    #[test]
+    fn test_the_add_box_control_disappears_at_the_seventh_level() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_gui::ui::rule_box::BoxPath;
+
+        let content = sample_content();
+        // Tall enough that all seven levels lay out unclipped, so every
+        // control probed is genuinely clickable.
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 2400.0));
+        harness.run();
+
+        for expected_levels in 2..=7 {
+            // The deepest box's own add-box is node 0: children are drawn
+            // before their parent's footer.
+            click_nth(&mut harness, "Add box", 0);
+            let paths = box_paths(&harness.state().0.root, BoxPath::root());
+            assert_eq!(paths.len(), expected_levels);
+        }
+
+        let root = &harness.state().0.root;
+        let paths = box_paths(root, BoxPath::root());
+        let deepest = paths
+            .iter()
+            .map(BoxPath::level)
+            .max()
+            .expect("seven boxes exist");
+        assert_eq!(deepest, 7);
+        let accepting = paths.iter().filter(|path| path.accepts_a_box()).count();
+        assert_eq!(accepting, 6, "levels one through six accept a box");
+        assert_eq!(
+            harness.query_all_by_label("Add box").count(),
+            accepting,
+            "exactly the boxes that accept an added Box draw the control — the \
+             seventh draws none"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Add rule").count(),
+            7,
+            "a Rule may still be added at every level, the deepest included"
+        );
+        assert!(
+            harness.state().0.refusal.is_none(),
+            "nothing is refused, so nothing is shown for the cap"
+        );
+
+        // The deepest box's own "Add rule" is node 0 (drawn first) and it
+        // really reports the seventh level as its parent — Rules are not
+        // capped, only Boxes are.
+        let deepest_path = paths
+            .iter()
+            .find(|path| path.level() == 7)
+            .expect("a seventh-level box exists")
+            .clone();
+        click_nth(&mut harness, "Add rule", 0);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::AddSmartPlaylistRule {
+                    parent: deepest_path.clone(),
+                }),
+            "the deepest box's add-rule reports a level-seven parent"
+        );
+        assert_eq!(
+            harness
+                .state()
+                .0
+                .root
+                .box_at(&deepest_path)
+                .expect("the deepest box resolves")
+                .children
+                .len(),
+            2,
+            "the Rule joined the seventh-level box"
+        );
+
+        // Clicking every add-box control still on screen adds siblings, never
+        // depth: node 0 is always the deepest accepting box's control, and no
+        // click can reach past the seventh level.
+        for _ in 0..accepting {
+            click_nth(&mut harness, "Add box", 0);
+        }
+        let root = &harness.state().0.root;
+        let paths = box_paths(root, BoxPath::root());
+        assert_eq!(
+            paths.iter().map(BoxPath::level).max(),
+            Some(7),
+            "no offered control can build an eighth level"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Add box").count(),
+            paths.iter().filter(|path| path.accepts_a_box()).count(),
+            "the painted add-box controls still match the boxes that accept one"
+        );
+        assert!(harness.state().0.refusal.is_none());
+    }
+
+    /// Two values for one field are two Rules in one box, never a multi-value
+    /// row: both rows keep their own field and their own controls.
+    #[test]
+    fn test_two_values_for_one_field_are_two_rules_in_the_box() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::MatchableField;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        // The box that holds the two values is an any-of box.
+        click_nth(&mut harness, "All of the following", 0);
+        click_nth(&mut harness, "Any of the following", 0);
+        click_nth(&mut harness, "Add rule", 0);
+        assert_eq!(harness.state().0.root.children.len(), 2);
+
+        // Both rows pick the same field, each through its own list: the row's
+        // header is the Button, the option the RadioButton.
+        click_nth(&mut harness, "Choose a field", 0);
+        click_nth(&mut harness, "Genre", 0);
+        click_nth(&mut harness, "Choose a field", 0);
+        let genre_options: Vec<_> = harness
+            .query_all_by_role_and_label(egui::accesskit::Role::RadioButton, "Genre")
+            .collect();
+        assert_eq!(
+            genre_options.len(),
+            1,
+            "the open list offers Genre once, beside the first row's header"
+        );
+        genre_options[0].click();
+        harness.run();
+
+        let root = &harness.state().0.root;
+        let mut fields = Vec::new();
+        for child in &root.children {
+            let riff_gui::ui::rule_box::RuleChildDraft::Rule(draft) = child else {
+                panic!("both children are Rules");
+            };
+            fields.push(draft.field);
+        }
+        assert_eq!(
+            fields,
+            vec![Some(MatchableField::Genre), Some(MatchableField::Genre)],
+            "two Rules for one field, each with its own value half"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Genre").count(),
+            2,
+            "the pane drew two rows, one per value"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Remove rule").count(),
+            2,
+            "each row carries its own controls"
+        );
+    }
+
+    /// A tree with an arbitrary number of Rules saves and reads back whole
+    /// through the **real** SQLite store, and so does one deeper than the
+    /// seven-level editor cap: the editor imposes no Rule count and no depth
+    /// on the way out, and the store enforces neither on the way in — the
+    /// cap is an editor rule the store and the compiler do not share.
+    #[test]
+    fn test_the_editor_tree_saves_and_reads_back_through_a_real_store() {
+        use riff_backend::app::store::{
+            LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree,
+        };
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+        use riff_gui::ui::rule_row::RuleDraft;
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+
+        // Sixty Rules in one box: the editor's own tree, spelled for Save.
+        let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        for _ in 0..59 {
+            editor.add_rule(&BoxPath::root());
+        }
+        for (index, child) in editor.root.children.iter_mut().enumerate() {
+            let RuleChildDraft::Rule(draft) = child else {
+                panic!("the root's children are Rules");
+            };
+            *draft = RuleDraft::from_rule(&Rule::new(
+                MatchableField::Artist,
+                Comparison::Is,
+                Some(RuleValue::Text(format!("artist {index}"))),
+            ));
+        }
+        let tree = SmartPlaylistTree::new(
+            editor
+                .root
+                .to_root_box()
+                .expect("sixty whole Rules spell a tree"),
+        );
+        let id = store
+            .save_smart_playlist(None, "Sixty Rules", &tree)
+            .expect("the save lands");
+        let read = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(read.root().rule_count(), 60);
+        assert_eq!(
+            read.root().children().len(),
+            60,
+            "no row cap on either side of the seam"
+        );
+
+        // A tree nine levels deep — two past the editor's cap — round-trips
+        // with its order and nesting untouched.
+        let mut deep = RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+            MatchableField::Title,
+            Comparison::Contains,
+            Some(RuleValue::Text("deep".to_string())),
+        ))]);
+        for _ in 0..8 {
+            deep = RuleBox::new(Combine::Any).with_children(vec![RuleChild::Box(deep)]);
+        }
+        let nine_levels = SmartPlaylistTree::new(RootBox::new(deep));
+        let deep_id = store
+            .save_smart_playlist(None, "Nine levels", &nine_levels)
+            .expect("a deeper tree still saves");
+        let read = store
+            .smart_playlist_tree(&deep_id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(read.root(), nine_levels.root(), "nesting and order survive");
+    }
+
     fn sample_content() -> SettingsContent {
         SettingsContent {
             libraries: vec![LibraryRow {

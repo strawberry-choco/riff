@@ -2203,6 +2203,24 @@ mod tests {
         );
     }
 
+    /// The Smart Playlists pane (ticket 15), reached by clicking its nav item —
+    /// the nav's current section is a frontend-local field, so the gesture is
+    /// the only honest way in. Pins the empty state the sidebar `+` and the
+    /// section both open on: the way to write the first list and the editor
+    /// column waiting beside it.
+    #[test]
+    fn settings_smart_playlists_dark_matches_golden_baseline() {
+        let library = Library::geogaddi();
+        snapshot_composed(
+            "settings_smart_playlists_dark",
+            window_with_stage(egui::vec2(920.0, 840.0)),
+            Region::Stage,
+            Plan::columns(1),
+            |shell| click(shell, "Smart Playlists"),
+            on_settings(scanned(Seed::over(&library), &library, 1284)),
+        );
+    }
+
     /// The Playback pane, reached by clicking its nav item — the nav's current
     /// section is a frontend-local field, so the gesture is the only honest way
     /// in.

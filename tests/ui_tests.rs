@@ -7267,6 +7267,9 @@ mod tests {
                             SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
                                 editor.remove_child(parent, *index);
                             }
+                            SettingsAction::MoveSmartPlaylistChild { parent, from, to } => {
+                                editor.move_child(parent, *from, *to);
+                            }
                             SettingsAction::SetSmartPlaylistCombine { path, combine } => {
                                 editor.set_combine(path, *combine);
                             }
@@ -8346,6 +8349,603 @@ mod tests {
             .expect("the read works")
             .expect("the tree exists");
         assert_eq!(read.root(), nine_levels.root(), "nesting and order survive");
+    }
+
+    /// The order a drag leaves survives the whole way: Save writes it through
+    /// the real store, a fresh read returns it in the store's one interleaved
+    /// shape, and re-opening the page into a new editor spells the same order
+    /// — the order the tree stores is the order the page redraws when the
+    /// listener comes back.
+    #[test]
+    fn test_a_reordered_tree_survives_save_reload_and_a_fresh_open() {
+        use riff_backend::app::store::{
+            CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree,
+        };
+        use riff_backend::domain::{Combine, MatchableField, RuleChild};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+
+        let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        editor.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "one")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::Any,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Title,
+                    "inner",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "two")),
+        ];
+        // The drag: the last Rule up past the Box.
+        editor.move_child(&BoxPath::root(), 2, 0);
+        assert_eq!(child_field(&editor.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&editor.root, 1), MatchableField::Artist);
+
+        let tree =
+            SmartPlaylistTree::new(editor.root.to_root_box().expect("whole Rules spell a tree"));
+        let id = store
+            .save_smart_playlist(None, "Reordered", &tree)
+            .expect("the save lands");
+        let read = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        let root = read.root();
+        // The stored children come back in the dragged order: the moved Rule
+        // first, the Box still last, Rules and Boxes in the one numbering.
+        assert_eq!(root.children().len(), 3, "nothing was lost or added");
+        let RuleChild::Rule(first) = &root.children()[0] else {
+            panic!("the moved Rule leads the stored list");
+        };
+        assert_eq!(first.field(), MatchableField::Album);
+        let RuleChild::Box(nested) = &root.children()[2] else {
+            panic!("the Box kept its place at the end");
+        };
+        assert_eq!(nested.children().len(), 1, "the Box kept its own list");
+
+        // Re-open: a fresh editor loads the saved list the way the page's row
+        // click does, and spells the same order.
+        let list = CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Reordered".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let mut reopened = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        reopened.load_saved(&list, Some(&read));
+        assert_eq!(child_field(&reopened.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&reopened.root, 1), MatchableField::Artist);
+        let RuleChildDraft::Box(inner) = &reopened.root.children[2] else {
+            panic!("the Box reopened in the same position");
+        };
+        let RuleChildDraft::Rule(title) = &inner.children[0] else {
+            panic!("the Box holds its Rule");
+        };
+        assert_eq!(title.field, Some(MatchableField::Title));
+    }
+
+    /// The tree harness's state and handle, aliased so the drag helpers'
+    /// signatures stay readable.
+    type TreeState = (
+        riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+        Vec<SettingsAction>,
+    );
+    type TreeHarness<'a> = egui_kittest::Harness<'a, TreeState>;
+
+    /// One whole Rule row as a draft: a field with `Is` and a text value —
+    /// the shape [`riff_gui::ui::rule_row::RuleDraft::from_rule`] reads back,
+    /// distinct per row so a frame's labels spell the list's order.
+    fn filled_rule_row(
+        field: riff_backend::domain::MatchableField,
+        text: &str,
+    ) -> riff_gui::ui::rule_row::RuleDraft {
+        use riff_backend::domain::{Comparison, Rule, RuleValue};
+
+        riff_gui::ui::rule_row::RuleDraft::from_rule(&Rule::new(
+            field,
+            Comparison::Is,
+            Some(RuleValue::Text(text.to_string())),
+        ))
+    }
+
+    /// The field of the Rule child at `index`, panicking when the child is a
+    /// Box or the row is not whole — the test-side spelling of "which Rule
+    /// sits where".
+    fn child_field(
+        root: &riff_gui::ui::rule_box::RuleBoxDraft,
+        index: usize,
+    ) -> riff_backend::domain::MatchableField {
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let RuleChildDraft::Rule(draft) = &root.children[index] else {
+            panic!("child {index} is a Box, not a Rule");
+        };
+        draft.field.expect("the fixture rows are whole Rules")
+    }
+
+    /// Drag one node's centre onto another's: press, move, release — one
+    /// real pointer gesture per frame, the playlist-reorder recipe.
+    fn drag_rects(harness: &mut TreeHarness<'_>, from: egui::Rect, to: egui::Rect) {
+        harness.drag_at(from.center());
+        harness.run();
+        harness.hover_at(to.center());
+        harness.run();
+        harness.drop_at(to.center());
+        harness.run();
+    }
+
+    /// The rect of the `nth` node labeled `label` in the last frame, failing
+    /// loudly with the count when there is no such node — a control that is
+    /// not in the frame is not draggable, whatever a picture suggests.
+    fn rect_of_nth(harness: &TreeHarness<'_>, label: &str, nth: usize) -> egui::Rect {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert!(
+            nodes.len() > nth,
+            "{label:?} has no node #{nth} of {} in the frame",
+            nodes.len()
+        );
+        nodes[nth].rect()
+    }
+
+    /// A Rule drags to a new position among its siblings, and the resulting
+    /// draft renumbers the one interleaved sibling order wholesale — the Box
+    /// between the two Rules shifts with them, in one numbering. Pinned as
+    /// the typed intent and as the resulting order, the way the playlist
+    /// reorder is pinned; the redrawn frame then draws the moved row at its
+    /// new position.
+    #[test]
+    fn test_a_rule_row_drags_to_a_new_position_among_its_siblings() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        let from = rect_of_nth(&harness, "Title", 0);
+        let to = rect_of_nth(&harness, "Album", 0);
+        assert!(
+            from.top() < to.top(),
+            "the fixture rows draw in sibling order before the gesture"
+        );
+        drag_rects(&mut harness, from, to);
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 2,
+                }),
+            "the drop reports the gesture as a typed intent: the first row onto the third"
+        );
+        let root = &harness.state().0.root;
+        assert!(
+            matches!(&root.children[0], RuleChildDraft::Box(_)),
+            "the Box between the Rules slid up one position"
+        );
+        assert_eq!(child_field(root, 1), MatchableField::Album);
+        assert_eq!(child_field(root, 2), MatchableField::Title);
+        assert!(
+            rect_of_nth(&harness, "Title", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
+            "the next frame redraws the moved row at its new position"
+        );
+    }
+
+    /// A Box's own control line is its row in the parent's list: dragging it
+    /// moves the whole child — the subtree travels with the line, exactly the
+    /// unit its remove control takes — and the Box and the Rules renumber in
+    /// the one shared sequence.
+    #[test]
+    fn test_a_box_line_drags_its_whole_subtree_among_its_siblings() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        // The nested Box's own combine line — node 1, after the Root Box's —
+        // drags down onto the last Rule.
+        let from = rect_of_nth(&harness, "All of the following", 1);
+        let to = rect_of_nth(&harness, "Album", 0);
+        drag_rects(&mut harness, from, to);
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 1,
+                    to: 2,
+                }),
+            "the Box's drop reports its own slot in the root's list"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(child_field(root, 1), MatchableField::Album);
+        let RuleChildDraft::Box(nested) = &root.children[2] else {
+            panic!("the Box landed at the end of the root's list");
+        };
+        assert_eq!(nested.rule_count(), 1, "the subtree moved with its line");
+        let RuleChildDraft::Rule(inner) = &nested.children[0] else {
+            panic!("the Box still holds its Rule");
+        };
+        assert_eq!(inner.field, Some(MatchableField::Artist));
+        assert!(
+            rect_of_nth(&harness, "Artist", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
+            "the moved Box's row is redrawn below its new neighbour"
+        );
+    }
+
+    /// A drop on the row it came from is a no-op: the gesture is reported —
+    /// the pane reports what was released, and the reorder math owns the
+    /// no-op rule, exactly as the playlist's commit owns its own — and the
+    /// tree changes nothing.
+    #[test]
+    fn test_a_drop_on_the_row_it_came_from_changes_nothing() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        // A real drag released back over its own row (press on Title, move
+        // to Album so the drag genuinely starts, back to Title, release).
+        let row = rect_of_nth(&harness, "Title", 0);
+        let away = rect_of_nth(&harness, "Album", 0);
+        harness.drag_at(row.center());
+        harness.run();
+        harness.hover_at(away.center());
+        harness.run();
+        harness.hover_at(row.center());
+        harness.run();
+        harness.drop_at(row.center());
+        harness.run();
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 0,
+                }),
+            "the drop is reported as the gesture it was: row 0 onto row 0"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(
+            root.children.len(),
+            3,
+            "a self-drop changes nothing, applied through the real applier"
+        );
+        assert_eq!(child_field(root, 0), MatchableField::Title);
+        assert!(matches!(&root.children[1], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 2), MatchableField::Album);
+        assert!(
+            harness.state().1.iter().all(|action| !matches!(
+                action,
+                SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+            )),
+            "no move was inferred from a self-drop"
+        );
+    }
+
+    /// A drop across a Box boundary moves nothing, in either direction. This
+    /// is the failure a bare sibling index creates: each list starts at zero,
+    /// so a payload of index 1 released over the root's row 0 would read as
+    /// "move root child 1 here" — the Box would silently cross its own
+    /// boundary and look like a success.
+    ///
+    /// The control at the end is the point: the same drag shape inside one
+    /// list reports the move, so the two silent gestures above prove the
+    /// boundary refusal, not a gesture the harness could never make.
+    #[test]
+    fn test_a_drop_across_a_box_boundary_moves_nothing_in_either_direction() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![
+                    RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "beta")),
+                    RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+                ],
+            }),
+        ];
+        harness.run();
+
+        /// The shape this test guards: the root's two children, the Box's two
+        /// — every list in the state the fixture spelled.
+        fn shape_holds(harness: &TreeHarness<'_>) {
+            use riff_gui::ui::rule_box::RuleChildDraft;
+
+            let root = &harness.state().0.root;
+            assert_eq!(root.children.len(), 2, "the root's list is untouched");
+            assert_eq!(child_field(root, 0), MatchableField::Title);
+            let RuleChildDraft::Box(nested) = &root.children[1] else {
+                panic!("the Box is still the root's second child");
+            };
+            assert_eq!(nested.children.len(), 2, "the Box's list is untouched");
+            assert_eq!(child_field(nested, 0), MatchableField::Artist);
+            assert_eq!(child_field(nested, 1), MatchableField::Album);
+            assert!(
+                harness.state().1.iter().all(|action| !matches!(
+                    action,
+                    SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+                )),
+                "a cross-boundary gesture never raised a move"
+            );
+        }
+
+        // Outward: the Box's second Rule (index 1 of the Box's list) onto the
+        // root's first row. A bare index would move root child 1 — the Box
+        // itself — in front of the Rule.
+        let inner = rect_of_nth(&harness, "Album", 0);
+        let root_row = rect_of_nth(&harness, "Title", 0);
+        drag_rects(&mut harness, inner, root_row);
+        shape_holds(&harness);
+
+        // Inward: the root's first Rule onto the Box's second row.
+        let root_row = rect_of_nth(&harness, "Title", 0);
+        let inner = rect_of_nth(&harness, "Album", 0);
+        drag_rects(&mut harness, root_row, inner);
+        shape_holds(&harness);
+
+        // The control: the same gesture shape inside one list — the Box's
+        // second Rule onto its first — reports and applies the move.
+        let inner_late = rect_of_nth(&harness, "Album", 0);
+        let inner_first = rect_of_nth(&harness, "Artist", 0);
+        drag_rects(&mut harness, inner_late, inner_first);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root().child(1),
+                    from: 1,
+                    to: 0,
+                }),
+            "the harness can make this exact gesture when the lists match"
+        );
+        let root = &harness.state().0.root;
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the Box is still the root's second child");
+        };
+        assert_eq!(child_field(nested, 0), MatchableField::Album);
+        assert_eq!(child_field(nested, 1), MatchableField::Artist);
+    }
+
+    /// A Box cannot be dropped inside its own descendant: dragging the Box's
+    /// own line onto a row inside it changes nothing, so no cycle prevention
+    /// and no drop-time depth check are needed anywhere. The control drag —
+    /// the same line onto its own sibling — shows the line's drag really
+    /// reports when the list matches.
+    #[test]
+    fn test_a_box_cannot_be_dropped_inside_its_own_descendant() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+        ];
+        harness.run();
+
+        // The nested Box's own line — node 1, after the Root Box's — onto the
+        // row the Box contains.
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let inside = rect_of_nth(&harness, "Artist", 0);
+        drag_rects(&mut harness, box_line, inside);
+
+        let root = &harness.state().0.root;
+        assert_eq!(
+            root.children.len(),
+            2,
+            "the Box stayed in its parent's list"
+        );
+        assert_eq!(child_field(root, 0), MatchableField::Title);
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the Box is still a child of the root");
+        };
+        assert_eq!(nested.children.len(), 1, "the Box did not swallow itself");
+        assert_eq!(child_field(nested, 0), MatchableField::Artist);
+        assert!(
+            harness.state().1.iter().all(|action| !matches!(
+                action,
+                SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+            )),
+            "the descendant drop raised no move"
+        );
+
+        // The control: the same line onto its sibling Rule, in the same list,
+        // really reports — the Box lands at the Rule's position.
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let sibling = rect_of_nth(&harness, "Title", 0);
+        drag_rects(&mut harness, box_line, sibling);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 1,
+                    to: 0,
+                }),
+            "the Box's own line reports a move among its siblings"
+        );
+        let root = &harness.state().0.root;
+        assert!(matches!(&root.children[0], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 1), MatchableField::Title);
+    }
+
+    /// The hit-area-before-paint discipline, measured from the production
+    /// pane: with the drag wired, a Rule row's own field control still takes
+    /// a real click — the header opens its list and the option click lands —
+    /// and the same wiring still starts drags (the reorder tests above).
+    #[test]
+    fn test_a_rule_rows_field_control_still_takes_clicks_under_the_drag_wiring() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        // The blank row's field header: a click must open its list…
+        harness.get_by_label("Choose a field").click();
+        harness.run();
+        // …whose options are then real: clicking Genre selects it.
+        let genre: Vec<_> = harness
+            .query_all_by_role_and_label(egui::accesskit::Role::RadioButton, "Genre")
+            .collect();
+        assert_eq!(genre.len(), 1, "the field list offers Genre once");
+        genre[0].click();
+        harness.run();
+
+        let RuleChildDraft::Rule(draft) = &harness.state().0.root.children[0] else {
+            panic!("the first row is a Rule");
+        };
+        assert_eq!(
+            draft.field,
+            Some(MatchableField::Genre),
+            "the click reached the header inside the drag hit-area"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Genre").count(),
+            1,
+            "and the row redrew with the chosen field"
+        );
+    }
+
+    /// The shared text control inside a drag-wrapped row still takes a real
+    /// click and still accepts typed input — the exact failure the ticket
+    /// names: a drag hit-area above the row would leave this well unfocusable,
+    /// so a click never reaches it. The click is a pointer event, and the
+    /// typing goes to whatever holds focus, so the committed value is the
+    /// proof the click landed.
+    #[test]
+    fn test_a_rule_rows_text_well_still_takes_a_click_and_a_typed_value() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{Comparison, MatchableField};
+        use riff_gui::ui::rule_box::RuleChildDraft;
+        use riff_gui::ui::rule_row::{ComparisonChoice, RuleDraft, RuleIntent, RuleValueDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        // One row with a field and a comparison chosen the way the row
+        // chooses them, and nothing typed: the value well is the shared text
+        // field, empty.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Title,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::Is),
+        });
+        harness.state_mut().0.root.children = vec![RuleChildDraft::Rule(draft)];
+        harness.run();
+
+        // The pane's two text inputs: the name field, and the row's well —
+        // the later one in reading order.
+        let inputs: Vec<_> = harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .collect();
+        assert_eq!(inputs.len(), 2, "the name field and the row's value well");
+        inputs[1].click();
+        harness.run();
+        let well = harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .last()
+            .expect("the well is still in the frame");
+        assert!(
+            well.is_focused(),
+            "the click reached the shared text field through the drag hit-area"
+        );
+        well.type_text("jazz");
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+
+        let RuleChildDraft::Rule(draft) = &harness.state().0.root.children[0] else {
+            panic!("the row is a Rule");
+        };
+        assert_eq!(
+            draft.value,
+            RuleValueDraft::Text("jazz".to_string()),
+            "the typed value committed through the row"
+        );
     }
 
     fn sample_content() -> SettingsContent {
@@ -16277,6 +16877,99 @@ mod whole_frame_tests {
             y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma")
                 && y_of(&shell.harness, "Artist - Gamma") < y_of(&shell.harness, "Artist - Alpha"),
             "the next real frame renders the committed order with no explicit invalidation"
+        );
+    }
+
+    /// A real drag on the Smart Playlists page reorders the Rules, and the
+    /// next frame draws the rows in the new order. The page is reached the
+    /// way a listener reaches it — Settings, the nav item, the list's own
+    /// row — so the drag has to survive the whole frame protocol to land,
+    /// and the drop runs through the typed `SettingsAction` and the applier,
+    /// never a test-side shortcut.
+    #[test]
+    fn test_a_real_drag_reorders_rule_rows_in_a_composed_frame() {
+        use riff_backend::app::state::ViewMode;
+        use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
+            RuleValue,
+        };
+
+        // One saved list, three Rules in its Root Box, each with its own
+        // header label so the frame's order is readable.
+        let id = PlaylistId::new("spl-morning-1");
+        let mut mock = MockLibraryQueryStore {
+            custom_smart_playlists: vec![CustomSmartPlaylist {
+                id: id.clone(),
+                name: "Morning drive".to_string(),
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            ..Default::default()
+        };
+        mock.smart_playlist_trees.insert(
+            id,
+            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+                vec![
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Title,
+                        Comparison::Is,
+                        Some(RuleValue::Text("midnight".to_string())),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Year,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(1975)),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::PlayCount,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(10)),
+                    )),
+                ],
+            ))),
+        );
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+
+        // Settings → Smart Playlists → the list's row, all by real clicks.
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        // The nav click applies at the end of its frame; the pane paints the
+        // next one, and the list's row exists only after that.
+        shell.harness.run_steps(2);
+        // The name sits twice in the a11y tree now — the sidebar's own custom
+        // row (ticket 12) and this pane's list row — so the click is scoped
+        // to the pane: the sidebar never crosses its 280px panel edge.
+        shell
+            .harness
+            .query_all_by_label("Morning drive")
+            .find(|node| node.rect().left() > 300.0)
+            .expect("the pane's list row renders on the stage")
+            .click();
+        shell.harness.run_steps(2);
+
+        assert!(
+            y_of(&shell.harness, "Title") < y_of(&shell.harness, "Year")
+                && y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays"),
+            "the pane renders the stored order top to bottom"
+        );
+
+        // Drag the first row onto the third: press, move, release.
+        let src = shell.harness.get_by_label("Title").rect();
+        let dst = shell.harness.get_by_label("Plays").rect();
+        shell.harness.drag_at(src.center());
+        shell.harness.step();
+        shell.harness.hover_at(dst.center());
+        shell.harness.step();
+        shell.harness.drop_at(dst.center());
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays")
+                && y_of(&shell.harness, "Plays") < y_of(&shell.harness, "Title"),
+            "the next frame draws the reordered draft: Title moved to the end"
         );
     }
 

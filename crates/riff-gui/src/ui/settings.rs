@@ -577,6 +577,22 @@ pub enum SettingsAction {
         /// The child's index in that box's interleaved order.
         index: usize,
     },
+    /// The drag-and-drop reorder inside one Box's sibling list (ticket 19):
+    /// the child at `from` is dragged to position `to`. One numbering covers
+    /// both kinds — Rules and Boxes renumber together, because one list is
+    /// what the store positions and the pane draws. `from == to` (a drop on
+    /// the row it came from) and any out-of-range index change nothing: the
+    /// no-op rule lives with the reorder math, never at the paint, and a
+    /// payload from a **different** Box's list never reaches this action at
+    /// all (the drag is scoped to its list at the row).
+    MoveSmartPlaylistChild {
+        /// The Box whose sibling list is being reordered.
+        parent: BoxPath,
+        /// The dragged child's index before the move.
+        from: usize,
+        /// The position it lands at — the row it was dropped on.
+        to: usize,
+    },
     /// The combine chosen for the Box at `path`: all of the following, or any
     /// of the following.
     SetSmartPlaylistCombine {
@@ -3163,6 +3179,9 @@ impl super::app::RiffApp {
             }
             SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
                 self.smart_playlists_editor.remove_child(&parent, index);
+            }
+            SettingsAction::MoveSmartPlaylistChild { parent, from, to } => {
+                self.smart_playlists_editor.move_child(&parent, from, to);
             }
             SettingsAction::SetSmartPlaylistCombine { path, combine } => {
                 self.smart_playlists_editor.set_combine(&path, combine);

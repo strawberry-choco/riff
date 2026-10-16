@@ -1292,7 +1292,8 @@ pub mod geometry {
     /// The Rule row's date controls (`riff_gui::ui::rule_date`): the calendar
     /// button plus the typed three-number time that a `before`/`after` Rule
     /// takes, and the day-count well `in the last` takes. Same scale as the
-    /// row's own wells ([`rule_row::WELL_H`](super::rule_row::WELL_H)).
+    /// row's own wells (`rule_row::WELL_H`, in the frontend — this crate names
+    /// no application crate, so the name is prose rather than a link).
     pub mod rule_date {
         /// Width of the calendar button. Fixed, not measured: the button's
         /// text is a fixed-width `YYYY-MM-DD`, so the row does not jitter as

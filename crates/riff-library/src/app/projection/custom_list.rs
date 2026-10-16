@@ -44,8 +44,8 @@
 //!
 //! The editor's live "matches N songs" line counts a tree that is **not
 //! saved**: no [`PlaylistId`] to look one up by, and a shape that changes
-//! several times inside one library generation. [`Self::count_tree`] serves
-//! it over the same bounded Listing Page read (the total alone, `limit 0`),
+//! several times inside one library generation. [`CustomPlaylistProjection::count_tree`]
+//! serves it over the same bounded Listing Page read (the total alone, `limit 0`),
 //! and holds each answer against the **compiled tree's shape** for the
 //! library generation it was read at — so a repaint of an unchanged tree,
 //! and an edit that brings a Rule back to a value it held before, both come

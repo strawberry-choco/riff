@@ -8424,7 +8424,7 @@ mod tests {
             created_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let mut reopened = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
-        reopened.load_saved(&list, Some(root));
+        reopened.load_saved(&list, Some(&read));
         assert_eq!(child_field(&reopened.root, 0), MatchableField::Album);
         assert_eq!(child_field(&reopened.root, 1), MatchableField::Artist);
         let RuleChildDraft::Box(inner) = &reopened.root.children[2] else {
@@ -8489,7 +8489,7 @@ mod tests {
     /// The rect of the `nth` node labeled `label` in the last frame, failing
     /// loudly with the count when there is no such node — a control that is
     /// not in the frame is not draggable, whatever a picture suggests.
-    fn rect_of(harness: &TreeHarness<'_>, label: &str, nth: usize) -> egui::Rect {
+    fn rect_of_nth(harness: &TreeHarness<'_>, label: &str, nth: usize) -> egui::Rect {
         use egui_kittest::kittest::Queryable as _;
 
         let nodes: Vec<_> = harness.query_all_by_label(label).collect();
@@ -8529,8 +8529,8 @@ mod tests {
         ];
         harness.run();
 
-        let from = rect_of(&harness, "Title", 0);
-        let to = rect_of(&harness, "Album", 0);
+        let from = rect_of_nth(&harness, "Title", 0);
+        let to = rect_of_nth(&harness, "Album", 0);
         assert!(
             from.top() < to.top(),
             "the fixture rows draw in sibling order before the gesture"
@@ -8556,7 +8556,7 @@ mod tests {
         assert_eq!(child_field(root, 1), MatchableField::Album);
         assert_eq!(child_field(root, 2), MatchableField::Title);
         assert!(
-            rect_of(&harness, "Title", 0).top() > rect_of(&harness, "Album", 0).top(),
+            rect_of_nth(&harness, "Title", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
             "the next frame redraws the moved row at its new position"
         );
     }
@@ -8589,8 +8589,8 @@ mod tests {
 
         // The nested Box's own combine line — node 1, after the Root Box's —
         // drags down onto the last Rule.
-        let from = rect_of(&harness, "All of the following", 1);
-        let to = rect_of(&harness, "Album", 0);
+        let from = rect_of_nth(&harness, "All of the following", 1);
+        let to = rect_of_nth(&harness, "Album", 0);
         drag_rects(&mut harness, from, to);
 
         assert!(
@@ -8615,7 +8615,7 @@ mod tests {
         };
         assert_eq!(inner.field, Some(MatchableField::Artist));
         assert!(
-            rect_of(&harness, "Artist", 0).top() > rect_of(&harness, "Album", 0).top(),
+            rect_of_nth(&harness, "Artist", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
             "the moved Box's row is redrawn below its new neighbour"
         );
     }
@@ -8648,8 +8648,8 @@ mod tests {
 
         // A real drag released back over its own row (press on Title, move
         // to Album so the drag genuinely starts, back to Title, release).
-        let row = rect_of(&harness, "Title", 0);
-        let away = rect_of(&harness, "Album", 0);
+        let row = rect_of_nth(&harness, "Title", 0);
+        let away = rect_of_nth(&harness, "Album", 0);
         harness.drag_at(row.center());
         harness.run();
         harness.hover_at(away.center());
@@ -8744,21 +8744,21 @@ mod tests {
         // Outward: the Box's second Rule (index 1 of the Box's list) onto the
         // root's first row. A bare index would move root child 1 — the Box
         // itself — in front of the Rule.
-        let inner = rect_of(&harness, "Album", 0);
-        let root_row = rect_of(&harness, "Title", 0);
+        let inner = rect_of_nth(&harness, "Album", 0);
+        let root_row = rect_of_nth(&harness, "Title", 0);
         drag_rects(&mut harness, inner, root_row);
         shape_holds(&harness);
 
         // Inward: the root's first Rule onto the Box's second row.
-        let root_row = rect_of(&harness, "Title", 0);
-        let inner = rect_of(&harness, "Album", 0);
+        let root_row = rect_of_nth(&harness, "Title", 0);
+        let inner = rect_of_nth(&harness, "Album", 0);
         drag_rects(&mut harness, root_row, inner);
         shape_holds(&harness);
 
         // The control: the same gesture shape inside one list — the Box's
         // second Rule onto its first — reports and applies the move.
-        let inner_late = rect_of(&harness, "Album", 0);
-        let inner_first = rect_of(&harness, "Artist", 0);
+        let inner_late = rect_of_nth(&harness, "Album", 0);
+        let inner_first = rect_of_nth(&harness, "Artist", 0);
         drag_rects(&mut harness, inner_late, inner_first);
         assert!(
             harness
@@ -8807,8 +8807,8 @@ mod tests {
 
         // The nested Box's own line — node 1, after the Root Box's — onto the
         // row the Box contains.
-        let box_line = rect_of(&harness, "All of the following", 1);
-        let inside = rect_of(&harness, "Artist", 0);
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let inside = rect_of_nth(&harness, "Artist", 0);
         drag_rects(&mut harness, box_line, inside);
 
         let root = &harness.state().0.root;
@@ -8833,8 +8833,8 @@ mod tests {
 
         // The control: the same line onto its sibling Rule, in the same list,
         // really reports — the Box lands at the Rule's position.
-        let box_line = rect_of(&harness, "All of the following", 1);
-        let sibling = rect_of(&harness, "Title", 0);
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let sibling = rect_of_nth(&harness, "Title", 0);
         drag_rects(&mut harness, box_line, sibling);
         assert!(
             harness

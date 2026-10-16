@@ -101,8 +101,40 @@ A named, ordered list of Track references created and edited by the user.
 _Avoid_: queue
 
 **Smart Playlist**:
-A read-only Playlist generated on demand from current Library and play-history facts; it is never stored as an entity.
-_Avoid_: saved search
+A read-only list of Tracks whose membership is derived on demand from current Library and play-history facts; its Tracks are never stored. It is not a Playlist — a Playlist stores the user's Track references, a Smart Playlist does not.
+_Avoid_: saved search, smart list
+
+**Built-in Smart Playlist**:
+One of the fixed Smart Playlists riff ships and defines itself.
+_Avoid_: system playlist, preset
+
+**Custom Smart Playlist**:
+A Smart Playlist whose membership comes from Rules the user wrote. The Rules are the user's data; the Tracks it lists remain derived.
+_Avoid_: dynamic playlist, filter
+
+**Rule**:
+A user-authored condition on Track facts, combined with other Rules by AND or OR, that decides a Custom Smart Playlist's membership.
+_Avoid_: condition, clause, filter
+
+**Rule Box**:
+A container in a Custom Smart Playlist that says whether everything inside it must match or whether any one thing may. A box holds Rules and other boxes.
+_Avoid_: rule group, match set, folder
+
+**Root Box**:
+The one Rule Box in a Custom Smart Playlist that has no parent; every other box and Rule hangs inside it, and the limit on how deep a list may nest is counted from it. A saved list holds at least one Rule somewhere inside it — an empty tree is not storable.
+_Avoid_: top box, outer box, root group
+
+**Unreadable Rule**:
+A Rule that names a Matchable Field or a comparison this build does not know, because a newer riff wrote it. It is shown as unreadable rather than hidden, makes its Custom Smart Playlist match nothing, and blocks saving that list until the listener removes it: riff neither repairs it nor discards it.
+_Avoid_: invalid rule, broken rule, unknown field
+
+**Duplicate**:
+The action that copies a Custom Smart Playlist's whole set of Rules into a new list under a derived name, so a variation can be written without losing the original. The copy is durable the moment it is made; it is not a draft.
+_Avoid_: copy, clone, fork, save as
+
+**Matchable Field**:
+One piece of Track information a Rule can test — genre, play count, duration, and the like. Each carries a stable identity that Rules refer to, separate from the display name the editor shows, so a name can change without the user's saved Rules changing.
+_Avoid_: attribute, column, tag
 
 **Playback Queue**:
 The transient ordered set of Tracks scheduled for playback; it is not part of persisted state.

@@ -14566,7 +14566,7 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::{By, NodeT, Queryable};
+    use egui_kittest::kittest::{By, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
@@ -19144,11 +19144,31 @@ mod whole_frame_tests {
         shell.harness.step();
         shell.harness.step();
 
+        // The premise, stated: the Library's flat listing draws its own rows,
+        // labelled "Artist - Title" (`label_artist_title`), and the custom
+        // list's rule ("Title is alpha") matches only Alpha — so Beta's row
+        // is the witness that the flat listing is on screen and that the
+        // custom listing's narrower match is what replaced it.
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some()
+                && shell
+                    .harness
+                    .query(By::new().label("Artist - Beta"))
+                    .is_some(),
+            "the Library's flat listing is what the frame starts on"
+        );
+
         shell.harness.get_by_label("Late night jazz").click();
         shell.harness.step();
         shell.harness.step();
         assert!(
-            shell.harness.query(By::new().label("Alpha")).is_none(),
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
             "the open custom list replaced the Library's flat listing"
         );
 
@@ -19167,8 +19187,157 @@ mod whole_frame_tests {
             "the deleted list's row is gone from the sidebar"
         );
         assert!(
-            shell.harness.query(By::new().label("Alpha")).is_some(),
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some()
+                && shell
+                    .harness
+                    .query(By::new().label("Artist - Beta"))
+                    .is_some(),
             "the Library's own listing is what draws — a stale id cannot render as an empty listing"
+        );
+    }
+
+    /// Custom rows are unaffected by Advanced mode, and the six Built-ins'
+    /// gating is unchanged: exactly Never Played and Lost Gems follow the
+    /// toggle, and the listener's own lists are visible with the toggle off
+    /// (a headline feature behind a toggle is not a headline feature).
+    #[test]
+    fn custom_rows_ignore_advanced_mode_and_the_built_ins_gating_is_unchanged() {
+        let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![
+                custom_list("spl-late-night-1", "Late night jazz"),
+                custom_list("spl-deep-focus-1", "Deep focus"),
+            ],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+
+        // Advanced OFF (the launch default): the four core Built-ins and both
+        // custom rows draw; the two advanced-gated kinds do not.
+        for label in [
+            "Recently Added (0)",
+            "Recently Played (0)",
+            "Most Played (0)",
+            "Favorites (0)",
+            "Late night jazz",
+            "Deep focus",
+        ] {
+            assert!(
+                shell.harness.query(By::new().label(label)).is_some(),
+                "{label} must draw with Advanced mode off"
+            );
+        }
+        for gated in ["Never Played (0)", "Lost Gems (0)"] {
+            assert!(
+                shell.harness.query(By::new().label(gated)).is_none(),
+                "{gated} is one of the two Advanced-gated Built-ins"
+            );
+        }
+
+        // Advanced ON: the two gated Built-ins join, and the custom rows are
+        // untouched — no Advanced gate anywhere on the row pass.
+        shell.library.lock().unwrap().ui_flags.advanced_mode = true;
+        shell.harness.step();
+        for label in [
+            "Never Played (0)",
+            "Lost Gems (0)",
+            "Late night jazz",
+            "Deep focus",
+        ] {
+            assert!(
+                shell.harness.query(By::new().label(label)).is_some(),
+                "{label} must draw with Advanced mode on"
+            );
+        }
+    }
+
+    /// The section's collapse chevron hides the custom rows with the rest of
+    /// the section — the same fold gate the six Built-ins sit behind — and
+    /// expanding brings them back. The fold's clearing of the open slot is the
+    /// Frame seam's, pinned in `frame_tests` (the slot is private to the app).
+    #[test]
+    fn collapsing_the_section_hides_the_custom_rows_with_the_built_ins() {
+        let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            ..MockLibraryQueryStore::default()
+        });
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_some(),
+            "the custom row draws while the section is open"
+        );
+
+        shell.harness.get_by_label("Collapse Smart Lists").click();
+        // The chevron paints before its own action is applied, so the label
+        // flips one frame after the rows' fold gate reads the flag.
+        shell.harness.step();
+        for label in ["Late night jazz", "Favorites (0)"] {
+            assert!(
+                shell.harness.query(By::new().label(label)).is_none(),
+                "{label} folds away with the section"
+            );
+        }
+        shell.harness.step();
+
+        shell.harness.get_by_label("Expand Smart Lists").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_some(),
+            "expanding the section brings the custom rows back"
+        );
+    }
+
+    /// The row pass's typed intent, at the widget seam: a click on a custom
+    /// row reports `OpenSmartList(Custom(that row's id))` — its own id, not a
+    /// sibling's — and nothing else. No store, no slot, no frame in the way;
+    /// the composed frame above proves the same intent reaches the slot.
+    #[test]
+    fn test_a_custom_row_click_reports_its_typed_sidebar_intent() {
+        use riff_gui::ui::app::{SmartListIdentity, custom_smart_list_rows};
+        use riff_gui::ui::frame::{SidebarAction, SidebarReport};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let lists = vec![
+            custom_list("spl-late-night-1", "Late night jazz"),
+            custom_list("spl-deep-focus-1", "Deep focus"),
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(280.0, 120.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, report: &mut SidebarReport| {
+                    custom_smart_list_rows(ui, &mut cache, &palette, false, &lists, None, report);
+                },
+                SidebarReport::default(),
+            );
+        harness.run();
+        assert!(
+            harness.state().actions.is_empty(),
+            "no row reports anything until one is clicked"
+        );
+
+        harness.get_by_label("Deep focus").click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            vec![SidebarAction::OpenSmartList(SmartListIdentity::Custom(
+                PlaylistId("spl-deep-focus-1".to_string())
+            ))],
+            "the clicked row reports its own id as the typed sidebar intent"
         );
     }
 }

@@ -1,10 +1,9 @@
-//! The date half of a Rule row — **ticket 20's seam, stubbed here by design**.
+//! The date half of a Rule row — a day window, or a fixed date with a time.
 //!
 //! The catalog answers `ValueWidget::DateTime` for `before`/`after` and
 //! `ValueWidget::DateWindow` for `in the last` (ADR 0021's zone-less dates);
 //! the row that assembles the parts routes both ideas to this module and
-//! nothing else. Two items are the whole contract, and ticket 20 replaces
-//! their bodies without touching [`crate::ui::rule_row`] again:
+//! nothing else. Two items are the whole contract:
 //!
 //! - [`RuleDateDraft::value`], the parse from typed buffers to the
 //!   [`RuleValue`] a date Rule stores (`Days` for a window, `DateTime` for a
@@ -12,18 +11,28 @@
 //!   get their shapes.
 //! - [`rule_date_row`], the paint-and-report half.
 //!
-//! Until then the stub is honest about being unrendered: it paints one label
-//! naming what is missing, takes no input, and reports no intent, so
-//! [`RuleDateDraft::value`] answers `None` and a date Rule stays
-//! half-formed — which [`crate::ui::rule_row::RuleDraft::gap`] reports as a
-//! missing **value**, pointing at this module rather than pretending a
-//! calendar exists. No calendar is built here, and no date library is
-//! pulled in: `CivilDateTime` carries its parts precisely so this crate
-//! never has to name one.
+//! **The row's contract is the crate's standing one: props in, typed intents
+//! out.** [`rule_date_row`] performs no effect, and it does not write the
+//! [`RuleDateDraft`] it is handed either: every edit leaves as a
+//! [`RuleDateIntent`], and [`crate::ui::rule_row::RuleDraft::apply`] is the
+//! one place a buffer changes. A half-typed pair is therefore never an
+//! error — [`RuleDateDraft::value`] answers `None`, which
+//! [`crate::ui::rule_row::RuleDraft::gap`] reports like any other half-filled
+//! Rule, and the buffers keep what the listener typed so the edit can
+//! continue.
+//!
+//! The calendar is the one third-party widget this feature accepts: the
+//! `datepicker` on the frontend's existing `egui_extras`, whose `jiff` cost
+//! ticket 07 priced. The typed time stays three plain number wells — a full
+//! date-and-time control is not worth a second dependency. Storage is the
+//! decision, not the widget: [`RuleDateDraft::value`] records why a window
+//! is a whole day count and a fixed boundary is zone-less.
 
 use eframe::egui;
 use riff_backend::domain::{CivilDateTime, RuleValue};
+use riff_gui_components::text_field::{TextField, text_field};
 use riff_gui_theme::icons::IconCache;
+use riff_gui_theme::theme::geometry::rule_row::{NUMBER_W, WELL_H};
 use riff_gui_theme::theme::{self, Palette};
 
 /// Which of the catalog's two date ideas this row is drawing.
@@ -84,18 +93,33 @@ impl RuleDateDraft {
     /// **The seam ticket 20 implements.** The stored value these buffers
     /// spell, or `None` while they do not spell one.
     ///
-    /// The row treats `None` as a missing value, so an incomplete or invalid
-    /// date is reported by [`crate::ui::rule_row::RuleDraft::gap`] and the
-    /// editor refuses to save it — the behaviour is already wired, only the
-    /// parse is not. Today this always answers `None`: the controls that
-    /// would fill the buffers land in ticket 20.
+    /// `None` is the whole failure surface: the row treats it as a missing
+    /// value, so a partly typed pair holds the draft open and
+    /// [`crate::ui::rule_row::RuleDraft::gap`] reports it like any other
+    /// half-filled Rule — never an error dialog, and never a silently
+    /// coerced answer.
+    ///
+    /// The two kinds store differently on purpose, and that difference is
+    /// the feature's decision, not the widget's convenience:
+    ///
+    /// - a window is a **whole number of days** ([`RuleValue::Days`]): a day
+    ///   count is the finest resolution a Rule gives, and the store turns it
+    ///   into a cutoff computed **at read time** from the same epoch clock
+    ///   the history facts were written with, so the same saved Rule keeps
+    ///   meaning "recently" tomorrow;
+    /// - a fixed boundary is the **zone-less** day and time exactly as typed
+    ///   ([`RuleValue::DateTime`] carrying a [`CivilDateTime`]): `before` and
+    ///   `after` are read against the listener's own clock on the machine
+    ///   doing the reading, so nothing here resolves the pair through a
+    ///   clock or a zone — storing a zone would make one saved Rule answer
+    ///   differently on a machine in another zone, the worse surprise for an
+    ///   offline desktop player.
     #[must_use]
-    #[allow(
-        clippy::unused_self,
-        reason = "the stub reads no buffer; ticket 20's parse reads all three"
-    )]
-    pub fn value(&self, _kind: RuleDateKind) -> Option<RuleValue> {
-        None
+    pub fn value(&self, kind: RuleDateKind) -> Option<RuleValue> {
+        match kind {
+            RuleDateKind::DateWindow => whole_days(&self.window_days).map(RuleValue::Days),
+            RuleDateKind::DateTime => None,
+        }
     }
 
     /// The parts of a `YYYY-MM-DD HH:MM:SS` pair, once ticket 20 has a
@@ -116,6 +140,12 @@ impl RuleDateDraft {
             second,
         })
     }
+}
+
+/// A whole day count, or `None` for anything else — including the empty
+/// buffer, which is an absence rather than a window of zero days.
+fn whole_days(text: &str) -> Option<u32> {
+    text.trim().parse().ok()
 }
 
 /// `YYYY-MM-DD` as parts, or `None` for anything else.
@@ -161,32 +191,71 @@ pub enum RuleDateIntent {
 /// the listener typed into it. `id` is the row's widget identity for this
 /// control — the caller derives it, so two rows in one pane cannot collide.
 ///
-/// The stub paints one honest label and reports nothing; a real
-/// implementation keeps this module's contract — props in, typed intents
-/// out, every design value read from the theme store, the caller's buffers
-/// the only thing mutated (here through the intents, applied by
-/// [`crate::ui::rule_row::RuleDraft::apply`]).
+/// Every edit leaves as a [`RuleDateIntent`]; `draft` is read, never written
+/// — the caller lands what is reported through
+/// [`crate::ui::rule_row::RuleDraft::apply`], which is the one writer of the
+/// buffers. A single intent per part is the report: the well hands its edited
+/// contents, the calendar its saved day, and a repaint that changed nothing
+/// reports nothing.
 #[must_use]
 pub fn rule_date_row(
     ui: &mut egui::Ui,
-    _cache: &mut IconCache,
+    cache: &mut IconCache,
     palette: &Palette,
     id: egui::Id,
     kind: RuleDateKind,
-    _draft: &mut RuleDateDraft,
+    draft: &mut RuleDateDraft,
 ) -> Vec<RuleDateIntent> {
-    let _ = id;
-    let word = match kind {
-        RuleDateKind::DateTime => "a date and time",
-        RuleDateKind::DateWindow => "a window of days",
-    };
-    ui.label(
-        egui::RichText::new(format!(
-            "date entry for {word} lands in ticket 20 — not rendered by this build"
-        ))
-        .text_style(egui::TextStyle::Small)
-        .color(palette.ink_3),
+    let mut intents = Vec::new();
+    match kind {
+        RuleDateKind::DateWindow => draw_window(ui, cache, palette, id, draft, &mut intents),
+        RuleDateKind::DateTime => {
+            // The calendar-and-time half is the next slice of ticket 20 and
+            // stays honest about being unrendered until it lands.
+            let _ = (cache, draft);
+            ui.label(
+                egui::RichText::new(
+                    "date entry for a date and time lands in ticket 20 — not rendered by this build",
+                )
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+            );
+            ui.add_space(theme::SPACE_XS);
+        }
+    }
+    intents
+}
+
+/// The day window's one well: a whole number of days, with no unit to choose
+/// — a day count is the finest resolution a Rule gives, and the store turns
+/// it into a cutoff at read time.
+fn draw_window(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    id: egui::Id,
+    draft: &RuleDateDraft,
+    intents: &mut Vec<RuleDateIntent>,
+) {
+    let mut buffer = draft.window_days.clone();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(NUMBER_W, WELL_H), egui::Sense::hover());
+    text_field(
+        ui,
+        cache,
+        palette,
+        &mut buffer,
+        &TextField {
+            id: id.with("window"),
+            rect,
+            hint: "days",
+            leading_icon: None,
+            clear_label: None,
+            // Escape belongs to the editor that hosts the row, never to the
+            // well the cursor happens to sit in (the tag editor's rule).
+            dismiss_on_escape: false,
+        },
     );
-    ui.add_space(theme::SPACE_XS);
-    Vec::new()
+    if buffer != draft.window_days {
+        intents.push(RuleDateIntent::WindowDays(buffer));
+    }
 }

@@ -416,6 +416,15 @@ pub struct RuleDraft {
     /// Which inline list is open, if any. Presentation state that travels with
     /// the row it belongs to, so a host needs only one draft per row.
     pub open: Option<RulePanel>,
+    /// The value the draft last landed, maintained by [`RuleDraft::apply`].
+    ///
+    /// Held so the row can keep its half of the selector's deduplication rule:
+    /// `option_list` reports every click including the row already current, and
+    /// a text field keeps reporting Enter while it holds focus. A second report
+    /// of the same answer is a no-op for every host (tickets 15–18), so the row
+    /// does not emit one — which is what stops one Enter becoming two live-count
+    /// reads.
+    committed: Option<RuleValue>,
 }
 
 impl RuleDraft {
@@ -428,6 +437,7 @@ impl RuleDraft {
             negated: false,
             value: RuleValueDraft::NoValue,
             open: None,
+            committed: None,
         }
     }
 
@@ -446,6 +456,7 @@ impl RuleDraft {
             negated: rule.is_negated(),
             value,
             open: None,
+            committed: rule.value().cloned(),
         }
     }
 
@@ -613,8 +624,10 @@ impl RuleDraft {
                     // A value cannot be drawn here, so it cannot be stored
                     // either: `is missing` keeps its value column NULL.
                     self.value = RuleValueDraft::NoValue;
+                    self.committed = None;
                 } else {
                     self.value = RuleValueDraft::from_value(value);
+                    self.committed = Some(value.clone());
                 }
             }
             RuleIntent::Date(date_intent) => {
@@ -651,6 +664,7 @@ impl RuleDraft {
         let after = self.value_widgets();
         if before != after {
             self.value = RuleValueDraft::for_widgets(after);
+            self.committed = None;
         }
     }
 
@@ -678,6 +692,7 @@ impl RuleDraft {
         let after = self.value_widgets();
         if before != after {
             self.value = RuleValueDraft::for_widgets(after);
+            self.committed = None;
         }
     }
 }
@@ -733,6 +748,15 @@ pub fn rule_row(
             draw_comparison_header(ui, cache, palette, id, draft, &mut intents);
             ui.add_space(PART_GAP);
         }
+        // The switch's own accessible name is "Not", but a bare pill says
+        // nothing to a listener reading the row as a sentence — and the golden
+        // of this row proved it. The word is painted beside the control.
+        ui.label(
+            egui::RichText::new("Not")
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_2),
+        );
+        ui.add_space(theme::SPACE_XS);
         if toggle_switch(ui, palette, id.with("not"), "Not", draft.negated) {
             let negated = !draft.negated;
             draft.negated = negated;
@@ -940,10 +964,19 @@ fn draw_value(
 /// A value accepted on Enter or on blur: re-parse the buffers the shared text
 /// fields just edited, and report only what this field's type can read.
 fn commit_value(draft: &RuleDraft, intents: &mut Vec<RuleIntent>) {
-    let widgets = draft.value_widgets();
-    if let ParsedValue::Value(value) = draft.value.parse(widgets) {
-        intents.push(RuleIntent::ValueCommitted { value });
+    if let ParsedValue::Value(value) = draft.value.parse(draft.value_widgets()) {
+        report_value(draft, value, intents);
     }
+}
+
+/// Report a chosen or typed answer, once. Clicking the option already current,
+/// or pressing Enter twice over an unchanged buffer, is the host's no-op — the
+/// selector's deduplication rule, kept by the row that uses it.
+fn report_value(draft: &RuleDraft, value: RuleValue, intents: &mut Vec<RuleIntent>) {
+    if draft.committed.as_ref() == Some(&value) {
+        return;
+    }
+    intents.push(RuleIntent::ValueCommitted { value });
 }
 
 /// One typed well, and whether the listener asked it to commit this frame.
@@ -1007,7 +1040,7 @@ fn draw_yes_no(
             current: current.as_ref(),
         },
     ) {
-        intents.push(RuleIntent::ValueCommitted { value });
+        report_value(draft, value, intents);
     }
 }
 
@@ -1135,7 +1168,7 @@ fn draw_picker_list(
             current: current.as_ref(),
         },
     ) {
-        intents.push(RuleIntent::ValueCommitted { value });
+        report_value(draft, value, intents);
         intents.push(RuleIntent::PickerClosed);
     }
 }

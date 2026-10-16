@@ -3089,4 +3089,115 @@ mod tests {
             .retain(|album| titles.contains(&album.title.as_str()));
         query
     }
+
+    /// A Rule row that a listener has *clicked* into its chosen state, captured
+    /// in the dark palette (ticket 14's surface).
+    ///
+    /// A declared specimen, the same class ticket 06 used for the selector: no
+    /// production surface composes the row until ticket 15's Settings page, so
+    /// the host is a test-only pane at a settings-pane content width, driving
+    /// the row through its production entry point. The picture is evidence of
+    /// clicks, not of a paint — every part of the row got here through a real
+    /// `click()` on a named control, and the test re-reads the draft it left
+    /// behind before it snapshots. The Not control is on, because an inversion
+    /// that only exists in a state buffer is exactly the thing a picture should
+    /// be held to show.
+    #[test]
+    fn rule_row_after_clicks_dark_matches_golden_baseline() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{Comparison, MatchableField};
+        use riff_gui::ui::rule_row::{RuleDraft, RulePickerValues, RuleValueDraft, rule_row};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::RADIUS_MD;
+
+        let _slot = harness_slot();
+        let palette = Palette::dark();
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let drawing = std::rc::Rc::clone(&ready);
+        let drafts = std::rc::Rc::new(std::cell::RefCell::new(vec![RuleDraft::blank()]));
+        let observed = std::rc::Rc::clone(&drafts);
+        let cache = std::rc::Rc::new(std::cell::RefCell::new(IconCache::new()));
+        let values = vec!["ambient".to_string(), "electronic".to_string()];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(620.0, 220.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| {
+                if !drawing.get() {
+                    return;
+                }
+                let background = ui.ctx().layer_painter(egui::LayerId::background());
+                background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                egui::Frame::new()
+                    .fill(palette.surface)
+                    .corner_radius(RADIUS_MD)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let mut drafts = drafts.borrow_mut();
+                        let picker = RulePickerValues::Texts(&values);
+                        let outcome = rule_row(
+                            ui,
+                            &mut cache.borrow_mut(),
+                            &palette,
+                            egui::Id::new("golden_rule_row"),
+                            &mut drafts[0],
+                            Some(&picker),
+                        );
+                        for intent in outcome.intents {
+                            drafts[0].apply(&intent);
+                        }
+                    });
+            });
+        theme::install(&harness.ctx, &palette, false);
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        pin_settled_time(&harness.ctx);
+        ready.set(true);
+        harness.run_steps(2);
+
+        let mut settle = |harness: &mut egui_kittest::Harness<'_>, label: &str| {
+            harness.get_by_label(label).click();
+            harness.run_steps(2);
+        };
+        settle(&mut harness, "Choose a field");
+        settle(&mut harness, "Genre");
+        settle(&mut harness, "Choose a comparison");
+        settle(&mut harness, "is");
+        settle(&mut harness, "Choose…");
+        settle(&mut harness, "electronic");
+        // The painted word and the switch's own accessible name are two nodes
+        // sharing "Not"; the switch is the one drawn after its word.
+        let nots: Vec<_> = harness.query_all_by_label("Not").collect();
+        assert_eq!(
+            nots.len(),
+            2,
+            "the row paints the word and the control carries the name"
+        );
+        nots.last().expect("the switch").click();
+        harness.run_steps(2);
+        harness.remove_cursor();
+        harness.run_steps(2);
+
+        let draft = &observed.borrow()[0];
+        assert_eq!(draft.field, Some(MatchableField::Genre));
+        assert_eq!(draft.comparison, Some(Comparison::Is));
+        assert!(draft.negated);
+        assert_eq!(
+            draft.value,
+            RuleValueDraft::Text("electronic".to_string()),
+            "the clicks, not the test, put the chosen Library value in the well"
+        );
+        assert_eq!(
+            draft.open, None,
+            "the snapshot is of a settled row, not an open list"
+        );
+
+        let frame = harness
+            .render()
+            .expect("the rule-row fixture must render headlessly");
+        assert!(
+            distinct_colors(&frame) > 8,
+            "the fixture frame is blank or single-filled — the row is not on the              surface this golden is about"
+        );
+        harness.snapshot("rule_row_after_clicks_dark");
+    }
 }

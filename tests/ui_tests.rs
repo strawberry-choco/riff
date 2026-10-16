@@ -20771,7 +20771,9 @@ mod component_boundary_tests {
 /// not have — reading the Library's picker values, once per picker-open.
 #[cfg(test)]
 mod rule_row_ui_tests {
-    use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore};
+    use crate::mocks::{
+        LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore,
+    };
     use egui::accesskit::Toggled;
     use egui_kittest::kittest::{NodeT as _, Queryable};
     use riff_backend::app::store::StoreGeneration;
@@ -20820,7 +20822,10 @@ mod rule_row_ui_tests {
     }
 
     impl RuleRowHost {
-        fn new(rows: usize, mock: MockLibraryQueryStore) -> (Self, Arc<Mutex<MockLibraryQueryStore>>) {
+        fn new(
+            rows: usize,
+            mock: MockLibraryQueryStore,
+        ) -> (Self, Arc<Mutex<MockLibraryQueryStore>>) {
             let mock = Arc::new(Mutex::new(mock));
             let views = SessionViews::new(
                 Box::new(SharedQueryStore(Arc::clone(&mock))),
@@ -20983,7 +20988,12 @@ mod rule_row_ui_tests {
 
     /// Land a starting state on row `row` without pretending a user clicked it,
     /// and repaint so the state is actually in the frame the next click reads.
-    fn seed(harness: &mut egui_kittest::Harness<'_>, host: &RuleRowHost, row: usize, intents: &[RuleIntent]) {
+    fn seed(
+        harness: &mut egui_kittest::Harness<'_>,
+        host: &RuleRowHost,
+        row: usize,
+        intents: &[RuleIntent],
+    ) {
         for intent in intents {
             host.drafts.borrow_mut()[row].apply(intent);
         }
@@ -21021,10 +21031,9 @@ mod rule_row_ui_tests {
         click(&mut harness, "Choose a comparison");
         click(&mut harness, "contains");
         assert!(
-            host.take_intents()
-                .contains(&RuleIntent::ComparisonChosen {
-                    choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Contains)
-                }),
+            host.take_intents().contains(&RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Contains)
+            }),
             "a click chose `contains`"
         );
         assert_eq!(host.draft(0).comparison, Some(Comparison::Contains));
@@ -21054,10 +21063,9 @@ mod rule_row_ui_tests {
         click(&mut harness, "is");
         click(&mut harness, "Yes");
         assert!(
-            host.take_intents()
-                .contains(&RuleIntent::ValueCommitted {
-                    value: RuleValue::YesNo(true)
-                }),
+            host.take_intents().contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::YesNo(true)
+            }),
             "a click on Yes is the catalog's Yes/No answer"
         );
         assert_eq!(host.draft(0).gap(), None);
@@ -21123,7 +21131,12 @@ mod rule_row_ui_tests {
                 },
             ],
         );
-        click(&mut harness, "Not");
+        // The painted word and the switch's accessible name share the label, so
+        // the click is scoped to the control drawn after its word.
+        let nots: Vec<_> = harness.query_all_by_label("Not").collect();
+        assert_eq!(nots.len(), 2, "the inversion is both readable and named");
+        nots.last().expect("the switch").click();
+        harness.run_steps(2);
         assert_eq!(
             host.take_intents(),
             vec![RuleIntent::NegationToggled { negated: true }],
@@ -21134,7 +21147,8 @@ mod rule_row_ui_tests {
         assert_eq!(rule.comparison(), Comparison::Is);
         assert_eq!(
             harness
-                .query_by_label("Not")
+                .query_all_by_label("Not")
+                .last()
                 .expect("the Not control has an a11y name")
                 .accesskit_node()
                 .toggled(),
@@ -21157,10 +21171,9 @@ mod rule_row_ui_tests {
         click(&mut harness, "Choose a comparison");
         click(&mut harness, "is not missing");
         assert!(
-            host.take_intents()
-                .contains(&RuleIntent::ComparisonChosen {
-                    choice: riff_gui::ui::rule_row::ComparisonChoice::IsNotMissing
-                }),
+            host.take_intents().contains(&RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::IsNotMissing
+            }),
             "the row offers the word"
         );
         let draft = host.draft(0);
@@ -21170,7 +21183,10 @@ mod rule_row_ui_tests {
             "and `is_not_missing` is never a stored operator"
         );
         assert!(draft.negated);
-        assert_eq!(draft.rule().expect("whole").comparison().stored_id(), "is_missing");
+        assert_eq!(
+            draft.rule().expect("whole").comparison().stored_id(),
+            "is_missing"
+        );
         assert_eq!(draft.current_comparison_label(), "is not missing");
     }
 
@@ -21190,7 +21206,9 @@ mod rule_row_ui_tests {
                 },
             ],
         );
-        harness.get_by_role(egui::accesskit::Role::TextInput).focus();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
         harness.run_steps(1);
         harness
             .get_by_role(egui::accesskit::Role::TextInput)
@@ -21208,7 +21226,9 @@ mod rule_row_ui_tests {
 
         // A single-line field surrenders focus on Enter, so the well must be
         // re-focused before anything else can be typed into it.
-        harness.get_by_role(egui::accesskit::Role::TextInput).focus();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
         harness.run_steps(1);
         harness
             .get_by_role(egui::accesskit::Role::TextInput)
@@ -21241,7 +21261,9 @@ mod rule_row_ui_tests {
         click(&mut harness, "is");
         click(&mut harness, "Choose…");
         let before = picker_reads(&mock).len();
-        harness.get_by_role(egui::accesskit::Role::TextInput).focus();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
         harness.run_steps(1);
         harness
             .get_by_role(egui::accesskit::Role::TextInput)
@@ -21250,10 +21272,9 @@ mod rule_row_ui_tests {
         harness.key_press(egui::Key::Enter);
         harness.run_steps(2);
         assert!(
-            host.take_intents()
-                .contains(&RuleIntent::ValueCommitted {
-                    value: RuleValue::Text("synth-pop".to_string()),
-                }),
+            host.take_intents().contains(&RuleIntent::ValueCommitted {
+                value: RuleValue::Text("synth-pop".to_string()),
+            }),
             "a value the Library does not hold is still a value the listener can type"
         );
         assert_eq!(

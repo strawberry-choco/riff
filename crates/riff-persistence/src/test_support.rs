@@ -338,6 +338,14 @@ impl LibraryQueryStore for StubLibraryQueryStore {
     ) -> Answer<Page<Album>> {
         self.answer(|| Ok(Page::new(0, Vec::new())))
     }
+
+    fn picker_texts(&self, _field_id: &str, _limit: usize) -> Answer<Vec<String>> {
+        self.answer(|| Ok(Vec::new()))
+    }
+
+    fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Answer<Vec<i64>> {
+        self.answer(|| Ok(Vec::new()))
+    }
 }
 
 /// A [`LibraryMutationStore`] whose every write is a no-op — the double for

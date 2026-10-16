@@ -130,32 +130,30 @@ fn a_rule_is_formed_exactly_as_the_catalog_declares() {
         "a field that never takes the comparison is never a formed Rule, however well-typed \
          its value looks"
     );
-    assert!(Rule::new(
-        MatchableField::Duration,
-        Comparison::GreaterThan,
-        Some(RuleValue::DurationMillis(3_600_000)),
-    )
-    .is_fully_formed());
-    assert!(Rule::new(
-        MatchableField::Favorite,
-        Comparison::Is,
-        Some(RuleValue::YesNo(true)),
-    )
-    .is_fully_formed());
+    assert!(
+        Rule::new(
+            MatchableField::Duration,
+            Comparison::GreaterThan,
+            Some(RuleValue::DurationMillis(3_600_000)),
+        )
+        .is_fully_formed()
+    );
+    assert!(
+        Rule::new(
+            MatchableField::Favorite,
+            Comparison::Is,
+            Some(RuleValue::YesNo(true)),
+        )
+        .is_fully_formed()
+    );
 }
 
 #[test]
 fn a_value_answers_the_kind_its_field_holds() {
     for (value, expected) in [
-        (
-            RuleValue::Text("trip-hop".to_string()),
-            ValueType::Text,
-        ),
+        (RuleValue::Text("trip-hop".to_string()), ValueType::Text),
         (RuleValue::Number(1975), ValueType::Number),
-        (
-            RuleValue::DurationMillis(3_600_000),
-            ValueType::Duration,
-        ),
+        (RuleValue::DurationMillis(3_600_000), ValueType::Duration),
         (RuleValue::Days(30), ValueType::Date),
         (
             RuleValue::DateTime(riff_persistence::rule::CivilDateTime {
@@ -197,7 +195,9 @@ fn a_box_holds_rules_and_boxes_in_one_shared_sibling_order() {
     assert_eq!(root.combine(), Combine::All);
     assert_eq!(root.children().len(), 3, "one shared sibling order");
     assert!(matches!(root.children()[0], RuleChild::Rule(_)));
-    assert!(matches!(&root.children()[1], RuleChild::Box(boxed) if boxed.combine() == Combine::Any));
+    assert!(
+        matches!(&root.children()[1], RuleChild::Box(boxed) if boxed.combine() == Combine::Any)
+    );
     assert_eq!(
         root.children()
             .iter()
@@ -230,9 +230,12 @@ fn trees_compare_by_shape_because_nothing_in_one_carries_an_id() {
     let build = || {
         RootBox::new(RuleBox::new(Combine::Any).with_children(vec![
             RuleChild::Rule(count_rule()),
-            RuleChild::Box(RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(
-                text_rule(MatchableField::Album, "unknown pleasures"),
-            )])),
+            RuleChild::Box(
+                RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(text_rule(
+                    MatchableField::Album,
+                    "unknown pleasures",
+                ))]),
+            ),
         ]))
     };
     assert_eq!(
@@ -273,17 +276,17 @@ fn trees_compare_by_shape_because_nothing_in_one_carries_an_id() {
 
 #[test]
 fn the_two_combine_words_are_the_stored_ids_the_boxes_column_enforces() {
-    let ids: Vec<&str> = Combine::ALL.iter().map(|combine| combine.stored_id()).collect();
+    let ids: Vec<&str> = Combine::ALL
+        .iter()
+        .map(|combine| combine.stored_id())
+        .collect();
     assert_eq!(
         ids,
         vec!["all", "any"],
         "`combine IN ('all', 'any')` and this enumeration are the same list"
     );
     for combine in Combine::ALL {
-        assert_eq!(
-            Combine::from_stored_id(combine.stored_id()),
-            Some(combine)
-        );
+        assert_eq!(Combine::from_stored_id(combine.stored_id()), Some(combine));
     }
     assert_eq!(Combine::from_stored_id("ALL"), None);
     assert_eq!(Combine::from_stored_id("xor"), None);

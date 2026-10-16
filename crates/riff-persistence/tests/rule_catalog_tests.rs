@@ -51,7 +51,10 @@ const STORED_COMPARISON_IDS: [&str; 9] = [
 
 #[test]
 fn the_sixteen_matchable_fields_are_enumerated_once_under_their_stored_ids() {
-    let ids: Vec<&str> = MatchableField::ALL.iter().map(|field| field.stored_id()).collect();
+    let ids: Vec<&str> = MatchableField::ALL
+        .iter()
+        .map(|field| field.stored_id())
+        .collect();
     assert_eq!(
         ids,
         STORED_FIELD_IDS.to_vec(),
@@ -83,7 +86,10 @@ fn a_field_id_this_build_does_not_know_is_not_a_matchable_field() {
 
 #[test]
 fn the_nine_stored_comparisons_are_enumerated_once_under_their_stored_ids() {
-    let ids: Vec<&str> = Comparison::ALL.iter().map(|comparison| comparison.stored_id()).collect();
+    let ids: Vec<&str> = Comparison::ALL
+        .iter()
+        .map(|comparison| comparison.stored_id())
+        .collect();
     assert_eq!(
         ids,
         STORED_COMPARISON_IDS.to_vec(),

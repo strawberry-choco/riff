@@ -240,6 +240,12 @@ pub struct PlaylistEntry {
 /// enforced link to tracks: dangling references stay listed and resolve again
 /// once the referenced files return. Implemented by infrastructure over a
 /// real `SQLite` connection.
+///
+/// A name is how the listener finds its row, so it is unique across the whole
+/// sidebar — `playlists` and `smart_playlists` together — and both writes that
+/// carry a name ([`PlaylistStore::create_playlist`] and
+/// [`PlaylistStore::rename_playlist`]) enforce that one rule. It cannot be a
+/// table constraint, because no single table holds both kinds of row.
 pub trait PlaylistStore {
     /// Load every Playlist in creation order, each with its entries in
     /// playlist order. A fresh store yields an empty `Vec`.
@@ -254,9 +260,20 @@ pub trait PlaylistStore {
 
     /// Create a Playlist named `name` (trimmed) with optional initial Track
     /// references (exact duplicates dropped, order preserved). The generated
-    /// id is made unique against existing playlists so same-millisecond
-    /// creation of same-named playlists cannot collide; duplicate names are
-    /// allowed.
+    /// id is made unique against existing playlists by suffixing its slug, so
+    /// two distinct names that slug alike in one millisecond cannot collide.
+    ///
+    /// A name is how the listener finds its sidebar row, so one name belongs
+    /// to one row across the WHOLE sidebar: creation is refused when any
+    /// Playlist or Custom Smart Playlist already answers to `name`, compared
+    /// trimmed and lowercased with Rust's full Unicode folding — see
+    /// [`Self::rename_playlist`], which enforces the same rule on the other
+    /// half of the sidebar. Duplicate names are therefore not allowed, in
+    /// either table, under either spelling; `smart_playlists`' own `UNIQUE`
+    /// constraint is only a same-case backstop that cannot see across the two
+    /// tables. The six Built-in Smart Playlist display names are not part of
+    /// this rule — they exist only as code, so refusing them is the
+    /// application layer's job.
     fn create_playlist(
         &mut self,
         name: &str,
@@ -264,7 +281,9 @@ pub trait PlaylistStore {
     ) -> Result<PlaylistId, StoreError>;
 
     /// Rename the Playlist with `id` to `new_name` (trimmed). Returns
-    /// whether the playlist was found.
+    /// whether the playlist was found. The same sidebar-wide name rule as
+    /// [`Self::create_playlist`] applies, with this Playlist's own row exempt
+    /// so a rename that changes nothing never refuses the row it started from.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError>;
 
     /// Delete the Playlist with `id` together with its entries. Returns
@@ -890,6 +909,22 @@ pub trait LibraryQueryStore {
     /// one for `Jazz`, each counting the track once. Tracks whose genre is
     /// missing or empty aggregate into nothing: there is no row for them.
     /// The sidebar's total-genres count is this list's length.
+    ///
+    /// **Unbounded, and recorded as a follow-up rather than fixed here.** Its
+    /// two consumers ask a membership question over the *whole* Library —
+    /// "is this genre one the listener has?" before drilling in, and "what is
+    /// this genre's track count?" in the inspector — so a bound here would not
+    /// answer a smaller list, it would report a real genre as absent. It is
+    /// also not a per-frame read: both call sites reach it through the genre
+    /// Session Projection, which fetches once per store generation and hands
+    /// out an `Arc` clone after that, and its length is the listener's
+    /// distinct genre-entry count rather than their track count. The
+    /// follow-up, if the Genres listing ever needs a capped list read of its
+    /// own, is to page it through [`Self::genres_page`] — which already
+    /// answers a window plus the total — and to give the two membership
+    /// questions a point read, not to bound this one. Deliberately **not**
+    /// reused by the picker reads below: they answer a different question, on
+    /// a bounded path, per picker open.
     fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError>;
 
     /// Every artist having at least one Track with genre `genre`,
@@ -1073,6 +1108,52 @@ pub trait LibraryQueryStore {
         offset: usize,
         limit: usize,
     ) -> Result<Page<Album>, StoreError>;
+
+    // --- Custom Smart Playlist value pickers ------------------------------
+    //
+    // A Rule's value picker offers what the Library actually holds. Both
+    // reads are keyed on the Rule's **field id string** — `"genre"`,
+    // `"artist"`, `"album_artist"`, `"album"`, `"sample_rate"`,
+    // `"channels"` — and the adapter resolves that id through its own
+    // field-id → `tracks`-column table, gated by this crate's field catalog,
+    // so a column name is never taken from input and an id that is not a
+    // pickable field is rejected before any query is built. Each is a
+    // `DISTINCT` read over `tracks`, over the very column a Rule tests, and
+    // not over the `albums` / `artists` entity tables the browse listings
+    // read: a pickable value has to be one the tested column can contain.
+    // The consequence is deliberate — the Artists listing shows `Unknown
+    // Artist` for a track whose artist tag is absent, but that fallback
+    // lives in the entity key, so the picker can never offer it and "is
+    // missing" is how those tracks are asked for.
+
+    /// At most `limit` distinct values of the pickable **text** field
+    /// `field_id`, ordered byte-wise ascending, read as one bounded query.
+    ///
+    /// Absent values are excluded rather than surfaced as an empty entry: a
+    /// `NULL` or all-whitespace tag offers nothing a Rule could match. Genre
+    /// is the one text field stored as a `;`-separated set, so its distinct
+    /// values are the tag's trimmed *entries* — `"Ambient; Techno"` yields
+    /// `Ambient` and `Techno` and never the combined string, matching the
+    /// whole-segment semantics [`Self::genre_counts`] aggregates with.
+    ///
+    /// The bound is the store's, not the caller's: the answer never exceeds
+    /// `limit` values however large the Library is, so a 20,000-track Library
+    /// cannot fill a picker pane, and `limit` of `0` answers empty. An
+    /// `field_id` that is not a pickable text field — an id no field is, a
+    /// field the catalog gives a typed control for, or one whose value is a
+    /// number — is an [`StoreError`], never an empty list that hides the
+    /// mistake.
+    fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError>;
+
+    /// At most `limit` distinct values of the pickable **numeric** field
+    /// `field_id`, ascending, read as one bounded query.
+    ///
+    /// Absent here means `NULL` alone: a stored `0` is a present value and is
+    /// offered like any other. The same bound and unknown-field rules as
+    /// [`Self::picker_texts`] apply, with the same `DISTINCT`-over-`tracks`
+    /// shape, and the same refusal of an id that is not a pickable numeric
+    /// field.
+    fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError>;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a

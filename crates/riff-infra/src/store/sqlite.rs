@@ -16,6 +16,7 @@
 
 use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
+use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
@@ -31,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::field_columns::{is_genre_set, picker_column};
 use super::rule_sql::{self, Bound, Predicate};
 
 /// A migration is an ordered schema step with a stable identity and content
@@ -460,6 +462,16 @@ const MIGRATIONS: &[Migration] = &[
         // one parent, which is what lets the editor draw a single interleaved
         // list; the save path renumbers wholesale, so there is no gap
         // management and no uniqueness constraint on it.
+        //
+        // `name UNIQUE` is a same-case backstop and must not be read as the
+        // rule. A name identifies a sidebar row, and the sidebar spans two
+        // tables with a case-insensitive identity, so the real constraint —
+        // one name across `playlists` and `smart_playlists`, compared trimmed
+        // and folded with Rust's full Unicode lowercase — cannot be expressed
+        // by any single table constraint at all; it lives in the store's
+        // mutation path. This UNIQUE only stops an exact-spelling duplicate
+        // of a Smart Playlist name from arriving through some path that
+        // skipped that check.
         //
         // Two invariants the draft places on the save transaction, not on
         // SQL, deliberately left un-enforced here: a playlist has exactly one
@@ -1041,7 +1053,8 @@ impl PlaylistStore for SqliteStore {
     }
 
     /// One immediate durable transaction: the playlist row plus its initial
-    /// entries commit together or not at all.
+    /// entries commit together or not at all. The sidebar-wide name rule runs
+    /// first, inside the same transaction, so a refused name writes nothing.
     fn create_playlist(
         &mut self,
         name: &str,
@@ -1056,12 +1069,16 @@ impl PlaylistStore for SqliteStore {
     }
 
     /// One immediate durable transaction: only the renamed row is written.
+    /// The new name goes through the sidebar-wide name rule first, with this
+    /// row's own id exempt, so a rename that changes nothing never refuses the
+    /// row it started from.
     fn rename_playlist(&mut self, id: &PlaylistId, new_name: &str) -> Result<bool, StoreError> {
         self.mutate(
             SessionGeneration::Playlists,
             |renamed| matches!(renamed, Ok(true)),
             "failed to rename playlist",
             |conn| {
+                Self::reject_taken_sidebar_name(conn, new_name, Some(&id.0))?;
                 conn.execute(
                     "UPDATE playlists SET name = ?2 WHERE id = ?1",
                     rusqlite::params![id.0, new_name.trim()],
@@ -2924,6 +2941,115 @@ impl LibraryQueryStore for SqliteStore {
         })
         .map_err(|e| op_error("smart list counts failed", e))
     }
+
+    /// At most `limit` distinct values of the pickable text column behind
+    /// `field_id`, byte-wise ascending.
+    ///
+    /// Two shapes, chosen by what the column stores:
+    ///
+    /// * `genre` holds a `;`-separated set and a Rule tests one whole
+    ///   *segment*, so the pickable values are the tag's trimmed entries.
+    ///   SQLite splits them in a recursive CTE so the dedup, the order and
+    ///   the `LIMIT` all land in the store — splitting in Rust could only
+    ///   bound the answer after reading every tag in the Library. The
+    ///   split's trim-and-drop-empty rule mirrors [`genre_segments`], the
+    ///   aggregate the genre listing already splits with, so a picked value
+    ///   is always a value the genre filter can actually answer for.
+    /// * Every other pickable text column is single-valued, so
+    ///   `SELECT DISTINCT` over it answers directly. `TRIM(col) <> ''`
+    ///   excludes an absent value however it arrived — `NULL`, `''` or a
+    ///   whitespace-only tag — so no picker entry is ever blank, while the
+    ///   value handed back stays verbatim, because that is what the Rule's
+    ///   `is` test compares the column against.
+    ///
+    /// The column name comes from [`FIELD_COLUMNS`](super::field_columns::FIELD_COLUMNS)
+    /// and nowhere else: `field_id` is only ever a lookup key into that table,
+    /// and an id the table does not catalogue as a text field is rejected here,
+    /// before a single SQL character is built. `limit` is the only other thing
+    /// reaching the query, and it arrives as a bound parameter.
+    ///
+    /// Ordering is ascending byte-wise (`SQLite` `BINARY`), the order
+    /// [`Self::genre_counts`] and [`Self::all_artists`] already answer their
+    /// lists with, so a picker list and the listing it echoes never disagree
+    /// and a bounded answer is a deterministic *prefix* of the full one rather
+    /// than an arbitrary sample. No `DISTINCT` read here is index-backed: the
+    /// schema carries no indexes for these columns, which is why each list
+    /// runs once when a picker opens rather than on a per-frame path.
+    fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+        let Some(entry) = picker_column(field_id, ValueType::Text) else {
+            return Err(StoreError::InvalidOperation(format!(
+                "field {field_id:?} names no pickable text column"
+            )));
+        };
+        let column = entry.column;
+        let sql = if is_genre_set(field_id) {
+            // `tagged` narrows to the genre-bearing rows first, then `split`
+            // peels one `;`-delimited segment per step: seeding with a trailing
+            // `;` means every real segment — last one included — is emitted,
+            // and `rest` shrinks by at least the delimiter each step, so the
+            // recursion always terminates.
+            format!(
+                "WITH RECURSIVE
+                     tagged(genre) AS (SELECT genre FROM tracks WHERE {HAS_GENRE_SQL}),
+                     split(segment, rest) AS (
+                         SELECT '', genre || ';' FROM tagged
+                         UNION ALL
+                         SELECT substr(rest, 1, instr(rest, ';') - 1),
+                                substr(rest, instr(rest, ';') + 1)
+                         FROM split WHERE rest <> ''
+                     )
+                 SELECT DISTINCT trim(segment) FROM split
+                 WHERE trim(segment) <> ''
+                 ORDER BY trim(segment) ASC
+                 LIMIT ?1"
+            )
+        } else {
+            format!(
+                "SELECT DISTINCT {column} FROM tracks
+                 WHERE {column} IS NOT NULL AND TRIM({column}) <> ''
+                 ORDER BY {column} ASC
+                 LIMIT ?1"
+            )
+        };
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect()
+        })
+        .map_err(|e| op_error("picker text read failed", e))
+    }
+
+    /// At most `limit` distinct values of the pickable numeric column behind
+    /// `field_id`, ascending. `IS NOT NULL` is the whole absence test here: a
+    /// stored `0` is a present value and is offered like any other. Same
+    /// column-table-only interpolation, same bound parameter, and the same
+    /// one-open-per-picker cadence as [`Self::picker_texts`].
+    fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
+        let Some(entry) = picker_column(field_id, ValueType::Number) else {
+            return Err(StoreError::InvalidOperation(format!(
+                "field {field_id:?} names no pickable numeric column"
+            )));
+        };
+        let column = entry.column;
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM tracks
+             WHERE {column} IS NOT NULL
+             ORDER BY {column} ASC
+             LIMIT ?1"
+        );
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect()
+        })
+        .map_err(|e| op_error("picker number read failed", e))
+    }
 }
 
 impl SqliteStore {
@@ -3688,16 +3814,114 @@ impl SqliteStore {
     }
 }
 
+/// The tables whose `name` column identifies a row to the listener — every
+/// kind of sidebar row the store holds. [`SqliteStore::reject_taken_sidebar_name`]
+/// reads each of them, so a sidebar-wide rule has one list to grow rather than
+/// one call site per table; the names are table literals, never caller input,
+/// because an SQL identifier cannot be bound as a parameter.
+const SIDEBAR_NAME_TABLES: &[&str] = &["playlists", "smart_playlists"];
+
+/// Raise a store refusal from inside a transaction body.
+///
+/// [`SqliteStore::mutate`]'s body channel is a `rusqlite::Result`, and every
+/// failure on that channel reaches its caller through [`op_error`], which
+/// keeps the message of a `SqliteFailure` that carries one — verbatim, with
+/// nothing but the operation's own context in front of it. So a refusal
+/// written here surfaces as the store's single
+/// [`StoreError::InvalidOperation`] variant, exactly like any other store
+/// fault: no new variant, no panic.
+///
+/// The code rides along as a constraint violation because that is precisely
+/// the constraint the database cannot express across two tables — the check
+/// itself is this crate's Rust, never a SQL failure.
+fn store_refusal(reason: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(reason),
+    )
+}
+
 impl SqliteStore {
+    /// Refuse `name` when some other sidebar row already answers to it.
+    ///
+    /// A name is how the listener finds a row, and a Playlist name and a
+    /// Custom Smart Playlist name identify the same kind of thing — one
+    /// clickable row — so a name may be held by at most one row ACROSS the
+    /// sidebar's tables. One table constraint cannot say that
+    /// (`smart_playlists.name UNIQUE` sees one table and one spelling and is
+    /// only a same-case backstop), so the rule lives here, in the store's
+    /// mutation path, where it holds however the data arrived: every write
+    /// that names a sidebar row calls this inside its own transaction, before
+    /// it writes.
+    ///
+    /// The comparison trims first — the same trim the create and rename paths
+    /// already apply to the stored value — and folds case with Rust's full
+    /// Unicode [`str::to_lowercase`]. That is a deliberate asymmetry, not an
+    /// oversight a later reader should unify: a name is identity, so it folds
+    /// the way Rust folds, while a Rule's tag needle is content and folds
+    /// through SQLite's ASCII-only `lower()` (ADR 0020). `Night Drive` and
+    /// `night drive` can therefore never coexist **while** `РОК` and `рок`
+    /// remain two genres. The SQL here only fetches candidates; folding never
+    /// happens in the database.
+    ///
+    /// `resaved_row_id` is the id of the row being written when it already
+    /// has one — a rename, or a Custom Smart Playlist re-save that keeps its
+    /// id. That row is exempt, so a same-name re-save of itself is never
+    /// refused; pass [`None`] for a create, where nothing is exempt. Ids are
+    /// generated per table and never shared between them, so exempting an id
+    /// cannot hide a clash between two different rows.
+    ///
+    /// The six Built-in Smart Playlist display names are NOT checked here:
+    /// they exist only as code, never as rows in either table, so refusing a
+    /// name that shadows one is an application-layer rule.
+    ///
+    /// # Errors
+    /// [`store_refusal`] carrying the reason, naming `name`, when another row
+    /// holds it — the store's single `StoreError::InvalidOperation` variant
+    /// once [`SqliteStore::mutate`] wraps it. Propagates any query failure.
+    pub(crate) fn reject_taken_sidebar_name(
+        conn: &Connection,
+        name: &str,
+        resaved_row_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        // Trimmed, then folded — and folded against each stored name the same
+        // way, so a row seeded untrimmed by any path still compares by its
+        // trimmed, folded identity.
+        let given = name.trim();
+        let wanted = given.to_lowercase();
+        for table in SIDEBAR_NAME_TABLES {
+            // The table name is a literal from the list above, never caller
+            // text; an id, by contrast, is bound. `IS NOT` is the NULL-safe
+            // comparison, so `None` (a create) exempts no row — and a row with
+            // no id at all is invisible here exactly as it is to every other
+            // read of these tables, because no write path can create one.
+            let mut stmt =
+                conn.prepare_cached(&format!("SELECT name FROM {table} WHERE id IS NOT ?1"))?;
+            let rows = stmt.query_map([resaved_row_id], |row| row.get::<_, String>(0))?;
+            for stored in rows {
+                if stored?.trim().to_lowercase() == wanted {
+                    return Err(store_refusal(format!(
+                        "a Playlist or Custom Smart Playlist named {given:?} already exists"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create-playlist body shared with the transaction wrapper above.
     /// Id generation dedupes against existing ids exactly like the former
-    /// JSON-era logic so same-millisecond creation of same-named playlists
-    /// cannot collide; duplicate names are allowed.
+    /// JSON-era logic, so two distinct names that slug alike in the same
+    /// millisecond still cannot collide. Names themselves are no longer
+    /// free to repeat: [`SqliteStore::reject_taken_sidebar_name`] runs first,
+    /// across every sidebar table, folded case-insensitively.
     fn create_playlist_in_tx(
         conn: &Connection,
         name: &str,
         initial_tracks: &[TrackId],
     ) -> rusqlite::Result<PlaylistId> {
+        Self::reject_taken_sidebar_name(conn, name, None)?;
+
         let mut id = PlaylistId::new(name);
         let mut suffix = 2;
         loop {

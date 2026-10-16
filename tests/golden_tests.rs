@@ -2696,6 +2696,109 @@ mod tests {
         );
     }
 
+    /// The inline option-list selector captured AFTER a real click changes
+    /// the selection — ticket 06's reachability promise, in pixels.
+    ///
+    /// A declared specimen: no production surface composes this primitive
+    /// yet (tickets 14/15/20 will place it in the rule editor), so the host
+    /// is a test-only pane — a settings-style card at a settings-pane
+    /// content width — rendering the selector through its production entry
+    /// point. The frame proves the hit areas are real because the capture
+    /// happens after `get_by_label("Electronic").click()` landed, and the
+    /// test asserts the caller's selection buffer changed before it
+    /// snapshots: the picture is evidence of a click, not of a paint.
+    #[test]
+    fn option_list_after_click_dark_matches_golden_baseline() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
+        use riff_gui_theme::theme::RADIUS_MD;
+
+        let _slot = harness_slot();
+        let palette = Palette::dark();
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let drawing = std::rc::Rc::clone(&ready);
+        let options: Vec<OptionChoice<'static, String>> = [
+            ("Rock", "rock"),
+            ("Electronic", "electronic"),
+            ("Ambient", "ambient"),
+        ]
+        .into_iter()
+        .map(|(label, key)| OptionChoice {
+            key: key.to_string(),
+            label,
+        })
+        .collect();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 200.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, current: &mut String| {
+                    // The `ready` gate and the install order are
+                    // `with_golden_style`'s contract, re-expressed here
+                    // because this specimen needs a state buffer the click
+                    // writes into.
+                    if !drawing.get() {
+                        return;
+                    }
+                    // Full-canvas background (determinism rule), then the
+                    // test-only pane the selector sits in.
+                    let background = ui.ctx().layer_painter(egui::LayerId::background());
+                    background.rect_filled(ui.ctx().content_rect(), 0.0, palette.background);
+                    egui::Frame::new()
+                        .fill(palette.surface)
+                        .corner_radius(RADIUS_MD)
+                        .inner_margin(egui::Margin::same(12))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if let Some(key) = option_list(
+                                ui,
+                                &palette,
+                                &OptionList {
+                                    id: egui::Id::new("golden_option_list"),
+                                    options: &options,
+                                    current: Some(current),
+                                },
+                            ) {
+                                *current = key;
+                            }
+                        });
+                },
+                "rock".to_string(),
+            );
+        theme::install(&harness.ctx, &palette, false);
+        harness.ctx.set_fonts(inter_only_font_definitions());
+        pin_settled_time(&harness.ctx);
+        ready.set(true);
+        harness.run();
+        assert_eq!(
+            harness.state().as_str(),
+            "rock",
+            "the fixture opens with Rock as the caller's selection"
+        );
+
+        harness.get_by_label("Electronic").click();
+        harness.remove_cursor();
+        // The click applies at the end of its frame; the mark renders in
+        // the frame after — the settling the shell's own notes pin.
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().as_str(),
+            "electronic",
+            "a real click on an inline option changed the selection the \
+             captured frame renders — not merely painted a list"
+        );
+
+        let frame = harness
+            .render()
+            .expect("the option-list fixture must render headlessly");
+        assert!(
+            distinct_colors(&frame) > 8,
+            "the fixture frame is blank or single-filled — the selector is \
+             not on the surface this golden is about"
+        );
+        harness.snapshot("option_list_after_click_dark");
+    }
+
     // --- Specimen harness --------------------------------------------------------
     //
     // The three remaining specimens and the behavior tests below need a

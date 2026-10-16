@@ -50,9 +50,16 @@ use super::sqlite::{SessionGeneration, SqliteStore, now_nanos, store_refusal};
 /// Not cosmetic. [`SqliteStore::reject_taken_sidebar_name`] exempts the row being
 /// rewritten **by id**, across both sidebar tables, so an id shared between a
 /// `playlists` row and a `smart_playlists` row would exempt the wrong row and let
-/// a real clash through. Playlist ids are `{slug}-{millis}`; prefixing makes the
-/// two namespaces disjoint by construction.
-const SMART_ID_PREFIX: &str = "spl-";
+/// a real clash through. The guarantee is the prefix's trailing `:`: Playlist ids
+/// are `{slug}-{millis}` and `slugify` maps every non-alphanumeric character to
+/// `-`, so no Playlist name can put a `:` into a Playlist id, and the two
+/// namespaces cannot intersect — no cross-table dedupe is needed (the loop below
+/// only makes two *smart* rows unique). `spl-` did **not** have this property: a
+/// Playlist named `spl-foo` could produce `spl-foo-{millis}`, colliding with a
+/// Custom Smart Playlist named `foo` in the same millisecond. Pinned by
+/// `a_playlist_name_cannot_forge_a_smart_playlist_id`; if either the prefix or
+/// `slugify` changes, keep the prefix unproducible by a name.
+const SMART_ID_PREFIX: &str = "spl:";
 
 /// How many candidate copy names [`free_copy_name`] will try before giving up.
 /// A listener with 64 lists named `Copy of X 2` through `Copy of X 64` is not a

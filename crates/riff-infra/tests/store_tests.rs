@@ -32,11 +32,12 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     // + v15 (the metadata version the freshness filter compares against
     //   `METADATA_VERSION`) + v16 (ReplayGain album peak) + v17 (the
     //   ReplayGain Mode preference) + v18 (the pass's Settings gating)
-    //   + v19 (the Reduce Motion accessibility preference).
+    //   + v19 (the Reduce Motion accessibility preference) + v20 (the Custom
+    //   Smart Playlist rule tables).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
         ]
     );
 }
@@ -89,11 +90,11 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 19, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 20, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
         ]
     );
 
@@ -360,7 +361,7 @@ fn test_store_checksum_tamper_is_fatal() {
             )
             .expect("the tampered bookkeeping row must still be there");
     assert_eq!(
-        tampered, 19,
+        tampered, 20,
         "the store's own migration rows are untouched: nothing re-applied, nothing replaced"
     );
 }

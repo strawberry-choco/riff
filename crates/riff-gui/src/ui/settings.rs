@@ -4,9 +4,7 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
-use riff_backend::app::store::{
-    AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary, SmartPlaylistTree,
-};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary};
 use riff_backend::domain::{Combine, PlaylistId};
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
@@ -3071,11 +3069,31 @@ impl super::app::RiffApp {
                 .views
                 .custom_list_tree(id)
                 .unwrap_or_else(|degraded| degraded.value);
-            // `SmartPlaylistTree::root()` is the public accessor for the
-            // interpretable half; the unreadable side list stays ticket 18's
-            // sibling state, per ticket 14's note.
-            self.smart_playlists_editor
-                .load_saved(&list, tree.as_ref().map(SmartPlaylistTree::root));
+            // The whole tree — Unreadable rows included, put back at their
+            // stored positions by the load itself (ticket 18) — so a row
+            // riff cannot read is shown, preserved, and keeps blocking Save
+            // until the listener deletes it.
+            self.smart_playlists_editor.load_saved(&list, tree.as_ref());
+        }
+    }
+
+    /// The editor's **single Save entry point**: ask the draft for a plan —
+    /// which is where every frontend-side refusal is decided and rendered —
+    /// and, when it has one, perform the one store call that writes the name
+    /// and the whole rule tree together (D12). A refused write leaves the
+    /// draft exactly as typed and puts the store's own words above the Save
+    /// line; a committed one leaves the listener on the page, because the
+    /// sidebar already lists the new row.
+    fn save_smart_playlist_from_editor(&mut self) {
+        let Some(plan) = self.smart_playlists_editor.prepare_save() else {
+            return;
+        };
+        match self
+            .library_mutations
+            .save_smart_playlist(plan.id.as_ref(), &plan.name, &plan.tree)
+        {
+            Ok(id) => self.smart_playlists_editor.mark_saved(id),
+            Err(e) => self.smart_playlists_editor.refuse_save(e.to_string()),
         }
     }
 
@@ -3132,9 +3150,10 @@ impl super::app::RiffApp {
             SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
             // The page's own button opens the same new, empty, unsaved draft
             // as the sidebar's `+`; the four tree gestures below land on the
-            // box model the pane drew; Save, Cancel and every refusal reason
-            // are ticket 18's decision, so those arms report their intent and
-            // write nothing.
+            // box model the pane drew. Save and Cancel are ticket 18's one
+            // entry points: Save validates the draft, writes name and tree in
+            // one store call, and keeps the listener on the page; Cancel
+            // discards the draft and writes nothing.
             SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
             SettingsAction::AddSmartPlaylistRule { parent } => {
                 self.smart_playlists_editor.add_rule(&parent);
@@ -3148,7 +3167,8 @@ impl super::app::RiffApp {
             SettingsAction::SetSmartPlaylistCombine { path, combine } => {
                 self.smart_playlists_editor.set_combine(&path, combine);
             }
-            SettingsAction::SaveSmartPlaylist | SettingsAction::CancelSmartPlaylist => {}
+            SettingsAction::SaveSmartPlaylist => self.save_smart_playlist_from_editor(),
+            SettingsAction::CancelSmartPlaylist => self.smart_playlists_editor.cancel(),
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }

@@ -692,17 +692,27 @@ pub trait LibraryMutationStore {
     /// `smart_playlists` row — which is why the sidebar's `+` writes nothing and
     /// the list first appears in the sidebar on this call — and returns its new
     /// store-generated id. With `id` of `Some` the row is updated **in place**:
-    /// its id and `created_at` survive, and so does its **name**, which only
-    /// [`Self::rename_smart_playlist`] writes. The list's boxes and Rules are
-    /// deleted and re-inserted wholesale from `tree`, positions and all,
-    /// renumbered in one dense pass with no gap management, so a crash partway
-    /// cannot leave half a rule set and no row of the previous tree survives.
+    /// its id and `created_at` survive, and its `name` is written, trimmed, from
+    /// this call's `name`. That is deliberate and load-bearing: the editor's name
+    /// field and its Rule tree are one listener action taken in one form, so both
+    /// land in this transaction or neither does. A save that left the name to a
+    /// second call could half-apply — the name lands and the tree fails, or the
+    /// tree saves and the rename is refused because the name is taken, discarding
+    /// what the listener typed while reporting success.
+    /// [`Self::rename_smart_playlist`] is therefore not a save's second half but
+    /// the sidebar's Rename action: the one write that names a list without
+    /// touching its tree.
+    ///
+    /// The list's boxes and Rules are deleted and re-inserted wholesale from
+    /// `tree`, positions and all, renumbered in one dense pass with no gap
+    /// management, so a crash partway cannot leave half a rule set and no row of
+    /// the previous tree survives.
     ///
     /// Rule and Rule Box ids are generated here, are opaque, and never come
     /// back out — a draft therefore cannot hold a stale identity.
     ///
-    /// Refused, writing nothing, with the reason carried by
-    /// [`StoreError::InvalidOperation`]:
+    /// Refused, writing nothing — neither the name nor the tree — with the reason
+    /// carried by [`StoreError::InvalidOperation`]:
     ///
     /// * `tree` holds no Rule, or **any** box inside it — the Root Box included
     ///   — has no children. Nothing riff would have to interpret as "empty" is
@@ -718,7 +728,8 @@ pub trait LibraryMutationStore {
     ///   the same save succeed;
     /// * `name` is held by another sidebar row, in either table, in any case —
     ///   the same rule [`Self::rename_smart_playlist`] enforces, with this
-    ///   list's own row exempt when it has one.
+    ///   list's own row exempt when it has one, which is what makes saving a list
+    ///   under its own unchanged name legal rather than a conflict with itself.
     ///
     /// A `Some(id)` that no row carries is refused rather than quietly treated as
     /// a create: the draft was written against a list that is gone, and inserting

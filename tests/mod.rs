@@ -1635,6 +1635,8 @@ pub mod mocks {
         GenresPage(SortDirection, usize, usize),
         ArtistsInGenrePage(String, SortDirection, usize, usize),
         ArtistAlbumsInGenrePage(String, String, SortDirection, usize, usize),
+        PickerTexts(String, usize),
+        PickerNumbers(String, usize),
     }
 
     /// Which [`LibraryQueryStore`] query fails while listed in
@@ -1650,6 +1652,8 @@ pub mod mocks {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FailingQuery {
         GetTrack,
+        PickerTexts,
+        PickerNumbers,
         TracksWindow,
         TracksCount,
         SearchWindow,
@@ -1788,6 +1792,12 @@ pub mod mocks {
         /// level of a tree.
         pub tracks_by_dir: std::collections::HashMap<PathBuf, Vec<Track>>,
 
+        // --- value-picker reads ------------------------------------------------
+        /// Answer served by `picker_texts` for any field id.
+        pub picker_texts: Vec<String>,
+        /// Answer served by `picker_numbers` for any field id.
+        pub picker_numbers: Vec<i64>,
+
         // --- failure injection -------------------------------------------------
         /// Queries that fail while listed here.
         pub failing: Vec<FailingQuery>,
@@ -1839,6 +1849,8 @@ pub mod mocks {
                 folder_children: Vec::new(),
                 folder_children_by_dir: std::collections::HashMap::new(),
                 tracks_by_dir: std::collections::HashMap::new(),
+                picker_texts: Vec::new(),
+                picker_numbers: Vec::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
             }
@@ -2518,6 +2530,31 @@ pub mod mocks {
             let rows = self.window_rows(&self.genre_albums, direction, offset, limit);
             Ok(riff_persistence::store::Page::new(total, rows))
         }
+
+        /// Records the field id and the bound it was asked for, so a suite can
+        /// pin the read's cadence (one per picker open, never per frame). The
+        /// canned answer is shape-independent: `MockLibraryQueryStore` serves
+        /// the same list whatever the id, because which ids a real store
+        /// catalogues is the adapter's own test's question.
+        fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+            self.record(LibraryQueryCall::PickerTexts(field_id.to_string(), limit));
+            if self.failing.contains(&FailingQuery::PickerTexts) {
+                return Err(StoreError::InvalidOperation(
+                    "picker texts boom".to_string(),
+                ));
+            }
+            Ok(self.picker_texts.iter().take(limit).cloned().collect())
+        }
+
+        fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
+            self.record(LibraryQueryCall::PickerNumbers(field_id.to_string(), limit));
+            if self.failing.contains(&FailingQuery::PickerNumbers) {
+                return Err(StoreError::InvalidOperation(
+                    "picker numbers boom".to_string(),
+                ));
+            }
+            Ok(self.picker_numbers.iter().take(limit).copied().collect())
+        }
     }
 
     /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
@@ -2819,6 +2856,14 @@ pub mod mocks {
                 .lock()
                 .unwrap()
                 .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
+        }
+
+        fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+            self.0.lock().unwrap().picker_texts(field_id, limit)
+        }
+
+        fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
+            self.0.lock().unwrap().picker_numbers(field_id, limit)
         }
     }
 

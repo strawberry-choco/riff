@@ -725,9 +725,11 @@ fn a_stored_rule_round_trips_through_the_draft_unchanged() {
 }
 
 #[test]
-fn the_row_holds_nothing_a_date_control_has_not_been_built_for_yet() {
-    // Honest about the stub: a date Rule is a row whose value half is missing,
-    // so the editor's Save refusal will name it rather than store a wrong test.
+fn an_empty_date_row_has_a_missing_value_half() {
+    // A date Rule starts as a row whose value half is missing, so the
+    // editor's Save refusal names it rather than storing a wrong test; the
+    // date controls themselves are ticket 20's own suite
+    // (`rule_date_tests.rs`).
     for (field, comparison, idea) in [
         (
             MatchableField::LastPlayed,

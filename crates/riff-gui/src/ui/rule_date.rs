@@ -91,8 +91,8 @@ impl RuleDateDraft {
         draft
     }
 
-    /// **The seam ticket 20 implements.** The stored value these buffers
-    /// spell, or `None` while they do not spell one.
+    /// The stored value these buffers spell, or `None` while they do not
+    /// spell one.
     ///
     /// `None` is the whole failure surface: the row treats it as a missing
     /// value, so a partly typed pair holds the draft open and
@@ -205,9 +205,9 @@ pub enum RuleDateIntent {
     WindowDays(String),
 }
 
-/// **The seam ticket 20 implements.** Draw one date control and report what
-/// the listener typed into it. `id` is the row's widget identity for this
-/// control — the caller derives it, so two rows in one pane cannot collide.
+/// Draw one date control and report what the listener typed into it. `id` is
+/// the row's widget identity for this control — the caller derives it, so
+/// two rows in one pane cannot collide.
 ///
 /// Every edit leaves as a [`RuleDateIntent`]; `draft` is read, never written
 /// — the caller lands what is reported through

@@ -56,10 +56,12 @@ eframe = { version = "0.35", features = ["default", "persistence"] }
 # fails to compile with 36 `SerializableAny` trait-bound errors (verified at
 # egui/egui_extras 0.35.0). `datepicker` is the only thing in the workspace
 # that pulls `jiff` — the project's first civil-date library, whose
-# `civil::Date` the picker reads and writes — into the graph. It is switched
-# on here as a build/MSRV proof, not as a use: no source file names `epi` yet,
-# so the whole dependency is inert and nothing here should be read as a live
-# call site.
+# `civil::Date` the picker reads and writes — into the graph. Since ticket 20
+# it is a live call site: `crates/riff-gui/src/ui/rule_date.rs` reads
+# `epi::DatePickerButton`. `jiff` itself is deliberately still not a direct
+# dependency: the picker's input type is never named in source (the seed and
+# the picked-day read go through inference and public methods), so no
+# manifest or lock entry speaks it.
 epi = { package = "egui_extras", version = "0.35", features = [
     "image", "datepicker", "serde",
 ] }

@@ -19,12 +19,33 @@ use riff_gui::ui::smart_playlists_page::{SmartPlaylistRefusal, SmartPlaylistsEdi
 
 // --- Fixtures ------------------------------------------------------------------
 
-/// One saved-list row as the D14 enumeration answers it.
+/// One saved-list row as the D14 enumeration answers it. `PlaylistId::new`
+/// stamps the wall clock, so two calls mint two ids unless they land in the
+/// same millisecond: a test that matches a row against the draft's own id
+/// builds both from ONE call — [`editor_and_list`] is that pairing.
 fn list(id: &str, name: &str) -> CustomSmartPlaylist {
     CustomSmartPlaylist {
         id: PlaylistId::new(id),
         name: name.to_string(),
         created_at: std::time::SystemTime::UNIX_EPOCH,
+    }
+}
+
+/// The editor holding `tree` **and the row it was opened from**, so a test can
+/// hand the reconcile an enumeration naming the very list the draft carries.
+fn editor_and_list(tree: &SmartPlaylistTree) -> (SmartPlaylistsEditor, CustomSmartPlaylist) {
+    let saved = list("spl-late-night-2", "Late night jazz");
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(tree));
+    (editor, saved)
+}
+
+/// [`editor_and_list`]'s row under a different stored name — the rename a
+/// sidebar write commits, with the row's identity preserved.
+fn renamed_row(row: &CustomSmartPlaylist, name: &str) -> CustomSmartPlaylist {
+    CustomSmartPlaylist {
+        name: name.to_string(),
+        ..row.clone()
     }
 }
 

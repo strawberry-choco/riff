@@ -14,18 +14,20 @@
 //! **The save path must not enforce the cap either.** [`RuleBoxDraft::to_root_box`]
 //! spells the listener's tree for ticket 18's one-call Save, and it refuses
 //! only what has no stored form at all: a half-filled Rule row makes it answer
-//! [`None`] (never a silent drop), while an *empty* box converts as an empty
-//! box — refusing that is ticket 18's save decision, not the model's.
+//! [`None`] (never a silent drop), an Unreadable Rule makes it answer [`None`]
+//! (re-inserting one would violate the schema's `CHECK` list), while an
+//! *empty* box converts as an empty box — refusing that is ticket 18's save
+//! decision, not the model's.
 //!
 //! A box holds a `Vec` of children rather than parallel Rule and Box lists
 //! because the store numbers siblings together and the pane draws one list;
-//! the same shape is what lets a future [`RuleChildDraft`] variant (ticket
-//! 18's Unreadable Rule placeholder) sit at its stored position without
-//! restructuring anything.
+//! the same shape is what lets [`RuleChildDraft::Unreadable`] sit at its
+//! stored position without restructuring anything.
 //!
 //! No egui, no store, no palette: this module is pure state and walks, which
 //! is why its whole surface is testable with no context at all.
 
+use riff_backend::app::store::UnreadableRule;
 use riff_backend::domain::{Combine, RootBox, RuleBox, RuleChild};
 
 use crate::ui::rule_row::{RuleDraft, RulePanel};
@@ -116,15 +118,24 @@ impl ChildSlot {
 
 /// One child of a Rule Box draft, in the box's one shared sibling order.
 ///
-/// The two variants are the two things a listener can put in a box; ticket
-/// 18's Unreadable Rule placeholder is a future sibling here, which is why a
-/// box holds these rather than one `Vec<RuleDraft>` per box.
+/// The three variants are the three things a box can hold: a Rule the
+/// listener is editing, a nested box, and a **stored row this build cannot
+/// read**. The Unreadable one is a first-class child rather than a side list
+/// so it sits at the stored position the read put it in and the pane draws it
+/// in place; [`RuleDraft`] stays untouched, because a row that cannot be
+/// interpreted has no typed buffers to hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleChildDraft {
     /// A leaf test, edited by ticket 14's row.
     Rule(RuleDraft),
     /// A nested box, holding more of both.
     Box(RuleBoxDraft),
+    /// A stored Rule this build cannot interpret, exactly as the store
+    /// reported it. It is shown, it blocks Save (re-inserting it would
+    /// violate the schema's `CHECK` list) and it is preserved across every
+    /// edit until the listener deletes the row — never repaired, never
+    /// silently dropped.
+    Unreadable(UnreadableRule),
 }
 
 /// One Rule Box's draft: how it combines its children, whether its combine
@@ -200,13 +211,21 @@ impl RuleBoxDraft {
             .map(|child| match child {
                 RuleChildDraft::Rule(draft) => draft.rule().map(RuleChild::Rule),
                 RuleChildDraft::Box(nested) => nested.to_rule_box().map(RuleChild::Box),
+                // An Unreadable Rule has no stored form this build can write,
+                // so a tree holding one spells no tree at all — which is what
+                // makes the save refuse instead of failing inside the store's
+                // `CHECK` list with no explanation.
+                RuleChildDraft::Unreadable(_) => None,
             })
             .collect::<Option<Vec<_>>>()?;
         Some(RuleBox::new(self.combine).with_children(children))
     }
 
     /// How many Rules this box and every box below it holds — the same
-    /// question [`RuleBox::rule_count`] answers for a stored tree.
+    /// question [`RuleBox::rule_count`] answers for a stored tree. The
+    /// Unreadable rows are deliberately not counted: riff cannot see what
+    /// they ask, and the store's own [`RootBox`] count does not see them
+    /// either.
     #[must_use]
     pub fn rule_count(&self) -> usize {
         self.children
@@ -214,6 +233,7 @@ impl RuleBoxDraft {
             .map(|child| match child {
                 RuleChildDraft::Rule(_) => 1,
                 RuleChildDraft::Box(nested) => nested.rule_count(),
+                RuleChildDraft::Unreadable(_) => 0,
             })
             .sum()
     }
@@ -231,7 +251,7 @@ impl RuleBoxDraft {
         };
         match self.children.get(*first)? {
             RuleChildDraft::Box(nested) => nested.descend(rest),
-            RuleChildDraft::Rule(_) => None,
+            RuleChildDraft::Rule(_) | RuleChildDraft::Unreadable(_) => None,
         }
     }
 
@@ -248,7 +268,7 @@ impl RuleBoxDraft {
         };
         match self.children.get_mut(*first)? {
             RuleChildDraft::Box(nested) => nested.descend_mut(rest),
-            RuleChildDraft::Rule(_) => None,
+            RuleChildDraft::Rule(_) | RuleChildDraft::Unreadable(_) => None,
         }
     }
 
@@ -278,6 +298,69 @@ impl RuleBoxDraft {
                 .push(RuleChildDraft::Rule(RuleDraft::blank()));
             boxed.children.push(RuleChildDraft::Box(nested));
         }
+    }
+
+    /// Put every Unreadable Rule the store reported back where it sits: one
+    /// call for the whole side list of a [`SmartPlaylistTree`] read.
+    ///
+    /// **This is not an index match**, and that is the whole reason the walk
+    /// exists. An [`UnreadableRule`] carries two facts: `box_path`, which
+    /// counts **box children only** (the read never sees the Rules, so it
+    /// cannot count them), and `position`, its stored sibling position in the
+    /// box's one **interleaved** numbering — the same numbering this draft's
+    /// children are in. So the path is walked through the draft's interleaved
+    /// children *skipping Rules* (see [`Self::box_at_boxes_mut`]), and the
+    /// row is inserted at its stored position — which is its final index,
+    /// because the stored numbering is dense and this list is that numbering.
+    /// Inserting in increasing position order (the sort below) keeps every
+    /// earlier entry where it belongs, so each insertion needs nothing but
+    /// its own position.
+    ///
+    /// A position past the end of what the box holds (a tree hand-edited into
+    /// a shape no write path can produce) clamps to the end rather than
+    /// panicking or dropping the row: an Unreadable Rule is never discarded.
+    ///
+    /// [`SmartPlaylistTree`]: riff_backend::app::store::SmartPlaylistTree
+    pub fn insert_unreadable(&mut self, rules: &[UnreadableRule]) {
+        // Sorted by (box path, stored position) so every insertion's index is
+        // final the moment it lands: earlier positions were placed first.
+        let mut ordered: Vec<&UnreadableRule> = rules.iter().collect();
+        ordered.sort_by(|left, right| {
+            left.box_path()
+                .cmp(right.box_path())
+                .then(left.position().cmp(&right.position()))
+        });
+        for rule in ordered {
+            let Some(boxed) = self.box_at_boxes_mut(rule.box_path()) else {
+                continue;
+            };
+            let index = rule.position().min(boxed.children.len());
+            boxed
+                .children
+                .insert(index, RuleChildDraft::Unreadable(rule.clone()));
+        }
+    }
+
+    /// The box a **box-only** path names, mutably: `indices` count the `Box`
+    /// children at each step, exactly the numbering [`UnreadableRule::box_path`]
+    /// uses, while this draft's children interleave Rules among those boxes.
+    /// A Rule child is stepped over, never descended into.
+    ///
+    /// [`UnreadableRule::box_path`]: riff_backend::app::store::UnreadableRule::box_path
+    fn box_at_boxes_mut(&mut self, indices: &[usize]) -> Option<&mut Self> {
+        let Some((first, rest)) = indices.split_first() else {
+            return Some(self);
+        };
+        let mut seen = 0_usize;
+        for child in &mut self.children {
+            if let RuleChildDraft::Box(nested) = child {
+                if seen == *first {
+                    return nested.box_at_boxes_mut(rest);
+                }
+                seen += 1;
+            }
+        }
+        None
     }
 
     /// Remove the child at `parent`/`index` — a Rule, or a whole Box **with
@@ -347,6 +430,8 @@ impl RuleBoxDraft {
                 RuleChildDraft::Box(nested) => {
                     nested.close_value_panels(&path.child(index), keep);
                 }
+                // An Unreadable Rule has no panel to close.
+                RuleChildDraft::Unreadable(_) => {}
             }
         }
     }

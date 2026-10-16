@@ -42,6 +42,9 @@ fn children_at<'a>(root: &'a RuleBoxDraft, path: &[usize]) -> &'a Vec<RuleChildD
         .fold(root, |boxed, index| match &boxed.children[*index] {
             RuleChildDraft::Box(nested) => nested,
             RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
         })
         .children
         .as_ref()
@@ -53,6 +56,9 @@ fn box_at_mut<'a>(root: &'a mut RuleBoxDraft, path: &[usize]) -> &'a mut RuleBox
         .fold(root, |boxed, index| match &mut boxed.children[*index] {
             RuleChildDraft::Box(nested) => nested,
             RuleChildDraft::Rule(_) => panic!("path index {index} names a Rule, not a Box"),
+            RuleChildDraft::Unreadable(_) => {
+                panic!("path index {index} names an Unreadable Rule, not a Box")
+            }
         })
 }
 
@@ -296,7 +302,9 @@ fn the_seven_level_cap_gates_the_offer_and_nothing_else() {
             RuleChildDraft::Rule(draft) => {
                 *draft = filled_rule(MatchableField::Artist, &format!("level {level}"));
             }
-            RuleChildDraft::Box(_) => panic!("a new Box starts with a Rule"),
+            RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+                panic!("a new Box starts with a Rule")
+            }
         }
         assert_eq!(path.level(), level);
     }
@@ -361,11 +369,15 @@ fn the_picker_tidy_up_closes_every_other_rows_value_panel() {
     // nested row's list must close the root row's.
     match &mut root.children[0] {
         RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) => panic!("the root's first child is a Rule"),
+        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+            panic!("the root's first child is a Rule")
+        }
     }
     match &mut box_at_mut(&mut root, &[1]).children[0] {
         RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) => panic!("the box's first child is a Rule"),
+        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
+            panic!("the box's first child is a Rule")
+        }
     }
 
     let keep = ChildSlot::new(nested, 0);

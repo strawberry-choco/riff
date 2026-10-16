@@ -18805,6 +18805,88 @@ mod whole_frame_tests {
         );
     }
 
+    /// The six Built-in Smart Playlists exist only as code, so no store query
+    /// can refuse a Playlist named after one — the application layer does it,
+    /// on the create prompt, before the store is ever asked. Without it the
+    /// sidebar would show two rows reading "Most Played" (story 8).
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_create_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::default());
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "  most played ");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "the refusal keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("  most played "),
+            "the name they typed is still in the field, un-trimmed as typed"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "the check refused before the store was asked: it committed nothing"
+        );
+    }
+
+    /// The same application-layer half of the name rule on the rename prompt:
+    /// a Playlist may not take a Built-in's name either, and the store cannot
+    /// say so. The refusal names the conflict and leaves the row's old name
+    /// standing.
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_rename_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::with_playlists(vec![(
+            PlaylistId::new("most"),
+            "Most".to_string(),
+            vec![],
+        )]));
+        shell.harness.step();
+        open_playlist_rename_prompt(&mut shell);
+        focus_and_type_at(&mut shell, "Save", " Played");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Most Played"),
+            "the name they edited is still in the field, as typed"
+        );
+        assert!(
+            shell.harness.query_by_label("Most").is_some(),
+            "the row keeps its old name — the refusal ran before the store was asked"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a refused rename committed nothing"
+        );
+    }
+
     /// `StoreError` has ONE variant for every fault the Application Store can
     /// meet on a write — `SqliteStore::mutate` wraps a constraint violation, a
     /// failed transaction and an IO failure into
@@ -20277,6 +20359,217 @@ mod whole_frame_tests {
             views,
         );
         (shell, dir, list_id, store)
+    }
+
+    /// The editor's Save, driven through a real Application Store in a
+    /// composed frame: one click writes the name **and** the whole tree in the
+    /// store's single call (D12), the listener stays on the page, and the
+    /// sidebar's SMART LISTS section shows the list under the name that was
+    /// typed — the committed write moves the Playlists generation the
+    /// sidebar's own enumeration is stamped on, so the next frame reads it.
+    ///
+    /// A second Save, under the name the list already holds, is not a conflict
+    /// with itself: the plan hands the store this row's id, which ticket 03's
+    /// rule exempts — the same exemption the sidebar Rename uses.
+    #[test]
+    fn saving_from_the_editor_writes_the_name_and_the_tree_and_the_sidebar_shows_the_row() {
+        let (mut shell, _dir, id, mut store) = custom_list_store_shell();
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The premise: the sidebar already lists the saved list — the row
+        // that must read the new name after the save.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar lists the saved list before the save"
+        );
+
+        // Load the saved list into the draft through the page's own row. The
+        // sidebar row wears the same label, so the locator is geometry: the
+        // page's row sits in the stage, right of the sidebar's width.
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The load filled the name field with the saved name; the listener
+        // types the rest of a new one. Focus, re-query, type at the end.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field holds the loaded name")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field survives being focused")
+            .type_text(" X");
+        shell.harness.step();
+
+        // The store's cross-table half of the name rule, reached first: an
+        // ordinary Playlist holds the name the listener just typed, and the
+        // store's own words are what the listener reads — prefix and all,
+        // never reworded — while the draft is left exactly as typed.
+        let blocker = store
+            .create_playlist("Late night jazz X", &[])
+            .expect("the name is free for a Playlist while the list still holds the old one");
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_some(),
+            "the store's refusal is painted, prefix and all"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "and it names the conflict the store refused"
+        );
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "a refused save leaves the draft exactly as typed"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists
+                .iter()
+                .map(|list| list.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Late night jazz"],
+            "a refused save wrote nothing: the list keeps its old name, and one row exists"
+        );
+
+        // The obstruction goes — the listener's own route in riff is deleting
+        // the Playlist from the sidebar, which this test performs directly so
+        // the retry below is the editor's Save and nothing else.
+        store
+            .delete_playlist(&blocker)
+            .expect("the Playlist holding the name is deleted");
+        shell.harness.step();
+
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // One store call wrote the name and the tree together, on the row the
+        // draft was written against.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists.len(),
+            1,
+            "one list — the save updated, not duplicated"
+        );
+        assert_eq!(
+            lists[0].id, id,
+            "the list keeps the identity it was saved under"
+        );
+        assert_eq!(
+            lists[0].name, "Late night jazz X",
+            "the name typed while writing is the name the store holds"
+        );
+        let tree = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(
+            tree.root(),
+            one_rule_tree().root(),
+            "and the whole tree was written in the same call"
+        );
+
+        // The sidebar shows it under the typed name, with no navigation: the
+        // committed write moved the generation the sidebar's read is stamped
+        // on, so the next frame lists the new name.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz X")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar's SMART LISTS section lists the list under its new name"
+        );
+
+        // The listener is still on the page, editing the list that just saved.
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "the name field still holds the saved name"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "the editor still edits the list it just saved"
+        );
+
+        // A re-save under the list's own name is not a conflict with itself.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_none(),
+            "the store did not refuse the list against its own name"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].name, "Late night jazz X");
     }
 
     /// A stale custom id — the list was deleted from under the frame, with no

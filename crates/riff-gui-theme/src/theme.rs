@@ -1220,6 +1220,37 @@ pub mod geometry {
         /// One left-nav row's height (`py-2` at text-sm).
         pub const NAV_ITEM_H: f32 = 32.0;
     }
+
+    /// The inline option-list selector (`riff_gui_components::option_list`):
+    /// the generic single-choice row stack the rule editor will offer for its
+    /// Matchable Field, comparison and library-derived value picks. The row
+    /// treatment mirrors the Settings nav rail it is modelled on — a surface-2
+    /// band with a brand bar marks the current choice — at the tighter rhythm
+    /// an in-form picker needs.
+    pub mod option_list {
+        /// One option row's height: a text-sm line with vertical padding,
+        /// tighter than the nav rail's full-row [`NAV_ITEM_H`][super::settings::NAV_ITEM_H]
+        /// because the list sits inside a form, not beside one.
+        pub const ROW_H: f32 = 28.0;
+        /// Vertical gap between adjacent option rows.
+        pub const ROW_GAP: f32 = 2.0;
+        /// Shrink from a row's full width to its painted band — the nav
+        /// rail's 8px rhythm, named because the selector draws it.
+        pub const BAND_SHRINK_X: f32 = 8.0;
+        /// Width of the brand bar that marks the current choice, starting at
+        /// the band's left edge — the nav rail's 3px bar.
+        pub const MARK_W: f32 = 3.0;
+        /// Vertical inset of the mark bar inside its row — the nav rail's 6px
+        /// inset (`rect.top() + 6.0 .. rect.bottom() - 6.0`).
+        pub const MARK_INSET_Y: f32 = 6.0;
+        /// Inset from a row's left edge to its label — the nav rail's 20px,
+        /// which clears the band shrink plus the mark bar.
+        pub const TEXT_X: f32 = 20.0;
+        /// Reserve at a row's right edge: a label wider than the remaining
+        /// budget is truncated with an ellipsis there rather than escaping
+        /// the pane — the selector's horizontal-overflow contract.
+        pub const TEXT_END_PAD: f32 = 8.0;
+    }
 }
 
 // --- Semantic palette ---------------------------------------------------------

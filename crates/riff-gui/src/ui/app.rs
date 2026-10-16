@@ -3375,7 +3375,6 @@ impl RiffApp {
             theme::geometry::sidebar::ROW_H,
             total,
             |ui, row_range| {
-                eprintln!("T13PROBE row_range={row_range:?} total={total}");
                 for i in row_range {
                     let row = match self.views.custom_list_row(id, sort, needle, i) {
                         Ok(row) | Err(CustomListDegraded { value: row, .. }) => row,

@@ -20168,11 +20168,7 @@ mod whole_frame_tests {
 
         // Double-click: the same gesture body every listing's rows carry.
         let before_play = transport.recorded().len();
-        let at = shell
-            .harness
-            .get_by_label("Artist - Alpha")
-            .rect()
-            .center();
+        let at = shell.harness.get_by_label("Artist - Alpha").rect().center();
         double_click_at(&mut shell.harness, at, FAST_STEP);
         shell.harness.step();
         assert_eq!(
@@ -20307,10 +20303,7 @@ mod whole_frame_tests {
             "and the Rules still exclude what they excluded"
         );
         assert!(
-            shell
-                .harness
-                .query_by_label("No matching tracks")
-                .is_none(),
+            shell.harness.query_by_label("No matching tracks").is_none(),
             "an answered filter is not the empty state"
         );
     }
@@ -20377,23 +20370,6 @@ mod whole_frame_tests {
         for _ in 0..3 {
             shell.harness.step();
         }
-        {
-            use riff_backend::app::state::TrackSort;
-            use riff_backend::app::store::StoreGeneration;
-            use riff_backend::app::views::SessionViews;
-            let mut views = SessionViews::new(
-                Box::new(SharedQueryStore(Arc::clone(&mock))),
-                Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
-            );
-            eprintln!(
-                "PROBE row0: {:?}",
-                views
-                    .custom_list_row(&PlaylistId("spl-big-1".to_string()), TrackSort::default(), None, 0)
-                    .map(|row| row.map(|t| t.id.clone()))
-            );
-        }
 
         // Opening reads the tree, asks the Listing Page for the total ALONE
         // (limit 0, the count sentinel), then fetches the one window the
@@ -20401,57 +20377,65 @@ mod whole_frame_tests {
         assert_eq!(
             mock.lock().unwrap().custom_page_calls(),
             vec![
-                (riff_backend::app::store::TrackListOrder::default(), None, 0, 0),
-                (riff_backend::app::store::TrackListOrder::default(), None, 0, 50),
+                (
+                    riff_backend::app::store::TrackListOrder::default(),
+                    None,
+                    0,
+                    0
+                ),
+                (
+                    riff_backend::app::store::TrackListOrder::default(),
+                    None,
+                    0,
+                    50
+                ),
             ],
             "one count read and ONE window read at open"
         );
         assert!(
-            shell.harness.query(By::new().label("Artist - Track 119")).is_none(),
+            shell
+                .harness
+                .query(By::new().label("Artist - Track 119"))
+                .is_none(),
             "the tail is far outside the viewport"
         );
 
-        // Scroll to the tail with real wheel events over a row of the listing
-        // itself (found by geometry: right of the sidebar, because "Track "
-        // also names nodes outside the listing).
-        for _ in 0..60 {
-            if shell.harness.query(By::new().label("Artist - Track 119")).is_some() {
+        // Scroll to the tail, one viewport at a time, by asking the harness to
+        // bring the LAST visible row into view — the Accessibility
+        // scroll-into-view gesture, which drives the real `ScrollArea` and
+        // re-centres it, so each step advances whole windows. Synthetic
+        // `MouseWheel` events are not the driver here: egui smooths a wheel
+        // notch over frames using the WALL-CLOCK delta, and the headless
+        // harness runs frames back to back, so a wheel event crawls a few
+        // pixels per step — measured, not assumed.
+        for _ in 0..40 {
+            if shell
+                .harness
+                .query(By::new().label("Artist - Track 119"))
+                .is_some()
+            {
                 break;
             }
-            let Some(row) = shell
+            let last_visible = shell
                 .harness
                 .query_all_by_label_contains("Artist - Track ")
-                .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            else {
-                break;
-            };
-            shell.harness.hover_at(row.rect().center());
-            shell.harness.event(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, -800.0),
-                phase: egui::TouchPhase::Move,
-                modifiers: egui::Modifiers::default(),
-            });
+                .filter(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+                .max_by(|a, b| a.rect().center().y.total_cmp(&b.rect().center().y))
+                .expect("the listing's rows are on screen before the first scroll");
+            last_visible.scroll_to_me();
+            shell.harness.step();
             shell.harness.step();
         }
-        let visible: Vec<String> = shell
-            .harness
-            .query_all_by_label_contains("Artist - Track ")
-            .filter_map(|node| node.value())
-            .collect();
-        let any_track: Vec<String> = shell
-            .harness
-            .query_all_by_label_contains("Track")
-            .filter_map(|node| node.value())
-            .collect();
         let count_line = shell
             .harness
             .query(By::new().label("(120 tracks)"))
             .is_some();
         assert!(
-            shell.harness.query(By::new().label("Artist - Track 119")).is_some(),
-            "the scroll reached the tail; visible rows: {visible:?}; any Track nodes: {any_track:?}; \
-             count line on screen: {count_line}"
+            shell
+                .harness
+                .query(By::new().label("Artist - Track 119"))
+                .is_some(),
+            "the scroll reached the tail; count line on screen: {count_line}"
         );
 
         let windows: Vec<_> = mock
@@ -20521,12 +20505,7 @@ mod whole_frame_tests {
             .click();
         shell.harness.step();
 
-        let first = TrackId(
-            dir.path()
-                .join("59.mp3")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        let first = TrackId(dir.path().join("59.mp3").to_string_lossy().into_owned());
         let rest: Vec<TrackId> = (0..59)
             .rev()
             .map(|i| {

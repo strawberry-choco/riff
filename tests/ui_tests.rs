@@ -7148,6 +7148,70 @@ mod tests {
         );
     }
 
+    /// The pane branches with the window exactly as the Library pane does:
+    /// two columns at a wide size — the listener's lists left, the editor
+    /// right — and one stacked column below the shared
+    /// `settings_pane_columns` boundary.
+    ///
+    /// Measured through the query tree at both widths, the same geometry
+    /// probe the Library pane's own split test uses: the pane is laid out
+    /// unclipped at a probe height tall enough that no scroll position can
+    /// move a probe between reads.
+    #[test]
+    fn test_the_smart_playlists_pane_splits_wide_and_stacks_narrow() {
+        use egui_kittest::kittest::Queryable;
+
+        /// Tall enough that the whole pane lays out unclipped at either
+        /// width, so every probed widget is visible in the first frame.
+        const PANE_PROBE_H: f32 = 1600.0;
+
+        let render = |width: f32| {
+            let content = sample_content();
+            let mut harness =
+                smart_playlists_harness_sized(&content, egui::vec2(width, PANE_PROBE_H));
+            harness.run();
+            let new_button = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .rect();
+            let name = harness.get_by_role(egui::accesskit::Role::TextInput).rect();
+            let save = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+                .rect();
+            (new_button, name, save)
+        };
+
+        // Wide: the two-column branch. The left column's button sits entirely
+        // left of the right column's name field and Save control.
+        let (new_button, name, save) = render(1280.0);
+        assert!(
+            new_button.right() < name.left(),
+            "wide: the name field must be in the right column, entirely right \
+             of the left column's button: {} vs {}",
+            new_button.right(),
+            name.left()
+        );
+        assert!(
+            new_button.right() < save.left(),
+            "wide: Save reads in the right column too"
+        );
+
+        // Narrow: below the boundary the editor stacks under the lists — the
+        // name field and Save move below the left column instead of beside
+        // it.
+        let (new_button, name, save) = render(700.0);
+        assert!(
+            name.top() >= new_button.bottom(),
+            "narrow: the editor must stack below the left column, not sit \
+             beside it: {} vs {}",
+            name.top(),
+            new_button.bottom()
+        );
+        assert!(
+            save.top() > name.top(),
+            "narrow: Save still reads inside the editor, under the name field"
+        );
+    }
+
     fn sample_content() -> SettingsContent {
         SettingsContent {
             libraries: vec![LibraryRow {
@@ -18521,10 +18585,19 @@ mod whole_frame_tests {
 
         // Before: the sidebar's built-ins are all there (four visible; the
         // two advanced-gated rows appear under Advanced mode).
-        let built_ins = ["Recently Added", "Recently Played", "Most Played", "Favorites"];
+        let built_ins = [
+            "Recently Added",
+            "Recently Played",
+            "Most Played",
+            "Favorites",
+        ];
         for label in built_ins {
             assert!(
-                shell.harness.query_all_by_label_contains(label).next().is_some(),
+                shell
+                    .harness
+                    .query_all_by_label_contains(label)
+                    .next()
+                    .is_some(),
                 "the {label} built-in row is in the sidebar before the click"
             );
         }
@@ -18572,7 +18645,11 @@ mod whole_frame_tests {
         // The built-ins are untouched — same rows, same sidebar.
         for label in built_ins {
             assert!(
-                shell.harness.query_all_by_label_contains(label).next().is_some(),
+                shell
+                    .harness
+                    .query_all_by_label_contains(label)
+                    .next()
+                    .is_some(),
                 "the {label} built-in row survives the + unchanged"
             );
         }

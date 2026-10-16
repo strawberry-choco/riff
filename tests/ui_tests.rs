@@ -21997,6 +21997,105 @@ mod whole_frame_tests {
         );
     }
 
+    /// A Custom Smart Playlist cannot be renamed to one of the six Built-in
+    /// display names from the sidebar menu: the application layer's half of the
+    /// name rule — the half no store query can hold, because the Built-ins
+    /// exist only as code — refuses it, its wording is painted under the prompt
+    /// the rename opened, and the list keeps its own name in the store. Before
+    /// this guard the sidebar could show two rows reading "Most Played", and a
+    /// later editor Save of that list refused until it was renamed away
+    /// (story 8).
+    #[test]
+    fn a_builtin_name_is_refused_by_the_sidebar_rename_and_the_list_keeps_its_name() {
+        let (mut shell, _dir, _id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz"),
+            "the rename prompt opens pre-filled with the row's name"
+        );
+
+        // The prompt's field holds the first focus; Tab walks to the confirm
+        // control and Shift+Tab returns to the field — the walk
+        // [`focus_and_type_at`] proves. The pre-filled draft is then cleared a
+        // character at a time (this field has no select-all gesture the
+        // harness can drive, and Enter would commit it as it stands), leaving
+        // the Built-in name as the whole draft.
+        shell.harness.key_press(egui::Key::Tab);
+        shell.harness.step();
+        assert!(
+            shell.harness.get_by_label("Save").is_focused(),
+            "Tab from the prompt's first focus lands on Save"
+        );
+        shell
+            .harness
+            .key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        shell.harness.step();
+        for _ in 0..40 {
+            if focused_prompt_text(&mut shell).as_deref() == Some("") {
+                break;
+            }
+            shell.harness.key_press(egui::Key::Backspace);
+            shell.harness.step();
+        }
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some(""),
+            "the pre-filled name is cleared before the new one is typed"
+        );
+        shell
+            .harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|node| node.is_focused())
+            .expect("the name field keeps the focus")
+            .type_text("Most Played");
+        shell.harness.step();
+        confirm_prompt(&mut shell);
+
+        // Refused: the prompt stays open with the application layer's own
+        // wording under it, and nothing was written.
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .next()
+                .is_some(),
+            "the application layer's own refusal is painted under the prompt"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Most Played")
+                .next()
+                .is_none(),
+            "no sidebar row wears a Built-in display name"
+        );
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz".to_string()],
+            "the refused write changed no name: the six Built-in display names are code, \
+             and a Custom row may not borrow one"
+        );
+    }
+
     /// The row pass's typed intents, at the widget seam: a click on a custom
     /// row reports `OpenSmartList(Custom(that row's id))` — its own id, not a
     /// sibling's — and nothing else. No store, no slot, no frame in the way;

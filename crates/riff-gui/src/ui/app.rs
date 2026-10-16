@@ -51,6 +51,10 @@ pub use riff_backend::app::cover_service::{
     COVER_CACHE_CAP, ClearCacheOutcome, Covers, lru_insert,
 };
 use riff_backend::app::pass_service::Passes;
+// The application layer's half of the sidebar name rule (the Built-in display
+// names), asked by every gesture that names a sidebar row: the two prompt
+// commits below and the editor's Save.
+use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::replaygain_pass::PassReport;
 // The artwork cache-key space moved to `ui::artwork` with the artwork primitive
 // (issue 13); these keep the historical `ui::app::` paths resolving.
@@ -2831,9 +2835,18 @@ pub fn commit_playlist_rename(
 /// ([`LibraryMutationStore::rename_smart_playlist`] — a sidebar Rename names a
 /// list without touching its tree, which is why it is not a save).
 ///
-/// `Err(reason)` is the refusal the caller must render: the store's sidebar
-/// name rule refuses a name another row holds, and the prompt stays open with
-/// the reason under it.
+/// `Err(reason)` is the refusal the caller must render: both halves of the
+/// sidebar name rule — the application layer's Built-in-name half and the
+/// store's cross-table half (a name another row holds) — and the prompt stays
+/// open with the reason under it.
+///
+/// The Built-in-name half is asked **here**, not at the prompt's call site, so
+/// that any future caller of this commit inherits it: the six Built-in Smart
+/// Playlists exist only as code, so no query can refuse a Custom Smart
+/// Playlist named after one, and the sidebar must never show two rows reading
+/// "Most Played" (story 8). The same half is asked by the two playlist prompt
+/// arms and by the editor's Save; this is the fourth gesture that names a
+/// sidebar row.
 #[must_use = "a refused rename has to reach the listener, not the log"]
 pub fn commit_custom_smart_list_rename(
     store: &mut dyn LibraryMutationStore,
@@ -2843,6 +2856,9 @@ pub fn commit_custom_smart_list_rename(
     let draft = draft.trim().to_string();
     if draft.is_empty() {
         return Ok(());
+    }
+    if let Some(reason) = builtin_smart_list_name_conflict(&draft) {
+        return Err(reason);
     }
     match store.rename_smart_playlist(id, &draft) {
         Ok(_found) => Ok(()),

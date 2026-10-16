@@ -761,13 +761,17 @@ fn folding_the_smart_lists_section_closes_the_list_it_opened() {
 
 /// Opening a Custom Smart Playlist (ticket 12) goes through the same action
 /// and the same slot as a Built-in one: it lands on the library view, clears
-/// the search box, and closes any open user playlist — exactly one browser
-/// variant on screen after the click.
+/// the search box, replaces an open Built-in in the one slot, and closes any
+/// open user playlist — exactly one browser variant on screen after the
+/// click.
 #[test]
 fn opening_a_custom_smart_list_opens_it_over_the_library_and_closes_the_playlist() {
     let mut harness = Harness::new();
     harness.library.search_query = "boards".to_string();
     harness.playlist_view = Some(PlaylistId("pl-1".to_string()));
+    harness.smart_playlist_view = Some(SmartListIdentity::BuiltIn(
+        riff_backend::domain::SmartPlaylistKind::RecentlyPlayed,
+    ));
 
     let id = PlaylistId("spl-late-night-1".to_string());
     let reports = Reports {
@@ -784,7 +788,7 @@ fn opening_a_custom_smart_list_opens_it_over_the_library_and_closes_the_playlist
     assert_eq!(
         harness.smart_playlist_view,
         Some(SmartListIdentity::Custom(id)),
-        "the identity the row reported is what the slot holds"
+        "the identity the row reported replaces the open Built-in in the one slot"
     );
     assert!(
         harness.playlist_view.is_none(),

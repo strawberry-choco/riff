@@ -3345,10 +3345,10 @@ impl super::app::RiffApp {
         #[cfg(target_os = "linux")]
         self.render_library_path_input(ui, library);
         // The one destructive confirmation does NOT render here: it renders
-        // at the end of `RiffApp::draw_stage` for every view, because the
-        // sidebar (which raises a Custom Smart Playlist's Delete) is shared
-        // chrome — a confirmation raised there must show whatever is on
-        // stage. See `render_pending_destructive`.
+        // from `RiffApp::draw_stage` for every view, because the sidebar
+        // (which raises a Custom Smart Playlist's Delete) is shared chrome —
+        // a confirmation raised there must show whatever is on stage. See
+        // `render_pending_destructive` and `render_pending_destructive_band`.
     }
 
     /// Render whichever destructive confirmation is pending — the ONE surface

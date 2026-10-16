@@ -1390,6 +1390,28 @@ impl RiffApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.active.background))
             .show(ui, |ui| {
+                // The one destructive confirmation renders for EVERY view:
+                // the sidebar raises a Custom Smart Playlist's Delete and the
+                // sidebar is shared chrome, so the question must show whatever
+                // is on stage. WHERE it renders is what differs by view.
+                //
+                // The Settings page leaves the panel's bottom edge free, and
+                // the two wipes keep their historical place beneath the page
+                // — the same slot in the same `ui` the modal drew into, so
+                // their pixels and order are unchanged.
+                //
+                // Every other stage fills the panel to that edge, and a
+                // confirmation laid out after it would sit outside the
+                // panel's clip rect: it would paint nothing and answer no
+                // click (measured — the sidelined Cancel click in
+                // `deleting_from_the_menu_asks_by_name_and_only_a_confirmed_delete_writes`
+                // did nothing). So on those views the question takes a band
+                // reserved at the bottom FIRST, and the stage fills the space
+                // above it.
+                let beneath_page = matches!(library.view_mode, ViewMode::Settings);
+                if !beneath_page {
+                    self.render_pending_destructive_band(ui, library);
+                }
                 match library.view_mode {
                     ViewMode::Library => {
                         // The elastic column stage (elastic-column spec): the
@@ -1409,15 +1431,28 @@ impl RiffApp {
                         self.show_settings_view(ui, library, playback);
                     }
                 }
-                // The one destructive confirmation renders for EVERY view:
-                // the sidebar raises a Custom Smart Playlist's Delete and the
-                // sidebar is shared chrome, so the question must show whatever
-                // is on stage. For the Settings wipes this is the same slot in
-                // the same `ui` the modal drew into, so their pixels and order
-                // are unchanged.
-                self.render_pending_destructive(ui, library);
+                if beneath_page {
+                    self.render_pending_destructive(ui, library);
+                }
             });
         self.frame(playback, library).apply_stage(out, &report);
+    }
+
+    /// Render a pending destructive confirmation in a band reserved at the
+    /// bottom edge of the stage area, BEFORE the stage draws — the form the
+    /// confirmation takes on the views whose stage would otherwise fill
+    /// straight past it (see [`Self::draw_stage`] on the where and why).
+    ///
+    /// Nothing is reserved and no panel exists while nothing is pending, so
+    /// every stage's pixels are unchanged in the common case. The band wears
+    /// the default panel frame, the same surface and hairline the playerbar
+    /// wears one panel above.
+    fn render_pending_destructive_band(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
+        if self.pending_destructive.is_none() {
+            return;
+        }
+        egui::Panel::bottom("pending_destructive")
+            .show(ui, |ui| self.render_pending_destructive(ui, library));
     }
 }
 
@@ -2575,6 +2610,10 @@ pub fn smart_list_openable(kind: SmartPlaylistKind, advanced: bool) -> bool {
 /// identity they opened, [`SidebarAction::CustomSmartList`] with the menu
 /// choice, and [`SidebarAction::CustomSmartListRename`] with the prompt's
 /// outcome — and nothing else.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seam's five shared row-pass inputs, the two rename-prompt slots the row owns, and the report; a props struct with one production caller would only move the same list"
+)]
 pub fn custom_smart_list_rows(
     ui: &mut egui::Ui,
     cache: &mut riff_gui_theme::icons::IconCache,

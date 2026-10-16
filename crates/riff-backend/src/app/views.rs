@@ -33,11 +33,20 @@
 //! already holds them, so a header never blanks over rows still on screen.
 //! Projections only stamp their loaded generation after a successful fetch,
 //! so the next call retries automatically.
+//!
+//! The one exception to "the UI never sees a `Result`" is the Custom Smart
+//! Playlist trio (`custom_list_tree`, `custom_list_count`, `custom_list_row`):
+//! the surfaces that draw those (a listing's header, the rule editor's live
+//! count) must show *why* an answer is stale or empty, so they answer through
+//! a `Result` whose `Err` carries the last good value beside the reason —
+//! the typed-outcome precedent every other visible failure already uses.
+//! `degrade` is unchanged everywhere else.
 
 use crate::app::projection::{BrowseList, BrowseProjectionKey};
 use crate::app::projection::{
-    BrowsingProjection, FolderProjection, GenreProjection, HitProjection, PlaylistProjection,
-    ProjectionKey, SmartPlaylistsProjection, TrackListProjection, WindowedListProjection,
+    BrowsingProjection, CustomListDegraded, CustomPlaylistProjection, FolderProjection,
+    GenreProjection, HitProjection, PlaylistProjection, ProjectionKey, SmartPlaylistsProjection,
+    TrackListProjection, WindowedListProjection,
 };
 // The playlist view shapes are part of the seam's public surface: the
 // projection module itself is private, so UI code imports these from here.
@@ -133,6 +142,11 @@ pub struct SessionViews {
     artist_first_track_lru: Vec<String>,
     folders: FolderProjection,
     smart_playlists: SmartPlaylistsProjection,
+    /// The Custom Smart Playlist listing's bounded windows plus the
+    /// generation-cached tree read they compile from (ADR 0002 — the new
+    /// list is read through a Session Projection like every other listing,
+    /// and through a *new* cache, never the built-ins' unbounded-Vec one).
+    custom_lists: CustomPlaylistProjection,
     genres: GenreProjection,
     counts: CountsProjection,
     playback: PlaybackProjection,
@@ -280,6 +294,8 @@ impl SessionViews {
         let browsing = BrowsingProjection::new(generation.clone());
         let folders = FolderProjection::new(generation.clone());
         let smart_playlists = SmartPlaylistsProjection::new(generation.clone());
+        let custom_lists =
+            CustomPlaylistProjection::new(playlist_generation.clone(), generation.clone());
         let genres = GenreProjection::new(generation.clone());
         let counts = CountsProjection::new(generation.clone());
         let playback = PlaybackProjection::new(generation.clone());
@@ -301,6 +317,7 @@ impl SessionViews {
             artist_first_track_lru: Vec::new(),
             folders,
             smart_playlists,
+            custom_lists,
             genres,
             counts,
             playback,
@@ -328,19 +345,28 @@ impl SessionViews {
     // Error policy, once, for every one of them: a failed read logs a
     // `tracing::warn!` with its context and degrades to the projection's
     // last good answer — the last good row, the last good total — or to the
-    // default (`None`, `0`) when there is none. The UI never sees a
-    // `Result`, and a header never blanks over rows still on screen.
+    // default (`None`, `0`) when there is none. A header never blanks over
+    // rows still on screen. (The Custom Smart Playlist trio below is the
+    // documented exception: it answers as a typed outcome carrying the
+    // reason beside the last good value.)
     // --- Flat list / search -------------------------------------------------
 
-    /// The query signature of the flat track list (`query` empty) or the
-    /// search results (`query` non-empty) in `sort`.
-    fn track_key(query: &str, sort: TrackSort) -> (ProjectionKey, TrackListOrder) {
-        let order = match sort {
+    /// The store order the listing's shared sort spells — the one
+    /// `TrackSort` → `TrackListOrder` translation the seam uses (the flat
+    /// list, the search, and the Custom Smart Playlist listing alike).
+    fn track_list_order(sort: TrackSort) -> TrackListOrder {
+        match sort {
             TrackSort::NumberAsc => TrackListOrder::PathAsc,
             TrackSort::NumberDesc => TrackListOrder::PathDesc,
             TrackSort::TitleAsc => TrackListOrder::TitleAsc,
             TrackSort::TitleDesc => TrackListOrder::TitleDesc,
-        };
+        }
+    }
+
+    /// The query signature of the flat track list (`query` empty) or the
+    /// search results (`query` non-empty) in `sort`.
+    fn track_key(query: &str, sort: TrackSort) -> (ProjectionKey, TrackListOrder) {
+        let order = Self::track_list_order(sort);
         let key = if query.is_empty() {
             ProjectionKey::Flat(order)
         } else {
@@ -867,6 +893,89 @@ impl SessionViews {
             result,
             || format!("Failed to compute smart playlist {}", kind.display_name()),
             || Arc::from([]),
+        )
+    }
+
+    // --- Custom Smart Playlists ---------------------------------------------
+    //
+    // A Custom list is read through the same bounded discipline as every
+    // other listing — windows plus a total, cached per query signature per
+    // generation — but its three reads answer as a typed outcome rather
+    // than a bare value: the surfaces that draw them (the listing's header,
+    // the rule editor's count line) must be able to show *why* an answer is
+    // stale or empty, which is exactly what no `degrade`d read can carry.
+    // The store error still warns and the last good value is still served;
+    // it now arrives beside the reason instead of alone.
+
+    /// The Rule tree of the Custom Smart Playlist with `id`, cached per
+    /// playlist generation (a cached absence included). `Ok(None)` means the
+    /// list is gone; `Err` carries the last good tree beside the reason when
+    /// the store read failed.
+    pub fn custom_list_tree(
+        &mut self,
+        id: &PlaylistId,
+    ) -> Result<Option<SmartPlaylistTree>, CustomListDegraded<Option<SmartPlaylistTree>>> {
+        self.custom_lists
+            .tree(id, &mut |id| self.queries.smart_playlist_tree(id))
+    }
+
+    /// How many Tracks the Custom Smart Playlist with `id` currently matches
+    /// under `sort` and the listing's current `needle` (`None` for no
+    /// needle). Its own read: the store's Listing Page is asked for the
+    /// total alone (zero rows).
+    ///
+    /// # Errors
+    /// `Err` carries the value to draw beside the reason: the last good
+    /// total for this query when a store failure interrupted a listing in
+    /// hand, and `0` — matching nothing, never a silent "no rows" — when the
+    /// list is gone or its tree holds an Unreadable Rule, for which no query
+    /// is ever issued.
+    pub fn custom_list_count(
+        &mut self,
+        id: &PlaylistId,
+        sort: TrackSort,
+        needle: Option<&str>,
+    ) -> Result<usize, CustomListDegraded<usize>> {
+        self.custom_lists.count(
+            id,
+            Self::track_list_order(sort),
+            needle,
+            &mut |id| self.queries.smart_playlist_tree(id),
+            &mut |tree, order, needle, offset, limit| {
+                self.queries
+                    .custom_smart_playlist_page(tree, order, needle, offset, limit)
+            },
+        )
+    }
+
+    /// Row `index` of the Custom Smart Playlist with `id` under `sort` and
+    /// the listing's current `needle` — the Track a surface is about to
+    /// draw, from the bounded window cache (the window size and cache bound
+    /// are the shared house's, never this listing's). `Ok(None)` means the
+    /// listing has no row at that index.
+    ///
+    /// # Errors
+    /// `Err` carries the value to draw beside the reason: the last good row
+    /// for this query when a store failure interrupted a listing in hand,
+    /// and `None` when the list is gone or its tree holds an Unreadable
+    /// Rule, for which no query is ever issued.
+    pub fn custom_list_row(
+        &mut self,
+        id: &PlaylistId,
+        sort: TrackSort,
+        needle: Option<&str>,
+        index: usize,
+    ) -> Result<Option<Arc<Track>>, CustomListDegraded<Option<Arc<Track>>>> {
+        self.custom_lists.row(
+            id,
+            Self::track_list_order(sort),
+            needle,
+            index,
+            &mut |id| self.queries.smart_playlist_tree(id),
+            &mut |tree, order, needle, offset, limit| {
+                self.queries
+                    .custom_smart_playlist_page(tree, order, needle, offset, limit)
+            },
         )
     }
 

@@ -10162,3 +10162,689 @@ mod replaygain_mirror_tests {
         );
     }
 }
+
+/// The Session Projection that serves a Custom Smart Playlist's rows and
+/// total (ticket 11), pinned at the app seam.
+///
+/// These tests pin the **port contract only**: the shape of the reads the
+/// seam issues — the bounded paged read with the shared sort and the current
+/// needle, a count read as zero rows, one window read per missing window,
+/// refetch after either generation moves, and the reason carried out of the
+/// seam when a read cannot answer fresh. They deliberately do **not** pin
+/// matching behaviour: the mock's canned `Vec` slicing cannot prove which
+/// Tracks a Rule tree matches, and asserting a stub's canned answer as
+/// though it did is exactly the coverage the spec warns against. Matching
+/// is proven against a real SQLite store in `crates/riff-infra`'s suite.
+#[cfg(test)]
+mod custom_list_projection_tests {
+    use super::*;
+    use crate::mocks::{
+        FailingQuery, LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore,
+    };
+    use app::projection::{CustomListDegraded, CustomListKey};
+    use app::state::TrackSort;
+    use app::store::{StoreGeneration, TrackListOrder};
+    use app::views::SessionViews;
+    use domain::{
+        Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+    };
+
+    /// Wire a seam to `mock`; returns the seam, the shared mock handle, and
+    /// BOTH generation handles — the Custom projection watches the library
+    /// counter for rows and the playlist counter for the tree.
+    fn wire_custom(
+        mock: MockLibraryQueryStore,
+    ) -> (
+        SessionViews,
+        Arc<Mutex<MockLibraryQueryStore>>,
+        StoreGeneration,
+        StoreGeneration,
+    ) {
+        let mock = Arc::new(Mutex::new(mock));
+        let library_generation = StoreGeneration::new();
+        let playlist_generation = StoreGeneration::new();
+        let views = SessionViews::new(
+            Box::new(SharedQueryStore(Arc::clone(&mock))),
+            Box::new(MockPlaylistStore::default()),
+            library_generation.clone(),
+            playlist_generation.clone(),
+        );
+        (views, mock, library_generation, playlist_generation)
+    }
+
+    /// A deterministic custom-list id. Rule and Rule Box ids never reach the
+    /// seam, so a test only ever names the list's own id.
+    fn list_id(name: &str) -> PlaylistId {
+        PlaylistId(format!("spl-{name}-0"))
+    }
+
+    /// A one-Rule tree: `<field> is <value>` in the Root Box.
+    fn one_rule_tree(field: MatchableField, value: &str) -> SmartPlaylistTree {
+        SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+            vec![RuleChild::Rule(Rule::new(
+                field,
+                Comparison::Is,
+                Some(RuleValue::Text(value.to_string())),
+            ))],
+        )))
+    }
+
+    /// The same tree with one stored row this build cannot read beside it.
+    /// A real store only ever produces such a row from data a `CHECK` list
+    /// would reject today (the suite seeds it behind
+    /// `PRAGMA ignore_check_constraints`); the double holds what the read
+    /// would hand back.
+    fn unreadable_tree() -> SmartPlaylistTree {
+        one_rule_tree(MatchableField::Title, "kept").with_unreadable(vec![UnreadableRule::new(
+            vec![],
+            1,
+            "mystery_field".to_string(),
+            "is".to_string(),
+            false,
+            Some("x".to_string()),
+        )])
+    }
+
+    /// `n` deterministic fixture rows, the mock's canned custom listing.
+    fn custom_rows(n: usize) -> Vec<Track> {
+        (0..n)
+            .map(|i| crate::test_utils::create_test_track(&i.to_string(), &format!("f:\\{i}.mp3")))
+            .collect()
+    }
+
+    #[test]
+    fn test_opening_a_custom_list_issues_the_paged_read_with_the_shared_sort_and_needle() {
+        let id = list_id("shape");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                one_rule_tree(MatchableField::Title, "shape"),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+
+        // The count is its own read: zero rows, the shared sort, the current
+        // needle, and the tree in its compiled stored-id spelling.
+        assert_eq!(
+            views
+                .custom_list_count(&id, TrackSort::TitleAsc, Some("needle"))
+                .expect("a healthy seam counts fresh"),
+            120
+        );
+        let compiled =
+            RuleTree::from_smart_playlist_tree(&one_rule_tree(MatchableField::Title, "shape"))
+                .expect("a readable tree bridges");
+        assert_eq!(
+            mock.lock().unwrap().calls(),
+            vec![
+                LibraryQueryCall::SmartPlaylistTree(id.clone()),
+                LibraryQueryCall::CustomSmartPlaylistPage(
+                    compiled.clone(),
+                    TrackListOrder::TitleAsc,
+                    Some("needle".to_string()),
+                    0,
+                    0,
+                ),
+            ],
+            "open reads the tree once, then asks the Listing Page for the total ALONE — limit 0, the count sentinel"
+        );
+
+        // The row read pages the same query: one window, same sort and needle.
+        assert_eq!(
+            views
+                .custom_list_row(&id, TrackSort::TitleAsc, Some("needle"), 0)
+                .expect("a healthy seam rows fresh")
+                .expect("row 0 of 120 exists")
+                .id
+                .0,
+            "0"
+        );
+        assert_eq!(
+            mock.lock().unwrap().custom_page_calls(),
+            vec![
+                (TrackListOrder::TitleAsc, Some("needle".to_string()), 0, 0),
+                (TrackListOrder::TitleAsc, Some("needle".to_string()), 0, 50)
+            ],
+            "a row read fetches one window at the projection's own window size"
+        );
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls(),
+            vec![id.clone()],
+            "the tree read is cached per playlist epoch, not re-issued per frame"
+        );
+    }
+
+    #[test]
+    fn test_a_new_window_costs_exactly_one_read_and_a_reopen_costs_none() {
+        let id = list_id("windows");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                one_rule_tree(MatchableField::Title, "windows"),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 49)
+                .expect("fresh")
+                .is_some(),
+            "row 49 is the last position of the window already in hand"
+        );
+        assert_eq!(
+            mock.lock().unwrap().window_calls(),
+            vec![(0, 50)],
+            "the second row cost no store read"
+        );
+
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 50)
+                .expect("fresh")
+                .is_some()
+        );
+        assert_eq!(
+            mock.lock().unwrap().window_calls(),
+            vec![(0, 50), (50, 50)],
+            "scrolling to a new window issues exactly one read for it"
+        );
+
+        // Re-opened at the same offset — a repaint, or coming back to the
+        // list — does not re-query.
+        let before = mock.lock().unwrap().calls().len();
+        assert_eq!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 12)
+                .expect("fresh")
+                .expect("row 12 exists")
+                .id
+                .0,
+            "12"
+        );
+        assert_eq!(
+            mock.lock().unwrap().calls().len(),
+            before,
+            "re-opening the same list at an offset in hand costs no read at all"
+        );
+    }
+
+    #[test]
+    fn test_a_library_bump_refetches_rows_without_re_reading_the_tree() {
+        let id = list_id("libbump");
+        let (mut views, mock, library_generation, _playlist_gen) =
+            wire_custom(MockLibraryQueryStore {
+                smart_playlist_trees: std::collections::HashMap::from([(
+                    id.clone(),
+                    one_rule_tree(MatchableField::Title, "libbump"),
+                )]),
+                custom_page: custom_rows(3),
+                ..Default::default()
+            });
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+        assert_eq!(
+            views
+                .custom_list_count(&id, TrackSort::default(), None)
+                .expect("fresh"),
+            3
+        );
+
+        // A committed Track mutation moves the Library counter: the rows and
+        // the total are its membership facts, both refetch; the tree is not,
+        // and is not read again.
+        library_generation.bump();
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("refetched")
+                .is_some()
+        );
+        assert_eq!(
+            views
+                .custom_list_count(&id, TrackSort::default(), None)
+                .expect("refetched"),
+            3
+        );
+        assert_eq!(
+            mock.lock().unwrap().window_calls(),
+            vec![(0, 50), (0, 50)],
+            "the window refetched once for the new generation"
+        );
+        assert_eq!(
+            mock.lock().unwrap().count_calls(),
+            vec![(0, 0), (0, 0)],
+            "and the count refetched once too"
+        );
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls(),
+            vec![id.clone()],
+            "a Track write moved no playlist epoch, so the tree stayed cached"
+        );
+    }
+
+    #[test]
+    fn test_a_playlist_bump_refetches_the_window_and_rereads_the_tree() {
+        let id = list_id("plbump");
+        let (mut views, mock, _lib_gen, playlist_generation) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                one_rule_tree(MatchableField::Title, "plbump"),
+            )]),
+            custom_page: custom_rows(3),
+            ..Default::default()
+        });
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+
+        // A name or tree write moves the PLAYLIST generation. The epoch is
+        // baked into the window key, so either counter moving drops rows
+        // while the cache itself stays single-stamped.
+        playlist_generation.bump();
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("refetched")
+                .is_some()
+        );
+        assert_eq!(
+            mock.lock().unwrap().window_calls(),
+            vec![(0, 50), (0, 50)],
+            "the playlist epoch inside the key dropped the window"
+        );
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls(),
+            vec![id.clone(), id.clone()],
+            "and the tree itself refetched — a save may have replaced it"
+        );
+    }
+
+    #[test]
+    fn test_a_playlist_bump_invalidates_the_custom_listing_but_never_the_flat_library_listing() {
+        let id = list_id("cross");
+        let compiled =
+            RuleTree::from_smart_playlist_tree(&one_rule_tree(MatchableField::Title, "cross"))
+                .expect("readable");
+        let (mut views, mock, library_generation, playlist_generation) =
+            wire_custom(MockLibraryQueryStore {
+                flat: custom_rows(60),
+                smart_playlist_trees: std::collections::HashMap::from([(
+                    id.clone(),
+                    one_rule_tree(MatchableField::Title, "cross"),
+                )]),
+                custom_page: custom_rows(3),
+                ..Default::default()
+            });
+        assert!(views.track_row("", TrackSort::default(), 0).is_some());
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+        let tracks_page = LibraryQueryCall::TracksPage(TrackListOrder::PathAsc, 0, 50);
+        let custom_page = LibraryQueryCall::CustomSmartPlaylistPage(
+            compiled,
+            TrackListOrder::PathAsc,
+            None,
+            0,
+            50,
+        );
+        assert_eq!(mock.lock().unwrap().count_of(&tracks_page), 1);
+        assert_eq!(mock.lock().unwrap().count_of(&custom_page), 1);
+
+        // The two counters are independent on purpose (ticket 08's pairing
+        // is intended): a Custom-list save moves the playlist epoch that
+        // rides in the window key — the custom listing refetches and the
+        // flat Library listing does not…
+        playlist_generation.bump();
+        assert!(views.track_row("", TrackSort::default(), 0).is_some());
+        assert_eq!(
+            mock.lock().unwrap().count_of(&tracks_page),
+            1,
+            "a Playlists-only change never refetches the flat Library listing"
+        );
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("refetched")
+                .is_some()
+        );
+        assert_eq!(
+            mock.lock().unwrap().count_of(&custom_page),
+            2,
+            "the same bump does drop the custom window — the playlist epoch is inside the key"
+        );
+        let tree_reads = mock.lock().unwrap().smart_playlist_tree_calls().len();
+        assert_eq!(tree_reads, 2, "the playlist bump re-read the tree once");
+
+        // …and the reverse half, pinned beside the tree cache: a Library
+        // bump refetches both listings' rows and re-reads no tree.
+        library_generation.bump();
+        assert!(views.track_row("", TrackSort::default(), 0).is_some());
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("refetched")
+                .is_some()
+        );
+        assert_eq!(mock.lock().unwrap().count_of(&tracks_page), 2);
+        assert_eq!(mock.lock().unwrap().count_of(&custom_page), 3);
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls().len(),
+            tree_reads,
+            "a Track write moved no playlist epoch: the tree stayed cached through all of it"
+        );
+    }
+
+    #[test]
+    fn test_two_different_trees_with_the_same_rule_count_are_different_keys() {
+        let key_a = CustomListKey {
+            tree: RuleTree::from_smart_playlist_tree(&one_rule_tree(MatchableField::Title, "same"))
+                .expect("readable"),
+            order: TrackListOrder::default(),
+            needle: None,
+            playlist_epoch: 0,
+        };
+        let key_b = CustomListKey {
+            tree: RuleTree::from_smart_playlist_tree(&one_rule_tree(
+                MatchableField::Artist,
+                "same",
+            ))
+            .expect("readable"),
+            ..key_a.clone()
+        };
+        assert!(
+            matches!(key_a.tree, RuleTree::Box { ref children, .. } if children.len() == 1),
+            "each compiled tree holds exactly one Rule — the rule COUNTs are the same"
+        );
+        assert!(
+            matches!(key_b.tree, RuleTree::Box { ref children, .. } if children.len() == 1),
+            "…by construction, one Rule each"
+        );
+        assert_ne!(
+            key_a, key_b,
+            "two different trees with one Rule each are different query signatures — the key holds the shape, not a count or a row id"
+        );
+
+        // And that is behaviour at the seam, not just struct equality:
+        // switching between two such lists refetches.
+        let id_a = list_id("tree-a");
+        let id_b = list_id("tree-b");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([
+                (id_a.clone(), one_rule_tree(MatchableField::Title, "same")),
+                (id_b.clone(), one_rule_tree(MatchableField::Artist, "same")),
+            ]),
+            custom_page: custom_rows(3),
+            ..Default::default()
+        });
+        assert!(
+            views
+                .custom_list_row(&id_a, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+        assert!(
+            views
+                .custom_list_row(&id_b, TrackSort::default(), None, 0)
+                .expect("fresh")
+                .is_some()
+        );
+        assert_eq!(
+            mock.lock().unwrap().window_calls(),
+            vec![(0, 50), (0, 50)],
+            "the second list's same index is a different query, not a cache hit"
+        );
+    }
+
+    #[test]
+    fn test_a_failed_window_read_serves_the_last_good_row_beside_the_reason() {
+        let id = list_id("degr");
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                one_rule_tree(MatchableField::Title, "degr"),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+        let good = views
+            .custom_list_row(&id, TrackSort::default(), None, 7)
+            .expect("fresh")
+            .expect("row 7 exists");
+
+        // A committed Track mutation invalidates the windows and the refresh
+        // fails: the listing keeps its last good rows and the reason comes
+        // out of the seam — the same degradation the other caches give,
+        // now visible.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylistWindow);
+        _lib_gen.bump();
+        let in_hand = views
+            .custom_list_row(&id, TrackSort::default(), None, 7)
+            .expect_err("the failing refresh answers degraded");
+        assert_eq!(
+            in_hand.value.as_ref().map(|track| track.id.0.as_str()),
+            Some("7"),
+            "the row inside the last good window is still the row to draw"
+        );
+        assert!(
+            in_hand.reason.contains("custom smart playlist boom"),
+            "the store's reason reaches the seam: {:?}",
+            in_hand.reason
+        );
+        let never_fetched = views
+            .custom_list_row(&id, TrackSort::default(), None, 57)
+            .expect_err("also degraded");
+        assert!(
+            never_fetched.value.is_none(),
+            "a row never fetched has no last good — empty, beside the reason, never a silent empty"
+        );
+
+        mock.lock().unwrap().failing.clear();
+        assert_eq!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 7)
+                .expect("healed")
+                .expect("row 7 again")
+                .id,
+            good.id,
+            "clearing the failure recovers the fresh route on the next call"
+        );
+    }
+
+    #[test]
+    fn test_a_failed_count_read_keeps_the_total_beside_the_rows_still_rendering() {
+        let id = list_id("cnt");
+        let (mut views, mock, library_generation, _playlist_gen) =
+            wire_custom(MockLibraryQueryStore {
+                smart_playlist_trees: std::collections::HashMap::from([(
+                    id.clone(),
+                    one_rule_tree(MatchableField::Title, "cnt"),
+                )]),
+                custom_page: custom_rows(120),
+                ..Default::default()
+            });
+        assert_eq!(
+            views
+                .custom_list_count(&id, TrackSort::default(), None)
+                .expect("fresh"),
+            120
+        );
+
+        // A mutation invalidates the listing and only the count read fails:
+        // the header keeps its last good total while the rows move on to
+        // the new collection — two reads, two fallbacks.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::CustomSmartPlaylistCount);
+        library_generation.bump();
+        let degraded = views
+            .custom_list_count(&id, TrackSort::default(), None)
+            .expect_err("the failing count answers degraded");
+        assert_eq!(
+            degraded.value, 120,
+            "the total a header keeps beside rows it is still drawing"
+        );
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect("rows still serve fresh")
+                .is_some(),
+            "a failed count is its own read — the window path is untouched"
+        );
+    }
+
+    #[test]
+    fn test_an_unreadable_rule_matches_nothing_with_a_reason_and_no_query_at_all() {
+        let id = list_id("unread");
+        let unreadable = unreadable_tree();
+        let (mut views, mock, _lib_gen, _playlist_gen) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                unreadable.clone(),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+
+        // The bridge's rule, directly: unreadable converts to nothing.
+        assert!(
+            RuleTree::from_smart_playlist_tree(&unreadable).is_none(),
+            "a tree holding an Unreadable Rule has no compiled spelling at all"
+        );
+        assert_eq!(
+            RuleTree::from_smart_playlist_tree(&one_rule_tree(MatchableField::Title, "kept"))
+                .expect("a readable tree bridges"),
+            RuleTree::from_root_box(one_rule_tree(MatchableField::Title, "kept").root()),
+            "and the bridge is the documented conversion, not a re-derivation"
+        );
+
+        // User story 59 at the seam: no query is issued, the list matches
+        // nothing, and the reason comes out rather than collapsing to a
+        // silent zero. This is ticket 09's deferred read-side half.
+        let degraded = views
+            .custom_list_count(&id, TrackSort::default(), None)
+            .expect_err("an unreadable list is degraded by definition");
+        assert_eq!(degraded.value, 0, "matches nothing");
+        assert!(
+            degraded.reason.contains("riff cannot read"),
+            "carries why: {:?}",
+            degraded.reason
+        );
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect_err("no row either")
+                .value
+                .is_none(),
+            "an unreadable list draws no row"
+        );
+        assert!(
+            mock.lock().unwrap().custom_page_calls().is_empty(),
+            "and the proof it is a short-circuit, not a canned empty answer: the page read was never asked"
+        );
+    }
+
+    #[test]
+    fn test_a_gone_list_answers_a_cached_absence_with_a_reason() {
+        let id = list_id("gone");
+        let (mut views, mock, _lib_gen, _playlist_gen) =
+            wire_custom(MockLibraryQueryStore::default());
+
+        let degraded = views
+            .custom_list_count(&id, TrackSort::default(), None)
+            .expect_err("a list no row carries is not a fresh zero");
+        assert_eq!(degraded.value, 0);
+        assert!(
+            degraded.reason.contains("gone"),
+            "says which case it is: {:?}",
+            degraded.reason
+        );
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls(),
+            vec![id.clone()],
+            "the absence is cached: the second read answered without a re-query…"
+        );
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 0)
+                .expect_err("and so is the row answer")
+                .reason
+                .contains("gone"),
+            "…including the row read"
+        );
+        assert_eq!(
+            mock.lock().unwrap().smart_playlist_tree_calls(),
+            vec![id.clone()],
+            "still one tree read for the cold absence across both reads"
+        );
+    }
+
+    #[test]
+    fn test_a_failed_tree_load_serves_the_last_good_rows_with_the_reason() {
+        let id = list_id("treeload");
+        let (mut views, mock, _lib_gen, playlist_generation) = wire_custom(MockLibraryQueryStore {
+            smart_playlist_trees: std::collections::HashMap::from([(
+                id.clone(),
+                one_rule_tree(MatchableField::Title, "treeload"),
+            )]),
+            custom_page: custom_rows(120),
+            ..Default::default()
+        });
+        assert!(
+            views
+                .custom_list_row(&id, TrackSort::default(), None, 3)
+                .expect("fresh")
+                .is_some()
+        );
+
+        // A playlist bump forces the tree reload, and the reload fails: the
+        // listing keeps drawing the rows its window in hand already holds —
+        // for THIS list's query — beside the reason, and the last good tree
+        // rides out on the tree read itself.
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::SmartPlaylistTree);
+        playlist_generation.bump();
+        let CustomListDegraded { value, reason } = views
+            .custom_list_tree(&id)
+            .expect_err("the failed tree load answers degraded");
+        assert_eq!(
+            value.expect("the last good tree is served"),
+            one_rule_tree(MatchableField::Title, "treeload"),
+            "the editor's re-open sees the tree it last had, not a silent empty one"
+        );
+        assert!(reason.contains("rule tree read boom"));
+        let degraded = views
+            .custom_list_row(&id, TrackSort::default(), None, 3)
+            .expect_err("and the rows are last-good too");
+        assert_eq!(
+            degraded.value.as_ref().map(|track| track.id.0.as_str()),
+            Some("3"),
+            "stale but present, exactly the degradation policy the other caches use"
+        );
+        assert!(degraded.reason.contains("rule tree read boom"));
+    }
+}

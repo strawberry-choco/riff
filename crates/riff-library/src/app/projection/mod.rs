@@ -17,6 +17,7 @@
 
 mod browsing;
 mod counts;
+mod custom_list;
 mod folders;
 mod genres;
 mod hits;
@@ -26,6 +27,7 @@ mod windowed_list;
 
 pub use browsing::BrowsingProjection;
 pub use counts::CountsProjection;
+pub use custom_list::{CustomListDegraded, CustomListKey, CustomPlaylistProjection};
 pub use folders::FolderProjection;
 pub use genres::GenreProjection;
 pub use hits::HitProjection;

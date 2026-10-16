@@ -14500,13 +14500,13 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{By, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::state::{LibrarySession, LibraryStatus, PlaybackSession, ViewMode};
     use riff_backend::app::store::{
-        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
+        CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
     };
     use riff_backend::app::transport::Transport;
     use riff_backend::app::views::SessionViews;
@@ -18500,6 +18500,213 @@ mod whole_frame_tests {
                 "a settled, closed Folders tree must ask the frame loop for nothing"
             );
         }
+    }
+
+    // --- Ticket 15: the Smart Playlists page is reachable and reachable back -----
+    //
+    // Both routes into the page are measured in a composed frame with the
+    // pane's real hit areas: a control that paints but cannot be clicked is
+    // this repo's twice-recorded trap, so every assertion here reads what the
+    // click DID — the view switch, the section's pane on screen — not that a
+    // label exists.
+
+    /// The SMART LISTS header's `+` (ticket 15): a route, not a write. It
+    /// switches into Settings, SELECTS the Smart Playlists section (its pane
+    /// draws on the same frame — the sidebar slot applies before the stage
+    /// paints), opens a new empty draft, and writes nothing anywhere: the
+    /// store gains no Custom Smart Playlist, and no settings write commits.
+    #[test]
+    fn test_the_smart_lists_plus_opens_the_page_on_a_new_draft_and_writes_nothing() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+
+        // Before: the sidebar's built-ins are all there (four visible; the
+        // two advanced-gated rows appear under Advanced mode).
+        let built_ins = ["Recently Added", "Recently Played", "Most Played", "Favorites"];
+        for label in built_ins {
+            assert!(
+                shell.harness.query_all_by_label_contains(label).next().is_some(),
+                "the {label} built-in row is in the sidebar before the click"
+            );
+        }
+
+        shell.harness.get_by_label("New Smart Playlist").click();
+        // The click's frame applies the sidebar slot; the next frames settle
+        // the stage the slot re-planned.
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Settings,
+            "the + switches the view into Settings"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .is_some(),
+            "the Smart Playlists pane — not just Settings — is on screen"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("No smart playlists yet")
+                .is_some(),
+            "with nothing saved the page opens on its empty state"
+        );
+
+        // The one `+` in riff that writes nothing.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert!(
+            lists.is_empty(),
+            "the + stores no Custom Smart Playlist: a list appears only at Save"
+        );
+        assert!(
+            shell.settings_calls.lock().unwrap().is_empty(),
+            "the + commits no settings write either"
+        );
+
+        // The built-ins are untouched — same rows, same sidebar.
+        for label in built_ins {
+            assert!(
+                shell.harness.query_all_by_label_contains(label).next().is_some(),
+                "the {label} built-in row survives the + unchanged"
+            );
+        }
+    }
+
+    /// The nav entry (ticket 15) selects the section by clicking its label in
+    /// a composed frame — the property that makes the pane golden-testable.
+    /// The section is frontend-local, so the click is the only honest route
+    /// in, and the assertion reads the pane's own controls rather than a
+    /// seeded field.
+    #[test]
+    fn test_the_smart_playlists_nav_entry_selects_the_page_from_a_composed_frame() {
+        let mut shell = mock_shell();
+        // Opening Settings is session state; the section still has to be
+        // reached by the gesture.
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
+                .is_some(),
+            "the nav opens on the Library section"
+        );
+
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
+                .is_none(),
+            "the Library pane is gone — the click switched the section"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+                .is_some(),
+            "the Smart Playlists pane is drawn in the composed frame"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label("No smart playlists yet")
+                .is_some(),
+            "its empty state is what the frame really shows"
+        );
+        assert!(
+            shell.settings_calls.lock().unwrap().is_empty(),
+            "which section was last selected stays frontend-local: no write"
+        );
+    }
+
+    /// The page's whole loop inside a composed frame: a saved list's row
+    /// loads its name into the editor draft (through the D14 read and the
+    /// ticket-11 tree read), and the page's own "New smart playlist" button
+    /// returns the editor to a new, empty draft — the same state the
+    /// sidebar `+` opens.
+    #[test]
+    fn test_selecting_a_list_loads_its_name_and_the_pages_button_starts_fresh() {
+        let id = PlaylistId::new("spl-late-night-2");
+        let mut mock = MockLibraryQueryStore::default();
+        mock.custom_smart_playlists = vec![CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Late night jazz".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // Pick the saved list: the draft that was empty now wears its name.
+        // The value is scoped to the text input on purpose — the list's own
+        // sidebar-style row is a `Role::Label` node, whose accesskit value is
+        // its label text, so a bare value query matches two nodes here.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_some(),
+            "the name field shows the saved list's name after the click"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "the editor says it is editing, not creating"
+        );
+
+        // The page's own route back to a new draft.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz"),
+                )
+                .is_none(),
+            "the page's button clears the draft — a new, empty, unsaved list"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "New smart playlist")
+                .is_some(),
+            "the editor says it is creating again"
+        );
     }
 }
 

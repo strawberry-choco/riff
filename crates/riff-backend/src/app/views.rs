@@ -57,7 +57,8 @@ use crate::app::store::{
     StoreGeneration, TrackListOrder,
 };
 use crate::domain::{
-    Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+    Album, Artist, GenreCount, MatchableField, Playlist, PlaylistId, SmartPlaylistKind, Track,
+    TrackId,
 };
 use riff_library::app::projection::CountsProjection;
 use riff_playback::app::projection::PlaybackProjection;
@@ -975,6 +976,45 @@ impl SessionViews {
                 self.queries
                     .custom_smart_playlist_page(tree, order, needle, offset, limit)
             },
+        )
+    }
+
+    // --- Rule value pickers ------------------------------------------------------
+
+    /// At most `limit` distinct values the Library holds for a pickable
+    /// **text** Matchable Field — the list a Rule row's picker draws beside
+    /// the listener's own typing.
+    ///
+    /// One uncached pass-through to the Library query port: a picker is read
+    /// **once per open**, never once per frame, so the projection machinery
+    /// the listings use would only add a staleness question this read does
+    /// not have. The caller is the editor pane, which asks on the frame a row
+    /// reports `PickerOpened` (ticket 14's rule row). Absent values are the
+    /// store's to exclude, and a field the catalog does not make pickable is
+    /// a store error, which answers here as an empty list behind a
+    /// `tracing::warn!` like every other degraded read.
+    pub fn picker_texts(&mut self, field: MatchableField, limit: usize) -> Vec<String> {
+        degrade(
+            self.queries.picker_texts(field.stored_id(), limit),
+            || format!("Failed to read the value picker for {}", field.stored_id()),
+            Vec::new,
+        )
+    }
+
+    /// At most `limit` distinct values the Library holds for a pickable
+    /// **numeric** Matchable Field, ascending. The numeric half of
+    /// [`Self::picker_texts`], with the same one-read-per-open discipline; a
+    /// stored `0` is a present value and is offered like any other.
+    pub fn picker_numbers(&mut self, field: MatchableField, limit: usize) -> Vec<i64> {
+        degrade(
+            self.queries.picker_numbers(field.stored_id(), limit),
+            || {
+                format!(
+                    "Failed to read the numeric picker for {}",
+                    field.stored_id()
+                )
+            },
+            Vec::new,
         )
     }
 

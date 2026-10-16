@@ -7182,7 +7182,14 @@ struct RulesRow {
 }
 
 /// The civil instant a corpus row names, spelled as the parts a Rule stores.
-fn civil(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> CivilDateTime {
+pub(crate) const fn civil(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> CivilDateTime {
     CivilDateTime {
         year,
         month,
@@ -7575,7 +7582,7 @@ fn rules_tracks(rows: &[RulesRow], offset_seconds: i64, now: SystemTime) -> Vec<
 /// deliberately never touches it) and the favorite flag through the mutation
 /// port, because that is what each fact actually is. `rules_tracks` preserves
 /// the corpus order, so a row and its `Track` can be walked together.
-fn seeded_rules_store(db_path: &std::path::Path) -> (SqliteStore, Vec<Track>) {
+pub(crate) fn seeded_rules_store(db_path: &std::path::Path) -> (SqliteStore, Vec<Track>) {
     let now = SystemTime::now();
     let (changes_tx, _changes_rx) =
         crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
@@ -7636,7 +7643,10 @@ fn seeded_rules_store(db_path: &std::path::Path) -> (SqliteStore, Vec<Track>) {
 /// ADR 0020) and the needle side folds fully (what Rust's `to_lowercase()`
 /// does). One helper doing both would hide the asymmetry the non-Latin case
 /// pins.
-mod rules_reference {
+/// A property test that cannot turn its counterexample into a fixed case is a
+/// liability, so this module is `pub(crate)`: the generated-tree suite
+/// (`rule_tree_generator_tests`) walks this same reference and nothing else.
+pub(crate) mod rules_reference {
     use super::*;
     use riff_persistence::field_catalog::{self, LOSSLESS_EXTENSIONS};
     use riff_persistence::rule::{Combine, MatchableField, RuleValue, Semantic};
@@ -7979,12 +7989,17 @@ mod rules_reference {
 // These build the *input* the two sides share, exactly as `smart_fixtures` is
 // the shared input of the built-in lists: data, no logic, and no field id that
 // the compiler's own table owns.
+//
+// `pub(crate)` because ticket 10's generated trees are built with these and
+// printed with these: a counterexample the property test reports is pasted into
+// a fixed case as `all_of(vec![rule(…)])` text, and that only round-trips if
+// the fixed case reaches for the same builders the generator used.
 
 #[allow(
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn needle(text: &str) -> Option<RuleValue> {
+pub(crate) fn needle(text: &str) -> Option<RuleValue> {
     Some(RuleValue::Text(text.to_string()))
 }
 
@@ -7992,7 +8007,7 @@ fn needle(text: &str) -> Option<RuleValue> {
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn number(value: i64) -> Option<RuleValue> {
+pub(crate) fn number(value: i64) -> Option<RuleValue> {
     Some(RuleValue::Number(value))
 }
 
@@ -8000,7 +8015,7 @@ fn number(value: i64) -> Option<RuleValue> {
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn millis(value: u64) -> Option<RuleValue> {
+pub(crate) fn millis(value: u64) -> Option<RuleValue> {
     Some(RuleValue::DurationMillis(value))
 }
 
@@ -8008,7 +8023,7 @@ fn millis(value: u64) -> Option<RuleValue> {
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn days(value: u32) -> Option<RuleValue> {
+pub(crate) fn days(value: u32) -> Option<RuleValue> {
     Some(RuleValue::Days(value))
 }
 
@@ -8016,7 +8031,7 @@ fn days(value: u32) -> Option<RuleValue> {
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn boundary(instant: CivilDateTime) -> Option<RuleValue> {
+pub(crate) fn boundary(instant: CivilDateTime) -> Option<RuleValue> {
     Some(RuleValue::DateTime(instant))
 }
 
@@ -8024,12 +8039,16 @@ fn boundary(instant: CivilDateTime) -> Option<RuleValue> {
     clippy::unnecessary_wraps,
     reason = "a probe names its value in one call"
 )]
-fn yes(value: bool) -> Option<RuleValue> {
+pub(crate) fn yes(value: bool) -> Option<RuleValue> {
     Some(RuleValue::YesNo(value))
 }
 
 /// One Rule, in the store's own spelling, at the given polarity.
-fn rule(field: MatchableField, comparison: Comparison, value: Option<RuleValue>) -> RuleTree {
+pub(crate) fn rule(
+    field: MatchableField,
+    comparison: Comparison,
+    value: Option<RuleValue>,
+) -> RuleTree {
     RuleTree::Rule {
         field_id: field.stored_id().to_string(),
         operator_id: comparison.stored_id().to_string(),
@@ -8039,7 +8058,11 @@ fn rule(field: MatchableField, comparison: Comparison, value: Option<RuleValue>)
 }
 
 /// The same test inverted — the one spelling of "is not" there is.
-fn rule_not(field: MatchableField, comparison: Comparison, value: Option<RuleValue>) -> RuleTree {
+pub(crate) fn rule_not(
+    field: MatchableField,
+    comparison: Comparison,
+    value: Option<RuleValue>,
+) -> RuleTree {
     RuleTree::Rule {
         field_id: field.stored_id().to_string(),
         operator_id: comparison.stored_id().to_string(),
@@ -8048,14 +8071,14 @@ fn rule_not(field: MatchableField, comparison: Comparison, value: Option<RuleVal
     }
 }
 
-fn all_of(children: Vec<RuleTree>) -> RuleTree {
+pub(crate) fn all_of(children: Vec<RuleTree>) -> RuleTree {
     RuleTree::Box {
         combine: "all".to_string(),
         children,
     }
 }
 
-fn any_of(children: Vec<RuleTree>) -> RuleTree {
+pub(crate) fn any_of(children: Vec<RuleTree>) -> RuleTree {
     RuleTree::Box {
         combine: "any".to_string(),
         children,
@@ -8163,7 +8186,11 @@ fn probe(field: MatchableField, comparison: Comparison) -> Option<RuleValue> {
 // --- Rule-tree reads -------------------------------------------------------
 
 /// The Rule listing's window, unwrapped, in the canonical flat order.
-fn rule_window(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> Vec<TrackId> {
+pub(crate) fn rule_window(
+    store: &SqliteStore,
+    tree: &RuleTree,
+    needle_text: Option<&str>,
+) -> Vec<TrackId> {
     let page =
         store.custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX);
     match page {
@@ -8173,7 +8200,7 @@ fn rule_window(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) 
 }
 
 /// The Rule listing's total, unwrapped — the same Listing Page's other half.
-fn rule_total(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> usize {
+pub(crate) fn rule_total(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -> usize {
     store
         .custom_smart_playlist_page(tree, TrackListOrder::PathAsc, needle_text, 0, usize::MAX)
         .expect("the Rule tree must be answerable")
@@ -8182,7 +8209,7 @@ fn rule_total(store: &SqliteStore, tree: &RuleTree, needle_text: Option<&str>) -
 
 /// The clock a reference walk answers at: the instant `in_last` counts back
 /// from, and the machine's own zone, which is what a zone-less boundary means.
-fn rule_clock(store: &SqliteStore) -> rules_reference::Clock {
+pub(crate) fn rule_clock(store: &SqliteStore) -> rules_reference::Clock {
     rules_reference::Clock {
         now: SystemTime::now(),
         offset_seconds: local_offset_seconds(store),
@@ -8193,7 +8220,7 @@ fn rule_clock(store: &SqliteStore) -> rules_reference::Clock {
 /// answers exactly what the independent walk answers — Track identity in the
 /// canonical order, and a total that counts the rows the window came from.
 /// Never SQL text, never table internals.
-fn assert_rule_membership(
+pub(crate) fn assert_rule_membership(
     store: &SqliteStore,
     tracks: &[Track],
     tree: &RuleTree,
@@ -8266,7 +8293,7 @@ fn test_every_field_and_comparison_the_catalog_permits_matches_the_reference() {
 }
 
 /// The file name a `TrackId` names, for a failure message a person can read.
-fn rule_name(id: &TrackId) -> &str {
+pub(crate) fn rule_name(id: &TrackId) -> &str {
     id.0.rsplit('\\').next().unwrap_or(&id.0)
 }
 

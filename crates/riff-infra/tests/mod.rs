@@ -16,6 +16,7 @@ pub mod adapter_tests;
 pub mod loudness_tests;
 pub mod playlist_name_uniqueness_tests;
 pub mod replaygain_tags_tests;
+pub mod rule_tree_generator_tests;
 pub mod smart_playlist_tables_tests;
 pub mod smart_playlist_writes_tests;
 pub mod store_tests;

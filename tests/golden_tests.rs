@@ -1019,10 +1019,11 @@ mod tests {
 
     /// The real sidebar at its exact `SIDEBAR_W` token width, cropped out of
     /// the live composition: the flat sectioned nav (LIBRARY / SMART LISTS /
-    /// PLAYLISTS) with right-aligned live counts, playlist rows, and the
-    /// Add-folder / last-scan footer. Every label, every count and the row
-    /// order are production's; the fixture supplies only the library and the
-    /// playlists.
+    /// PLAYLISTS) with right-aligned live counts, the listener's own Custom
+    /// Smart Playlist rows below the six Built-ins (no count beside them),
+    /// playlist rows, and the Add-folder / last-scan footer. Every label,
+    /// every count and the row order are production's; the fixture supplies
+    /// only the library, the playlists and the custom lists.
     #[test]
     fn sidebar_dark_matches_golden_baseline() {
         let library = Library::geogaddi();
@@ -1044,12 +1045,22 @@ mod tests {
                     ),
                     ("workout", "Workout", &["/music/d.flac"]),
                 ]),
+                query: MockLibraryQueryStore {
+                    custom_smart_playlists: custom_lists(&[
+                        ("spl-late-night-1", "Late night jazz"),
+                        ("spl-deep-focus-1", "Deep focus"),
+                    ]),
+                    ..library.query()
+                },
                 ..Seed::over(&library)
             },
         );
     }
 
-    /// The same sidebar in the **light** palette.
+    /// The same sidebar in the **light** palette, with a Custom row opened by
+    /// a real click — the selected band is production's paint, so the fixture
+    /// reaches it the way a listener does and the baseline pins which row the
+    /// open-list slot marks.
     #[test]
     fn sidebar_light_matches_golden_baseline() {
         let library = Library::geogaddi();
@@ -1061,7 +1072,10 @@ mod tests {
             )),
             Region::Sidebar,
             Plan::columns(1),
-            toggle_theme,
+            |harness| {
+                toggle_theme(harness);
+                click(harness, "Deep focus");
+            },
             Seed {
                 playlists: playlists(&[
                     (
@@ -1071,6 +1085,13 @@ mod tests {
                     ),
                     ("workout", "Workout", &["/music/d.flac"]),
                 ]),
+                query: MockLibraryQueryStore {
+                    custom_smart_playlists: custom_lists(&[
+                        ("spl-late-night-1", "Late night jazz"),
+                        ("spl-deep-focus-1", "Deep focus"),
+                    ]),
+                    ..library.query()
+                },
                 ..Seed::over(&library)
             },
         );
@@ -3048,6 +3069,20 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// The Custom Smart Playlist rows the sidebar goldens seed: id, name and
+    /// a shared creation instant. The sidebar's row pass paints them in the
+    /// order the read answers, and the store enumerates by creation order, so
+    /// the fixture's own order is the painted order.
+    fn custom_lists(rows: &[(&str, &str)]) -> Vec<riff_backend::app::store::CustomSmartPlaylist> {
+        rows.iter()
+            .map(|(id, name)| riff_backend::app::store::CustomSmartPlaylist {
+                id: riff_backend::domain::PlaylistId((*id).to_string()),
+                name: (*name).to_string(),
+                created_at: canned_instant(1_700_000_000),
+            })
+            .collect()
     }
 
     /// `seed` with `library`'s root reported as fully scanned at `tracks`

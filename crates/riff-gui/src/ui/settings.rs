@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ui::rule_box::BoxPath;
+use crate::ui::smart_playlists_page::SmartPlaylistMatchLine;
 
 /// How the Library pane's lower four sections are arranged at a given width.
 ///
@@ -3097,6 +3098,39 @@ impl super::app::RiffApp {
         }
     }
 
+    /// Refresh the editor's live match line (ticket 17) for the draft as it
+    /// stands **after this frame's gestures have landed**, so a value a
+    /// click, an Enter or a blur just committed is counted on the same
+    /// frame's write-back and painted on the next.
+    ///
+    /// The read is [`SessionViews::custom_list_match_count`]
+    /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
+    /// costs, on the UI thread with every other read the Settings page makes
+    /// and no worker anywhere. What reaches the seam is the draft's
+    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`]), so a
+    /// repaint and a keystroke both arrive with a shape the seam already
+    /// holds and no store read comes of them; a commit moves the shape, and
+    /// a shape whose count is held is served from the hold rather than
+    /// queried again.
+    ///
+    /// A draft that cannot be counted is not counted: the line gets the block
+    /// sentence and the seam is not asked at all. A store refusal reaches the
+    /// line as its reason, never as the zero beside it — a number the engine
+    /// just refused is exactly what must not be drawn.
+    fn refresh_smart_playlist_match_line(&mut self) {
+        if self.settings_section != SettingsSection::SmartPlaylists {
+            return;
+        }
+        let line = match self.smart_playlists_editor.committed_tree() {
+            Err(block) => SmartPlaylistMatchLine::Uncountable(block),
+            Ok(tree) => match self.views.custom_list_match_count(&tree) {
+                Ok(count) => SmartPlaylistMatchLine::Matches(count),
+                Err(degraded) => SmartPlaylistMatchLine::Failed(degraded.reason),
+            },
+        };
+        self.smart_playlists_editor.match_line = Some(line);
+    }
+
     /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
     #[expect(
@@ -3441,6 +3475,11 @@ impl super::app::RiffApp {
             };
             self.smart_playlists_editor.picker_answered(values);
         }
+
+        // The live match line's read, once per frame while the page is on
+        // screen: after the gestures above have landed on the draft, so the
+        // shape counted is this frame's.
+        self.refresh_smart_playlist_match_line();
 
         // Transient rows beneath the stage column.
         #[cfg(target_os = "linux")]

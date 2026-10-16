@@ -7184,6 +7184,17 @@ fn a_failed_mutation_reports_its_own_operation_context() {
 // through the compiled predicate, and a Rust-only walk of the same tree that
 // must agree with it. `rules_reference`'s module doc states the one rule that
 // makes this arrangement worth anything — read it before unifying anything.
+//
+// Zone assumption, stated because it is a developer-machine hazard rather
+// than a defect: `local_offset_seconds` measures the machine's offset **now**,
+// the fixtures seed their 2024-03-01/02 and 2024-06-01/02 instants through it,
+// and SQLite renders each stored instant with its *historical* offset. The
+// suite is exact on UTC — this host and the CI runners — and on any machine
+// whose current DST phase matches both dates; on a machine in the other phase
+// (US Eastern in October, say) the local-midnight boundary cases can disagree
+// by an hour for reasons that are nobody's change. Fixing it properly means
+// seeding *and* the reference's boundary conversion through SQLite's own
+// `localtime` rendering together; a note is the honest stop until then.
 
 use riff_persistence::rule::{Comparison, MatchableField};
 

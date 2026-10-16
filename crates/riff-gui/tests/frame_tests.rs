@@ -415,6 +415,8 @@ impl Harness {
             smart_playlist_view: None,
             playlist_rename: None,
             playlist_create_name: None,
+            playlist_create_error: None,
+            playlist_rename_error: None,
             clear_cache_in_flight: false,
             global_search_focus: false,
             title_key: TitleKey::Unset,
@@ -473,6 +475,8 @@ impl Harness {
             smart_playlist_view: &mut self.smart_playlist_view,
             playlist_rename: &mut self.playlist_rename,
             playlist_create_name: &mut self.playlist_create_name,
+            playlist_create_error: &mut self.playlist_create_error,
+            playlist_rename_error: &mut self.playlist_rename_error,
             playback_live: &self.playback_live,
             #[cfg(target_os = "linux")]
             settings_show_input: &mut self.settings_show_input,

@@ -979,59 +979,8 @@ impl<'a> Frame<'a> {
                     self.land_on_library();
                 }
             }
-            SidebarAction::PlaylistCreate(outcome) => {
-                if outcome == PromptOutcome::Cancel {
-                    *self.parts.playlist_create_name = None;
-                    *self.parts.playlist_create_error = None;
-                    return;
-                }
-                let Some(typed) = self.parts.playlist_create_name.take() else {
-                    return;
-                };
-                let name = typed.trim().to_string();
-                if name.is_empty() {
-                    return;
-                }
-                match self.parts.playlist_store.create_playlist(&name, &[]) {
-                    Ok(id) => {
-                        // The committed create bumps the playlist generation;
-                        // the seam's next read lists the new playlist.
-                        *self.parts.playlist_create_error = None;
-                        *self.parts.playlist_view = Some(id);
-                    }
-                    // The store refused. The prompt stays up, the name the
-                    // listener typed stays in it, and the reason the store
-                    // gave is written under it — the refusal is reported to
-                    // the listener, not to the log.
-                    Err(e) => {
-                        *self.parts.playlist_create_name = Some(typed);
-                        *self.parts.playlist_create_error = Some(e.to_string());
-                    }
-                }
-            }
-            SidebarAction::PlaylistRename { outcome, .. } => {
-                if outcome == PromptOutcome::Cancel {
-                    *self.parts.playlist_rename = None;
-                    *self.parts.playlist_rename_error = None;
-                    return;
-                }
-                let Some((rid, typed)) = self.parts.playlist_rename.take() else {
-                    return;
-                };
-                // Same Store flow as before the restyle: trim, rename as one
-                // durable transaction. The seam's next read reflects the new
-                // name on its own (ADR 0002). The prompt slot is keyed by id,
-                // so the slot the row reported IS the slot taken here.
-                match super::app::commit_playlist_rename(self.parts.playlist_store, &rid, &typed) {
-                    Ok(()) => *self.parts.playlist_rename_error = None,
-                    // As with the create: the draft and the prompt both stay,
-                    // and the reason is the store's own words.
-                    Err(reason) => {
-                        *self.parts.playlist_rename = Some((rid, typed));
-                        *self.parts.playlist_rename_error = Some(reason);
-                    }
-                }
-            }
+            SidebarAction::PlaylistCreate(outcome) => self.apply_playlist_create(outcome),
+            SidebarAction::PlaylistRename { outcome, .. } => self.apply_playlist_rename(outcome),
             SidebarAction::AddFolderRequested => {
                 // The native folder picker is an OS dialog, so it is performed
                 // by the draw half (`FrameOutput::pick_folder`) rather than
@@ -1050,6 +999,76 @@ impl<'a> Frame<'a> {
                 {
                     out.pick_folder = true;
                 }
+            }
+        }
+    }
+
+    // --- The two playlist prompts' Store writes -----------------------------
+    //
+    // Both live here rather than inline in `apply_sidebar_action` because this
+    // frame is the ONLY writer of the prompt slots and of the playlist store on
+    // the sidebar path: the prompt widget reports an outcome and never reaches
+    // the store (ADR 0018), so the refusal reason — which is the outcome of the
+    // write, not of the click — travels with the decision that made it.
+
+    /// Commit the create prompt's name, or report the store's refusal under the
+    /// prompt that asked.
+    fn apply_playlist_create(&mut self, outcome: PromptOutcome) {
+        if outcome == PromptOutcome::Cancel {
+            *self.parts.playlist_create_name = None;
+            *self.parts.playlist_create_error = None;
+            return;
+        }
+        let Some(typed) = self.parts.playlist_create_name.take() else {
+            return;
+        };
+        let name = typed.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        match self.parts.playlist_store.create_playlist(&name, &[]) {
+            Ok(id) => {
+                // The committed create bumps the playlist generation;
+                // the seam's next read lists the new playlist.
+                *self.parts.playlist_create_error = None;
+                *self.parts.playlist_view = Some(id);
+            }
+            // The store refused. The prompt stays up, the name the listener
+            // typed stays in it, and the reason the store gave is written under
+            // it — the refusal is reported to the listener, not to the log.
+            //
+            // The draft put back is `typed`, NOT `name`: a listener who typed
+            // `"Road Trip "` and was refused must find the field exactly as they
+            // left it, not a silently edited version of it.
+            Err(e) => {
+                *self.parts.playlist_create_name = Some(typed);
+                *self.parts.playlist_create_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Commit the rename prompt's draft, or report the store's refusal under the
+    /// prompt that asked.
+    fn apply_playlist_rename(&mut self, outcome: PromptOutcome) {
+        if outcome == PromptOutcome::Cancel {
+            *self.parts.playlist_rename = None;
+            *self.parts.playlist_rename_error = None;
+            return;
+        }
+        let Some((rid, typed)) = self.parts.playlist_rename.take() else {
+            return;
+        };
+        // Same Store flow as before the restyle: trim, rename as one durable
+        // transaction. The seam's next read reflects the new name on its own
+        // (ADR 0002). The prompt slot is keyed by id, so the slot the row
+        // reported IS the slot taken here.
+        match super::app::commit_playlist_rename(self.parts.playlist_store, &rid, &typed) {
+            Ok(()) => *self.parts.playlist_rename_error = None,
+            // As with the create: the draft and the prompt both stay, un-trimmed
+            // as typed, and the reason is the store's own words.
+            Err(reason) => {
+                *self.parts.playlist_rename = Some((rid, typed));
+                *self.parts.playlist_rename_error = Some(reason);
             }
         }
     }

@@ -11,6 +11,7 @@
 //! and the integration tests keep their existing imports.
 
 pub mod errors;
+pub mod field_catalog;
 pub mod levels;
 pub mod playlist;
 pub mod rule;

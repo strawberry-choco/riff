@@ -2338,6 +2338,10 @@ mod tests {
         seed.query
             .smart_playlist_trees
             .insert(id.clone(), SmartPlaylistTree::new(root));
+        // The live match line's read (ticket 17): the double serves its canned
+        // listing, so two seeded rows put "Matches 2 songs" into the picture —
+        // a count on the line, not the double's empty zero.
+        seed.query.custom_page = library.stored().into_iter().take(2).collect();
         snapshot_composed(
             "settings_smart_playlists_nested_dark",
             window_with_stage(egui::vec2(1280.0, 960.0)),

@@ -4,9 +4,7 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
-use riff_backend::app::store::{
-    AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary, SmartPlaylistTree,
-};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary};
 use riff_backend::domain::{Combine, PlaylistId};
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
@@ -28,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ui::rule_box::BoxPath;
+use crate::ui::smart_playlists_page::SmartPlaylistMatchLine;
 
 /// How the Library pane's lower four sections are arranged at a given width.
 ///
@@ -578,6 +577,22 @@ pub enum SettingsAction {
         parent: BoxPath,
         /// The child's index in that box's interleaved order.
         index: usize,
+    },
+    /// The drag-and-drop reorder inside one Box's sibling list (ticket 19):
+    /// the child at `from` is dragged to position `to`. One numbering covers
+    /// both kinds — Rules and Boxes renumber together, because one list is
+    /// what the store positions and the pane draws. `from == to` (a drop on
+    /// the row it came from) and any out-of-range index change nothing: the
+    /// no-op rule lives with the reorder math, never at the paint, and a
+    /// payload from a **different** Box's list never reaches this action at
+    /// all (the drag is scoped to its list at the row).
+    MoveSmartPlaylistChild {
+        /// The Box whose sibling list is being reordered.
+        parent: BoxPath,
+        /// The dragged child's index before the move.
+        from: usize,
+        /// The position it lands at — the row it was dropped on.
+        to: usize,
     },
     /// The combine chosen for the Box at `path`: all of the following, or any
     /// of the following.
@@ -3071,12 +3086,65 @@ impl super::app::RiffApp {
                 .views
                 .custom_list_tree(id)
                 .unwrap_or_else(|degraded| degraded.value);
-            // `SmartPlaylistTree::root()` is the public accessor for the
-            // interpretable half; the unreadable side list stays ticket 18's
-            // sibling state, per ticket 14's note.
-            self.smart_playlists_editor
-                .load_saved(&list, tree.as_ref().map(SmartPlaylistTree::root));
+            // The whole tree — Unreadable rows included, put back at their
+            // stored positions by the load itself (ticket 18) — so a row
+            // riff cannot read is shown, preserved, and keeps blocking Save
+            // until the listener deletes it.
+            self.smart_playlists_editor.load_saved(&list, tree.as_ref());
         }
+    }
+
+    /// The editor's **single Save entry point**: ask the draft for a plan —
+    /// which is where every frontend-side refusal is decided and rendered —
+    /// and, when it has one, perform the one store call that writes the name
+    /// and the whole rule tree together (D12). A refused write leaves the
+    /// draft exactly as typed and puts the store's own words above the Save
+    /// line; a committed one leaves the listener on the page, because the
+    /// sidebar already lists the new row.
+    fn save_smart_playlist_from_editor(&mut self) {
+        let Some(plan) = self.smart_playlists_editor.prepare_save() else {
+            return;
+        };
+        match self
+            .library_mutations
+            .save_smart_playlist(plan.id.as_ref(), &plan.name, &plan.tree)
+        {
+            Ok(id) => self.smart_playlists_editor.mark_saved(id),
+            Err(e) => self.smart_playlists_editor.refuse_save(e.to_string()),
+        }
+    }
+
+    /// Refresh the editor's live match line (ticket 17) for the draft as it
+    /// stands **after this frame's gestures have landed**, so a value a
+    /// click, an Enter or a blur just committed is counted on the same
+    /// frame's write-back and painted on the next.
+    ///
+    /// The read is [`SessionViews::custom_list_match_count`]
+    /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
+    /// costs, on the UI thread with every other read the Settings page makes
+    /// and no worker anywhere. What reaches the seam is the draft's
+    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`]), so a
+    /// repaint and a keystroke both arrive with a shape the seam already
+    /// holds and no store read comes of them; a commit moves the shape, and
+    /// a shape whose count is held is served from the hold rather than
+    /// queried again.
+    ///
+    /// A draft that cannot be counted is not counted: the line gets the block
+    /// sentence and the seam is not asked at all. A store refusal reaches the
+    /// line as its reason, never as the zero beside it — a number the engine
+    /// just refused is exactly what must not be drawn.
+    fn refresh_smart_playlist_match_line(&mut self) {
+        if self.settings_section != SettingsSection::SmartPlaylists {
+            return;
+        }
+        let line = match self.smart_playlists_editor.committed_tree() {
+            Err(block) => SmartPlaylistMatchLine::Uncountable(block),
+            Ok(tree) => match self.views.custom_list_match_count(&tree) {
+                Ok(count) => SmartPlaylistMatchLine::Matches(count),
+                Err(degraded) => SmartPlaylistMatchLine::Failed(degraded.reason),
+            },
+        };
+        self.smart_playlists_editor.match_line = Some(line);
     }
 
     /// Apply one [`SettingsAction`] through the app's state/service/store
@@ -3124,17 +3192,21 @@ impl super::app::RiffApp {
                     self.settings_store.as_mut(),
                 );
             }
-            SettingsAction::ClearLibrary => self.clear_library_confirm = true,
+            SettingsAction::ClearLibrary => {
+                self.pending_destructive = Some(super::app::PendingDestructive::ClearLibrary);
+            }
             SettingsAction::ClearThumbnailCache => {
-                self.clear_thumbnail_cache_confirm = true;
+                self.pending_destructive =
+                    Some(super::app::PendingDestructive::ClearThumbnailCache);
             }
             // --- Smart Playlists page (ticket 15; the tree is ticket 16) ---
             SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
             // The page's own button opens the same new, empty, unsaved draft
             // as the sidebar's `+`; the four tree gestures below land on the
-            // box model the pane drew; Save, Cancel and every refusal reason
-            // are ticket 18's decision, so those arms report their intent and
-            // write nothing.
+            // box model the pane drew. Save and Cancel are ticket 18's one
+            // entry points: Save validates the draft, writes name and tree in
+            // one store call, and keeps the listener on the page; Cancel
+            // discards the draft and writes nothing.
             SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
             SettingsAction::AddSmartPlaylistRule { parent } => {
                 self.smart_playlists_editor.add_rule(&parent);
@@ -3145,10 +3217,14 @@ impl super::app::RiffApp {
             SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
                 self.smart_playlists_editor.remove_child(&parent, index);
             }
+            SettingsAction::MoveSmartPlaylistChild { parent, from, to } => {
+                self.smart_playlists_editor.move_child(&parent, from, to);
+            }
             SettingsAction::SetSmartPlaylistCombine { path, combine } => {
                 self.smart_playlists_editor.set_combine(&path, combine);
             }
-            SettingsAction::SaveSmartPlaylist | SettingsAction::CancelSmartPlaylist => {}
+            SettingsAction::SaveSmartPlaylist => self.save_smart_playlist_from_editor(),
+            SettingsAction::CancelSmartPlaylist => self.smart_playlists_editor.cancel(),
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }
@@ -3243,9 +3319,9 @@ impl super::app::RiffApp {
     ///
     /// The outcome is reported untouched: [`PromptOutcome::Confirm`] when the
     /// listener committed, [`PromptOutcome::Cancel`] when they dismissed, and
-    /// `None` while the prompt is still open. Which of the app's flags each of
-    /// those clears is the caller's too, because that flag is the site's own
-    /// fact — this is the render, not the decision.
+    /// `None` while the prompt is still open. What each outcome does is
+    /// [`Self::render_pending_destructive`]'s — this is the render, not the
+    /// decision.
     fn destructive_confirm_outcome(
         &mut self,
         ui: &mut egui::Ui,
@@ -3255,90 +3331,6 @@ impl super::app::RiffApp {
     ) -> Option<PromptOutcome> {
         let palette = self.theme.active;
         prompts::destructive_confirm(ui, &mut self.icons, &palette, reduce_motion, copy, id)
-    }
-
-    /// The inline confirmation for the destructive Clear Library action,
-    /// rendered beneath the stage until confirmed or cancelled.
-    ///
-    /// What is left here is the Clear Library decision and nothing else: the
-    /// copy and the widget id that make this confirmation this action's, and
-    /// the wipe. The composition the prompt renders through is
-    /// [`Self::destructive_confirm_outcome`] — the same pixels the golden pins,
-    /// shared with Clear Thumbnail cache rather than spelled twice.
-    fn render_clear_library_confirm(&mut self, ui: &mut egui::Ui, library: &mut LibrarySession) {
-        match self.destructive_confirm_outcome(
-            ui,
-            library.ui_flags.reduce_motion,
-            prompts::CLEAR_LIBRARY_CONFIRM_COPY,
-            egui::Id::new("clear_library_confirm_action"),
-        ) {
-            Some(PromptOutcome::Confirm) => {
-                self.clear_library_confirm = false;
-                match self.library_mutations.clear_library() {
-                    Ok(removed) => {
-                        // The mutation adapter bumps the session generation;
-                        // the mirror no longer tracks collection data. The
-                        // fact-set is told too, so no root keeps claiming it
-                        // is indexed after the wipe.
-                        library.library_paths.clear_collection_data();
-                        self.feedback.set(
-                            riff_backend::app::events::NoticeSource::Library,
-                            format!(
-                                "Library cleared ({removed} tracks removed). Rescan to rebuild."
-                            ),
-                            riff_backend::app::events::NoticeSeverity::Info,
-                        );
-                        library.scan_status = self.feedback.display_message();
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to clear the library: {e}");
-                        self.feedback.set(
-                            riff_backend::app::events::NoticeSource::Library,
-                            "Failed to clear the library \u{2014} nothing was changed.".to_string(),
-                            riff_backend::app::events::NoticeSeverity::Error,
-                        );
-                        library.scan_status = self.feedback.display_message();
-                    }
-                }
-            }
-            Some(PromptOutcome::Cancel) => {
-                self.clear_library_confirm = false;
-            }
-            None => {}
-        }
-    }
-
-    /// The inline confirmation for the destructive Clear Thumbnail cache
-    /// action, shaped like [`Self::render_clear_library_confirm`] over the same
-    /// [`Self::destructive_confirm_outcome`] surface. What differs is what
-    /// Confirm does: the deletion is handed to the cover worker rather than run
-    /// on this thread, because `remove_dir_all` over a few hundred thousand
-    /// entries takes seconds and a frame may not wait for it.
-    ///
-    /// It takes the library session rather than one flag off it — the same
-    /// shape as its sibling — and reads the temporal policy from it, so the
-    /// two confirmations resolve that policy from one place instead of one of
-    /// them being handed the bool.
-    fn render_clear_thumbnail_cache_confirm(
-        &mut self,
-        ui: &mut egui::Ui,
-        library: &mut LibrarySession,
-    ) {
-        match self.destructive_confirm_outcome(
-            ui,
-            library.ui_flags.reduce_motion,
-            prompts::CLEAR_THUMBNAIL_CACHE_CONFIRM_COPY,
-            egui::Id::new("clear_thumbnail_cache_confirm_action"),
-        ) {
-            Some(PromptOutcome::Confirm) => {
-                self.clear_thumbnail_cache_confirm = false;
-                self.request_thumbnail_cache_clear();
-            }
-            Some(PromptOutcome::Cancel) => {
-                self.clear_thumbnail_cache_confirm = false;
-            }
-            None => {}
-        }
     }
 
     /// Render the sectioned Settings modal inside the shell's central panel
@@ -3422,14 +3414,104 @@ impl super::app::RiffApp {
             self.smart_playlists_editor.picker_answered(values);
         }
 
+        // The live match line's read, once per frame while the page is on
+        // screen: after the gestures above have landed on the draft, so the
+        // shape counted is this frame's.
+        self.refresh_smart_playlist_match_line();
+
         // Transient rows beneath the stage column.
         #[cfg(target_os = "linux")]
         self.render_library_path_input(ui, library);
-        if self.clear_library_confirm {
-            self.render_clear_library_confirm(ui, library);
+        // The one destructive confirmation does NOT render here: it renders
+        // from `RiffApp::draw_stage` for every view, because the sidebar
+        // (which raises a Custom Smart Playlist's Delete) is shared chrome —
+        // a confirmation raised there must show whatever is on stage. See
+        // `render_pending_destructive` and `render_pending_destructive_band`.
+    }
+
+    /// Render whichever destructive confirmation is pending — the ONE surface
+    /// every wipe shares, keyed on the pending identity rather than on a
+    /// boolean per wipe (ticket 21's widening).
+    ///
+    /// The identity answers both facts the surface needs and the caller
+    /// supplies none: the question ([`PendingDestructive::copy`], which is why
+    /// a wipe that must name a list can be one of its arms) and the widget id
+    /// that keeps this confirmation's affirmative action distinct from any
+    /// other's. A fourth confirmation adds an identity and an arm — it cannot
+    /// fork the surface or forget to render it.
+    pub(crate) fn render_pending_destructive(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+    ) {
+        let Some(pending) = self.pending_destructive.clone() else {
+            return;
+        };
+        match self.destructive_confirm_outcome(
+            ui,
+            library.ui_flags.reduce_motion,
+            &pending.copy(),
+            pending.confirm_id(),
+        ) {
+            Some(PromptOutcome::Confirm) => self.commit_pending_destructive(pending, library),
+            Some(PromptOutcome::Cancel) => self.pending_destructive = None,
+            None => {}
         }
-        if self.clear_thumbnail_cache_confirm {
-            self.render_clear_thumbnail_cache_confirm(ui, library);
+    }
+
+    /// Commit the confirmed destructive action. One arm per identity; each
+    /// clears the pending slot and then does exactly what its Settings call
+    /// site did before the slot existed — the two wipes byte-for-byte, the
+    /// Custom Smart Playlist delete through
+    /// [`delete_custom_smart_playlist`](super::app::delete_custom_smart_playlist),
+    /// which also empties the open-list slot when it was the deleted list's.
+    fn commit_pending_destructive(
+        &mut self,
+        pending: super::app::PendingDestructive,
+        library: &mut LibrarySession,
+    ) {
+        match pending {
+            super::app::PendingDestructive::ClearLibrary => {
+                self.pending_destructive = None;
+                match self.library_mutations.clear_library() {
+                    Ok(removed) => {
+                        // The mutation adapter bumps the session generation;
+                        // the mirror no longer tracks collection data. The
+                        // fact-set is told too, so no root keeps claiming it
+                        // is indexed after the wipe.
+                        library.library_paths.clear_collection_data();
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
+                            format!(
+                                "Library cleared ({removed} tracks removed). Rescan to rebuild."
+                            ),
+                            riff_backend::app::events::NoticeSeverity::Info,
+                        );
+                        library.scan_status = self.feedback.display_message();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to clear the library: {e}");
+                        self.feedback.set(
+                            riff_backend::app::events::NoticeSource::Library,
+                            "Failed to clear the library \u{2014} nothing was changed.".to_string(),
+                            riff_backend::app::events::NoticeSeverity::Error,
+                        );
+                        library.scan_status = self.feedback.display_message();
+                    }
+                }
+            }
+            super::app::PendingDestructive::ClearThumbnailCache => {
+                self.pending_destructive = None;
+                self.request_thumbnail_cache_clear();
+            }
+            super::app::PendingDestructive::CustomSmartList { id, .. } => {
+                self.pending_destructive = None;
+                super::app::delete_custom_smart_playlist(
+                    &id,
+                    self.library_mutations.as_mut(),
+                    &mut self.smart_playlist_view,
+                );
+            }
         }
     }
 }

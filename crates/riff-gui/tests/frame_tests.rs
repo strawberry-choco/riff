@@ -28,16 +28,17 @@ use riff_backend::app::state::{
     BrowseMode, LibrarySection, LibrarySession, LibraryStatus, PlaybackSession, ViewMode,
 };
 use riff_backend::app::store::{
-    PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, StoreChanged,
-    StoreGeneration, WatchState,
+    LibraryMutationStore, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore,
+    SmartPlaylistTree, StoreChanged, StoreGeneration, WatchState,
 };
 use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
 use riff_backend::app::traits::{DecodedCover, RequestedSize};
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
-use riff_backend::domain::{Playlist, PlaylistId, TrackId};
+use riff_backend::domain::{Playlist, PlaylistId, Track, TrackId};
 use riff_gui::ui::app::{
-    InlineTagEditor, SmartListIdentity, ThemeInputs, ThemeState, resolve_dropped_paths,
+    CustomSmartListAction, InlineTagEditor, PendingDestructive, SmartListIdentity, ThemeInputs,
+    ThemeState, resolve_dropped_paths,
 };
 use riff_gui::ui::artwork::COVER_THUMB;
 use riff_gui::ui::chrome::TitleBarAction;
@@ -55,7 +56,7 @@ use riff_gui::ui::sidebar::PlaylistRowAction;
 use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
 use riff_gui_components::prompts::PromptOutcome;
 use riff_gui_theme::theme;
-use riff_persistence::test_support::StubLibraryQueryStore;
+use riff_persistence::test_support::{StubLibraryMutationStore, StubLibraryQueryStore};
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -285,6 +286,120 @@ impl PlaylistStore for QuietPlaylistStore {
     }
 }
 
+/// A Library mutation store that records the Custom Smart Playlist writes the
+/// sidebar's context menu can reach, and answers Duplicate with a scripted
+/// copy id the test names. Every other write delegates to
+/// [`StubLibraryMutationStore`] — the composition the stub's own doc
+/// prescribes.
+///
+/// The recordings are the point: "Duplicate asks the store" is pinned as the
+/// `duplicate_smart_playlist` call with the row's id AND the absence of any
+/// `save_smart_playlist` call, which is what a read-then-save replay would
+/// make; "Delete asks nothing until confirmed" is pinned as an empty delete
+/// log on the raising frame.
+struct RecordingMutationStore {
+    noop: StubLibraryMutationStore,
+    copy: PlaylistId,
+    duplicates: Arc<Mutex<Vec<PlaylistId>>>,
+    renames: Arc<Mutex<Vec<(PlaylistId, String)>>>,
+    deletes: Arc<Mutex<Vec<PlaylistId>>>,
+    saves: Arc<Mutex<usize>>,
+}
+
+impl RecordingMutationStore {
+    fn new(copy: PlaylistId) -> Self {
+        Self {
+            noop: StubLibraryMutationStore,
+            copy,
+            duplicates: Arc::new(Mutex::new(Vec::new())),
+            renames: Arc::new(Mutex::new(Vec::new())),
+            deletes: Arc::new(Mutex::new(Vec::new())),
+            saves: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn duplicates(&self) -> Vec<PlaylistId> {
+        self.duplicates.lock().expect("unpoisoned").clone()
+    }
+
+    fn renames(&self) -> Vec<(PlaylistId, String)> {
+        self.renames.lock().expect("unpoisoned").clone()
+    }
+
+    fn deletes(&self) -> Vec<PlaylistId> {
+        self.deletes.lock().expect("unpoisoned").clone()
+    }
+
+    fn saves(&self) -> usize {
+        *self.saves.lock().expect("unpoisoned")
+    }
+}
+
+impl LibraryMutationStore for RecordingMutationStore {
+    fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
+        self.noop.apply_scan_batch(tracks)
+    }
+    fn record_track_played(
+        &mut self,
+        id: &TrackId,
+        played_at: std::time::SystemTime,
+    ) -> Result<bool, StoreError> {
+        self.noop.record_track_played(id, played_at)
+    }
+    fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+        self.noop.set_track_favorite(id, favorite)
+    }
+    fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
+        self.noop.apply_tag_refresh(track)
+    }
+    fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
+        self.noop.remove_library_path(root)
+    }
+    fn clear_library(&mut self) -> Result<usize, StoreError> {
+        self.noop.clear_library()
+    }
+    fn record_full_scan_completed(
+        &mut self,
+        summary: riff_backend::app::store::FullScanSummary,
+    ) -> Result<(), StoreError> {
+        self.noop.record_full_scan_completed(summary)
+    }
+    fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
+        self.noop.stamp_metadata_version(version)
+    }
+    fn save_smart_playlist(
+        &mut self,
+        id: Option<&PlaylistId>,
+        name: &str,
+        tree: &SmartPlaylistTree,
+    ) -> Result<PlaylistId, StoreError> {
+        *self.saves.lock().expect("unpoisoned") += 1;
+        self.noop.save_smart_playlist(id, name, tree)
+    }
+    fn rename_smart_playlist(
+        &mut self,
+        id: &PlaylistId,
+        new_name: &str,
+    ) -> Result<bool, StoreError> {
+        self.renames
+            .lock()
+            .expect("unpoisoned")
+            .push((id.clone(), new_name.to_string()));
+        Ok(true)
+    }
+    fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
+        self.deletes.lock().expect("unpoisoned").push(id.clone());
+        Ok(true)
+    }
+    fn duplicate_smart_playlist(
+        &mut self,
+        id: &PlaylistId,
+    ) -> Result<Option<PlaylistId>, StoreError> {
+        self.duplicates.lock().expect("unpoisoned").push(id.clone());
+        Ok(Some(self.copy.clone()))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The harness
 // ---------------------------------------------------------------------------
@@ -313,6 +428,7 @@ struct Harness {
     settings_store: RecordingSettingsStore,
     settings_commits: Arc<Mutex<Vec<ScalarSettings>>>,
     playlist_store: QuietPlaylistStore,
+    library_mutations: RecordingMutationStore,
     tag_edits: InlineTagEditor,
     views: SessionViews,
     scans: ScriptedScans,
@@ -326,6 +442,9 @@ struct Harness {
     playlist_create_name: Option<String>,
     playlist_create_error: Option<String>,
     playlist_rename_error: Option<String>,
+    custom_smart_list_rename: Option<(PlaylistId, String)>,
+    custom_smart_list_rename_error: Option<String>,
+    pending_destructive: Option<PendingDestructive>,
     clear_cache_in_flight: bool,
     global_search_focus: bool,
     title_key: TitleKey,
@@ -407,6 +526,7 @@ impl Harness {
             settings_store,
             settings_commits,
             playlist_store: QuietPlaylistStore::default(),
+            library_mutations: RecordingMutationStore::new(PlaylistId("spl-copy-1".to_string())),
             tag_edits: InlineTagEditor::new(Box::new(QuietTagEdits)),
             views: SessionViews::new(
                 Box::new(StubLibraryQueryStore::failing(
@@ -427,6 +547,9 @@ impl Harness {
             playlist_create_name: None,
             playlist_create_error: None,
             playlist_rename_error: None,
+            custom_smart_list_rename: None,
+            custom_smart_list_rename_error: None,
+            pending_destructive: None,
             clear_cache_in_flight: false,
             global_search_focus: false,
             title_key: TitleKey::Unset,
@@ -480,6 +603,7 @@ impl Harness {
             prefs: &mut self.prefs,
             settings_store: &mut self.settings_store,
             playlist_store: &mut self.playlist_store,
+            library_mutations: &mut self.library_mutations,
             clear_cache_in_flight: &mut self.clear_cache_in_flight,
             global_search_focus: &mut self.global_search_focus,
             title_key: &mut self.title_key,
@@ -489,6 +613,9 @@ impl Harness {
             playlist_create_name: &mut self.playlist_create_name,
             playlist_create_error: &mut self.playlist_create_error,
             playlist_rename_error: &mut self.playlist_rename_error,
+            custom_smart_list_rename: &mut self.custom_smart_list_rename,
+            custom_smart_list_rename_error: &mut self.custom_smart_list_rename_error,
+            pending_destructive: &mut self.pending_destructive,
             playback_live: &self.playback_live,
             settings_section: &mut self.settings_section,
             smart_playlists_editor: &mut self.smart_playlists_editor,
@@ -856,6 +983,153 @@ fn folding_the_smart_lists_section_closes_an_open_custom_list_and_keeps_the_play
         harness.playlist_view,
         Some(PlaylistId("pl-keep".to_string())),
         "the fold clears only the smart-list slot"
+    );
+}
+
+/// Duplicate (ticket 21) is the STORE's operation with its own port call,
+/// never a read-then-save replay: exactly one `duplicate_smart_playlist` call
+/// with the row's id, zero `save_smart_playlist` calls, and the page opens on
+/// the copy the store answered with. Two transactions could not promise the
+/// copy's name is still free; the store's one transaction can.
+#[test]
+fn duplicating_a_custom_list_asks_the_store_once_and_opens_the_copy() {
+    let mut harness = Harness::new();
+    let id = PlaylistId("spl-late-night-1".to_string());
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::CustomSmartList {
+                id: id.clone(),
+                name: "Late night jazz".to_string(),
+                action: CustomSmartListAction::Duplicate,
+            }],
+        },
+        ..Reports::default()
+    };
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.library_mutations.duplicates(),
+        vec![id],
+        "the store's Duplicate is the call the menu makes"
+    );
+    assert_eq!(
+        harness.library_mutations.saves(),
+        0,
+        "nothing re-saves the tree: a read-then-save replay would land here"
+    );
+    assert_eq!(
+        harness.smart_playlist_view,
+        Some(SmartListIdentity::Custom(PlaylistId(
+            "spl-copy-1".to_string()
+        ))),
+        "the page opens on the copy the store answered with"
+    );
+    assert_eq!(
+        harness.library.view_mode,
+        ViewMode::Library,
+        "and the open lands on the library view, the open gesture's own landing"
+    );
+    assert!(
+        harness.playlist_view.is_none(),
+        "opening the copy closes any open playlist, exactly as OpenSmartList does"
+    );
+}
+
+/// Delete only ASKS (ticket 21): the pending identity carries the list's id
+/// and its painted name — the question names the list — and the raising frame
+/// writes nothing to the store.
+#[test]
+fn delete_raises_the_confirmation_naming_the_list_and_writes_nothing() {
+    let mut harness = Harness::new();
+    let id = PlaylistId("spl-late-night-1".to_string());
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::CustomSmartList {
+                id: id.clone(),
+                name: "Late night jazz".to_string(),
+                action: CustomSmartListAction::Delete,
+            }],
+        },
+        ..Reports::default()
+    };
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.pending_destructive,
+        Some(PendingDestructive::CustomSmartList {
+            id: id.clone(),
+            name: "Late night jazz".to_string(),
+        }),
+        "the pending identity names the list the question must say"
+    );
+    assert!(
+        harness.library_mutations.deletes().is_empty(),
+        "raising the confirmation deletes nothing; only its Confirm arm may"
+    );
+}
+
+/// Rename opens the inline prompt with the row's own name as the draft, the
+/// same shape the playlist rows' pencil uses.
+#[test]
+fn rename_opens_the_prompt_prefilled_with_the_painted_name() {
+    let mut harness = Harness::new();
+    let id = PlaylistId("spl-late-night-1".to_string());
+    harness.custom_smart_list_rename_error = Some("a stale refusal".to_string());
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::CustomSmartList {
+                id: id.clone(),
+                name: "Late night jazz".to_string(),
+                action: CustomSmartListAction::Rename,
+            }],
+        },
+        ..Reports::default()
+    };
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.custom_smart_list_rename,
+        Some((id, "Late night jazz".to_string())),
+        "the prompt opens on this row, holding its current name"
+    );
+    assert_eq!(
+        harness.custom_smart_list_rename_error, None,
+        "a freshly opened prompt never wears an earlier refusal's reason"
+    );
+}
+
+/// The rename prompt's Confirm commits through `rename_smart_playlist` — the
+/// Library mutation port's own call, trimmed — and closes the prompt. The
+/// sidebar Rename names a list without touching its tree; Save is a different
+/// flow on a different surface.
+#[test]
+fn the_rename_prompt_commits_through_the_smart_playlist_rename_call() {
+    let mut harness = Harness::new();
+    let id = PlaylistId("spl-late-night-1".to_string());
+    harness.custom_smart_list_rename = Some((id.clone(), " Late night jazz deep ".to_string()));
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::CustomSmartListRename {
+                id: id.clone(),
+                outcome: PromptOutcome::Confirm,
+            }],
+        },
+        ..Reports::default()
+    };
+    harness.run_frame(&reports);
+
+    assert_eq!(
+        harness.library_mutations.renames(),
+        vec![(id, "Late night jazz deep".to_string())],
+        "one rename_smart_playlist call, carrying the trimmed draft"
+    );
+    assert_eq!(
+        harness.custom_smart_list_rename, None,
+        "a committed rename closes the prompt"
     );
 }
 

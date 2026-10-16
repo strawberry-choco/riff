@@ -642,6 +642,21 @@ impl RuleDraft {
         }
     }
 
+    /// The last value this row **committed** — accepted on Enter, on blur,
+    /// from the picker or from the yes/no list ([`Self::value`] is the live
+    /// typing buffer beside it). `None` until one was committed, or while
+    /// the buffers were rebuilt for a different widget.
+    ///
+    /// The two are deliberately readable apart: ticket 17's live match count
+    /// derives its tree from the committed answers, because a shape derived
+    /// from buffers would move on every keystroke and re-query with it. A
+    /// host that must know what the listener has finished — rather than what
+    /// they are in the middle of typing — reads this.
+    #[must_use]
+    pub fn committed_value(&self) -> Option<&RuleValue> {
+        self.committed.as_ref()
+    }
+
     /// Choose a field, and **reset a comparison the new field does not permit
     /// rather than keep an illegal combination**. The value buffers follow the
     /// widget ideas: the same ideas let the typed answer survive (a listener
@@ -758,9 +773,9 @@ pub fn rule_row(
         );
         ui.add_space(theme::SPACE_XS);
         if toggle_switch(ui, palette, id.with("not"), "Not", draft.negated) {
-            let negated = !draft.negated;
-            draft.negated = negated;
-            intents.push(RuleIntent::NegationToggled { negated });
+            intents.push(RuleIntent::NegationToggled {
+                negated: !draft.negated,
+            });
         }
         ui.add_space(PART_GAP);
         draw_value(ui, cache, palette, id, draft, &mut intents);

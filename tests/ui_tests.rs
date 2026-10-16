@@ -7267,6 +7267,9 @@ mod tests {
                             SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
                                 editor.remove_child(parent, *index);
                             }
+                            SettingsAction::MoveSmartPlaylistChild { parent, from, to } => {
+                                editor.move_child(parent, *from, *to);
+                            }
                             SettingsAction::SetSmartPlaylistCombine { path, combine } => {
                                 editor.set_combine(path, *combine);
                             }
@@ -7406,6 +7409,79 @@ mod tests {
         );
         // And the root's own list did not grow.
         assert_eq!(root.children.len(), 2);
+    }
+
+    /// The live match line (ticket 17) paints what the app's refresh wrote:
+    /// the count folded into a sentence with the singular handled, a block in
+    /// ticket 18's own words, or a store refusal verbatim — and it is silent
+    /// only before the first refresh has run for the draft in hand.
+    #[test]
+    fn test_the_live_match_line_paints_the_count_the_block_or_the_reason() {
+        use egui_kittest::kittest::{By, Queryable as _};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
+
+        let content = sample_content();
+        for (line, expected) in [
+            (SmartPlaylistMatchLine::Matches(1), "Matches 1 song"),
+            (SmartPlaylistMatchLine::Matches(7), "Matches 7 songs"),
+            (
+                SmartPlaylistMatchLine::Uncountable("this rule needs a value".to_string()),
+                "this rule needs a value",
+            ),
+            (
+                SmartPlaylistMatchLine::Failed(
+                    "Invalid operation: cannot match this Custom Smart Playlist: a Rule Box \
+                     holds no Rule, so there is nothing to match"
+                        .to_string(),
+                ),
+                "Invalid operation: cannot match this Custom Smart Playlist: a Rule Box holds \
+                 no Rule, so there is nothing to match",
+            ),
+        ] {
+            let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+            harness.state_mut().0.match_line = Some(line);
+            harness.run();
+            assert!(
+                harness.query(By::new().label(expected)).is_some(),
+                "{expected:?} must be painted on the live match line"
+            );
+        }
+
+        // A draft whose line was never written paints no count and no reason:
+        // the line exists only once a refresh has answered for the draft.
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        assert!(
+            harness.query_by_label_contains("Matches ").is_none(),
+            "no line before the first refresh"
+        );
+    }
+
+    /// The page's own list column shows no count beside a row: a counted row
+    /// would wear "Name (count)", so the exact label is the assertion — the
+    /// same shape ticket 12 pins for the sidebar rows.
+    #[test]
+    fn test_the_pages_list_column_rows_carry_no_count() {
+        use egui_kittest::kittest::{By, Queryable as _};
+
+        let id = PlaylistId("spl-late-night-2".to_string());
+        let content = SettingsContent {
+            custom_smart_playlists: vec![custom_list(&id, "Late night jazz")],
+            ..sample_content()
+        };
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        assert!(
+            harness.query(By::new().label("Late night jazz")).is_some(),
+            "the exact label is what a row without a count wears"
+        );
+        assert!(
+            harness
+                .query_by_label_contains("Late night jazz (")
+                .is_none(),
+            "no count folds into the page's list column"
+        );
     }
 
     /// Removing a Rule reports its slot and takes exactly that row, leaving
@@ -7732,6 +7808,542 @@ mod tests {
         );
     }
 
+    // --- Smart Playlists page: the draft, Save, Cancel and the reasons (ticket 18) ---
+    //
+    // The pane's own seam for the editing experience: Save and Cancel are
+    // typed intents, the host applies them exactly as
+    // `RiffApp::apply_settings_action` does (validation for Save — the store
+    // write is the app's and there is no store behind this harness — and
+    // discard for Cancel), and every refusal is a reason in the frame,
+    // measured against the row it belongs to rather than compared as pixels.
+
+    use riff_backend::domain::Combine;
+    use riff_gui::ui::rule_row::RuleDraft;
+    use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+    /// One saved-list row for the draft-seeding helpers below.
+    fn saved_list(name: &str) -> CustomSmartPlaylist {
+        CustomSmartPlaylist {
+            id: PlaylistId::new(name),
+            name: name.to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// One whole Rule, spelled through the row's own constructor.
+    fn whole_rule(field: riff_backend::domain::MatchableField) -> RuleDraft {
+        use riff_backend::domain::{Comparison, MatchableField, Rule, RuleValue};
+
+        // `is missing` takes no value at all, so a whole row built this way
+        // draws no value well and no text input: the only TextInput in the
+        // pane stays the name field.
+        let comparison = if field == MatchableField::Title {
+            Comparison::Contains
+        } else {
+            Comparison::IsMissing
+        };
+        let value =
+            (comparison == Comparison::Contains).then(|| RuleValue::Text("anything".to_string()));
+        RuleDraft::from_rule(&Rule::new(field, comparison, value))
+    }
+
+    /// The editor holding one saved list's tree, opened through the
+    /// production load.
+    fn editor_holding(tree: &SmartPlaylistTree) -> SmartPlaylistsEditor {
+        let mut editor = SmartPlaylistsEditor::default();
+        editor.load_saved(&saved_list("Morning drive"), Some(tree));
+        editor
+    }
+
+    /// The pane over a caller-seeded draft, with the host applying the tree
+    /// gestures and Save/Cancel the way `RiffApp::apply_settings_action` does.
+    fn smart_playlists_draft_harness(
+        content: &SettingsContent,
+        editor: SmartPlaylistsEditor,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<
+        '_,
+        (
+            riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+            Vec<SettingsAction>,
+        ),
+    > {
+        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
+
+        let palette = theme::Palette::dark();
+        let mut cache = icons::IconCache::new();
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
+                    let (editor, actions) = state;
+                    let reported = show_settings_modal(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        content,
+                        SettingsSection::SmartPlaylists,
+                        editor,
+                    );
+                    for action in reported {
+                        match &action {
+                            SettingsAction::AddSmartPlaylistRule { parent } => {
+                                editor.add_rule(parent);
+                            }
+                            SettingsAction::AddSmartPlaylistBox { parent } => {
+                                editor.add_box(parent);
+                            }
+                            SettingsAction::RemoveSmartPlaylistChild { parent, index } => {
+                                editor.remove_child(parent, *index);
+                            }
+                            SettingsAction::SetSmartPlaylistCombine { path, combine } => {
+                                editor.set_combine(path, *combine);
+                            }
+                            // The app's Save arm: the draft decides (and records
+                            // any refusal); the store call is the app's.
+                            SettingsAction::SaveSmartPlaylist => {
+                                let _plan = editor.prepare_save();
+                            }
+                            SettingsAction::CancelSmartPlaylist => editor.cancel(),
+                            _ => {}
+                        }
+                        actions.push(action);
+                    }
+                },
+                (editor, Vec::new()),
+            )
+    }
+
+    /// The rect of the single node bearing `label`, failing loudly when the
+    /// label is absent or ambiguous — a reason's position is only meaningful
+    /// against the one row it belongs to.
+    fn rect_of(
+        harness: &egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        label: &str,
+    ) -> egui::Rect {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{label:?} should be exactly one node, found {}",
+            nodes.len()
+        );
+        nodes[0].rect()
+    }
+
+    /// Click the one control of `role` labelled `label` and settle.
+    fn click_control(
+        harness: &mut egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        role: egui::accesskit::Role,
+        label: &str,
+    ) {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_role_and_label(role, label).collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{label:?} as {role:?} should be exactly one control, found {}",
+            nodes.len()
+        );
+        nodes[0].click();
+        harness.run();
+    }
+
+    /// Save and Cancel are the pane's typed intents, reported by real clicks
+    /// on the pane's own controls — what they mean is the app's apply step.
+    #[test]
+    fn test_save_and_cancel_are_reported_as_typed_intents() {
+        let content = sample_content();
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            SmartPlaylistsEditor::default(),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SaveSmartPlaylist),
+            "the Save control reports its own intent"
+        );
+        click_control(&mut harness, egui::accesskit::Role::Button, "Cancel");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::CancelSmartPlaylist),
+            "and Cancel reports its own"
+        );
+    }
+
+    /// A draft survives repaints and a mid-edit change: the typed name and the
+    /// tree keep growing over several frames, and nothing was written — the
+    /// store is not even reachable from this pane.
+    #[test]
+    fn test_the_draft_survives_repaints_and_a_mid_edit_tree_change() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            SmartPlaylistsEditor::default(),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("Late night");
+        harness.run();
+
+        click_nth(&mut harness, "Add rule", 0);
+        harness.run();
+
+        assert_eq!(harness.state().0.name, "Late night", "the name survives");
+        assert_eq!(harness.state().0.root.children.len(), 2);
+        // A plain repaint, no gesture: the draft is still there and still the
+        // listener's, not the store's.
+        harness.run();
+        assert_eq!(harness.state().0.name, "Late night");
+        assert_eq!(harness.state().0.root.children.len(), 2);
+        assert!(
+            harness.state().0.is_dirty(),
+            "the draft has unsaved edits the whole time"
+        );
+    }
+
+    /// A half-filled Rule blocks Save, and the reason is painted **under that
+    /// row** — measured: below the blank row's own header and above the next
+    /// row's, never merely somewhere in the pane.
+    #[test]
+    fn test_a_half_filled_rule_paints_its_reason_under_that_row() {
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        // Row 0 whole, row 1 blank (the offender), row 2 whole: the reason has
+        // rows on both sides to be measured against.
+        editor.root.children = vec![
+            RuleChildDraft::Rule(whole_rule(MatchableField::Title)),
+            RuleChildDraft::Rule(RuleDraft::blank()),
+            RuleChildDraft::Rule(whole_rule(MatchableField::Album)),
+        ];
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+
+        let reason = rect_of(&harness, "this rule needs a field");
+        let blank_row = rect_of(&harness, "Choose a field");
+        let next_row = rect_of(&harness, "Album");
+        assert!(
+            reason.top() >= blank_row.bottom(),
+            "the reason is under the blank row, not over it: {reason:?} vs {blank_row:?}"
+        );
+        assert!(
+            reason.bottom() <= next_row.top(),
+            "and it belongs to the blank row, not the one after it: {reason:?} vs {next_row:?}"
+        );
+        assert!(
+            reason.left() >= blank_row.left(),
+            "it sits in the rows' own column, starting at or right of the row's edge"
+        );
+        assert_eq!(
+            harness.state().0.refusal,
+            Some(
+                riff_gui::ui::smart_playlists_page::SmartPlaylistRefusal::Row {
+                    slot: riff_gui::ui::rule_box::ChildSlot::new(
+                        riff_gui::ui::rule_box::BoxPath::root(),
+                        1
+                    ),
+                    reason: "this rule needs a field".to_string(),
+                }
+            ),
+            "and the refusal names the slot the reason was painted at"
+        );
+    }
+
+    /// The reason names what is *missing*, in three steps: a row with no
+    /// comparison says so, an empty value well says it needs a value, and a
+    /// value this build cannot read says that.
+    #[test]
+    fn test_the_reason_names_the_missing_half_of_the_row() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{Comparison, MatchableField};
+        use riff_gui::ui::rule_box::RuleChildDraft;
+        use riff_gui::ui::rule_row::{ComparisonChoice, RuleIntent, RuleValueDraft};
+
+        let content = sample_content();
+        let size = egui::vec2(1280.0, 840.0);
+
+        // A chosen field with no comparison.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .query_by_label("this rule needs a comparison")
+                .is_some(),
+            "a chosen field with no comparison says what is missing"
+        );
+
+        // A comparison that draws a value, with nothing typed into it.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::GreaterThan),
+        });
+        draft.value = RuleValueDraft::Number(String::new());
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness.query_by_label("this rule needs a value").is_some(),
+            "an empty value well says it needs a value"
+        );
+
+        // A value the field's own type cannot read.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Year,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::GreaterThan),
+        });
+        draft.value = RuleValueDraft::Number("nineteen seventy-five".to_string());
+        let mut editor = SmartPlaylistsEditor {
+            name: "Late night".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        harness.run();
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .query_by_label("this rule's value can't be read as this field's kind")
+                .is_some(),
+            "a value of the wrong shape says so, rather than crying about the field"
+        );
+    }
+
+    /// An Unreadable Rule is shown where the store put it, blocks Save with a
+    /// reason **under it**, and the row's own delete control is the way out:
+    /// the same Save succeeds once it is gone.
+    #[test]
+    fn test_an_unreadable_rule_is_shown_pointed_at_and_removable() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{
+            Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
+        };
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let root = RootBox::new(
+            RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+                MatchableField::Title,
+                Comparison::Contains,
+                Some(RuleValue::Text("midnight".to_string())),
+            ))]),
+        );
+        let tree = SmartPlaylistTree::new(root).with_unreadable(vec![UnreadableRule::new(
+            Vec::new(),
+            1,
+            "mood".to_string(),
+            "is".to_string(),
+            false,
+            Some("calm".to_string()),
+        )]);
+        let mut harness = smart_playlists_draft_harness(
+            &content,
+            editor_holding(&tree),
+            egui::vec2(1280.0, 840.0),
+        );
+        harness.run();
+
+        let words = rect_of(&harness, "riff can't understand this rule");
+        assert_eq!(
+            harness.query_all_by_label("Remove rule").count(),
+            2,
+            "the whole row and the unreadable row each carry their own control"
+        );
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        let reason = rect_of(
+            &harness,
+            "riff can't understand this rule — delete the row to save the list",
+        );
+        assert!(
+            reason.top() >= words.bottom(),
+            "the reason is painted under the row it names: {reason:?} vs {words:?}"
+        );
+
+        // The row's own delete control is the way out. The unreadable row is
+        // the second child, so its control is the second "Remove rule".
+        click_nth(&mut harness, "Remove rule", 1);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::RemoveSmartPlaylistChild {
+                    parent: riff_gui::ui::rule_box::BoxPath::root(),
+                    index: 1,
+                }),
+            "the row's own control reports its slot, exactly like a Rule row"
+        );
+        assert!(
+            !harness
+                .state()
+                .0
+                .root
+                .children
+                .iter()
+                .any(|child| matches!(child, RuleChildDraft::Unreadable(_))),
+            "and the row really left the draft"
+        );
+        assert!(
+            harness
+                .query_all_by_label("riff can't understand this rule")
+                .next()
+                .is_none(),
+            "the row's words are gone from the frame"
+        );
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::SaveSmartPlaylist),
+            "Save was asked again"
+        );
+        assert!(
+            harness.state().0.refusal.is_none(),
+            "and it was not refused: the tree is whole without the row"
+        );
+        assert!(
+            harness.state().0.root.to_root_box().is_some(),
+            "the draft spells a tree for the store"
+        );
+    }
+
+    /// A Built-in Smart Playlist's name is refused before any store is asked,
+    /// and the reason is painted under the name field it is about.
+    #[test]
+    fn test_a_builtin_name_is_refused_under_the_name_field() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "  most played ".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        let name_field = harness
+            .query_by_role(egui::accesskit::Role::TextInput)
+            .expect("the name field is the pane's only text input")
+            .rect();
+
+        click_control(&mut harness, egui::accesskit::Role::Button, "Save");
+
+        let reason = rect_of(
+            &harness,
+            "a Built-in Smart Playlist is already named \"Most Played\"",
+        );
+        assert!(
+            reason.top() >= name_field.bottom(),
+            "the reason is under the name field it is about: {reason:?} vs {name_field:?}"
+        );
+        assert!(
+            reason.bottom() <= rect_of(&harness, "Album").top(),
+            "and above the Rules it is not about"
+        );
+    }
+
+    /// The store's own refusal is rendered verbatim, above the Save line —
+    /// double prefix included — because that string is the store's and is not
+    /// reworded on its way to the listener.
+    #[test]
+    fn test_the_stores_refusal_is_painted_verbatim_above_the_save_line() {
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut editor = SmartPlaylistsEditor {
+            name: "Gym".to_string(),
+            ..SmartPlaylistsEditor::default()
+        };
+        editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
+        let store_words = "Invalid operation: store query failed: a Playlist or Custom Smart \
+                           Playlist named \"Gym\" already exists";
+        editor.refuse_save(store_words.to_string());
+        let mut harness =
+            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        let reason = rect_of(&harness, store_words);
+        let save = rect_of(&harness, "Save");
+        assert!(
+            reason.bottom() <= save.top(),
+            "the store's words read above the Save line: {reason:?} vs {save:?}"
+        );
+        assert!(
+            reason.top() >= rect_of(&harness, "Album").bottom(),
+            "and below the rows the write was about"
+        );
+    }
+
     /// A tree with an arbitrary number of Rules saves and reads back whole
     /// through the **real** SQLite store, and so does one deeper than the
     /// seven-level editor cap: the editor imposes no Rule count and no depth
@@ -7810,6 +8422,603 @@ mod tests {
             .expect("the read works")
             .expect("the tree exists");
         assert_eq!(read.root(), nine_levels.root(), "nesting and order survive");
+    }
+
+    /// The order a drag leaves survives the whole way: Save writes it through
+    /// the real store, a fresh read returns it in the store's one interleaved
+    /// shape, and re-opening the page into a new editor spells the same order
+    /// — the order the tree stores is the order the page redraws when the
+    /// listener comes back.
+    #[test]
+    fn test_a_reordered_tree_survives_save_reload_and_a_fresh_open() {
+        use riff_backend::app::store::{
+            CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree,
+        };
+        use riff_backend::domain::{Combine, MatchableField, RuleChild};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (changes_tx, _changes_rx) = crossbeam_channel::unbounded();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(
+            &dir.path().join("riff.sqlite3"),
+            changes_tx,
+        )
+        .expect("opening a fresh store must work");
+
+        let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        editor.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "one")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::Any,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Title,
+                    "inner",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "two")),
+        ];
+        // The drag: the last Rule up past the Box.
+        editor.move_child(&BoxPath::root(), 2, 0);
+        assert_eq!(child_field(&editor.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&editor.root, 1), MatchableField::Artist);
+
+        let tree =
+            SmartPlaylistTree::new(editor.root.to_root_box().expect("whole Rules spell a tree"));
+        let id = store
+            .save_smart_playlist(None, "Reordered", &tree)
+            .expect("the save lands");
+        let read = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        let root = read.root();
+        // The stored children come back in the dragged order: the moved Rule
+        // first, the Box still last, Rules and Boxes in the one numbering.
+        assert_eq!(root.children().len(), 3, "nothing was lost or added");
+        let RuleChild::Rule(first) = &root.children()[0] else {
+            panic!("the moved Rule leads the stored list");
+        };
+        assert_eq!(first.field(), MatchableField::Album);
+        let RuleChild::Box(nested) = &root.children()[2] else {
+            panic!("the Box kept its place at the end");
+        };
+        assert_eq!(nested.children().len(), 1, "the Box kept its own list");
+
+        // Re-open: a fresh editor loads the saved list the way the page's row
+        // click does, and spells the same order.
+        let list = CustomSmartPlaylist {
+            id: id.clone(),
+            name: "Reordered".to_string(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let mut reopened = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
+        reopened.load_saved(&list, Some(&read));
+        assert_eq!(child_field(&reopened.root, 0), MatchableField::Album);
+        assert_eq!(child_field(&reopened.root, 1), MatchableField::Artist);
+        let RuleChildDraft::Box(inner) = &reopened.root.children[2] else {
+            panic!("the Box reopened in the same position");
+        };
+        let RuleChildDraft::Rule(title) = &inner.children[0] else {
+            panic!("the Box holds its Rule");
+        };
+        assert_eq!(title.field, Some(MatchableField::Title));
+    }
+
+    /// The tree harness's state and handle, aliased so the drag helpers'
+    /// signatures stay readable.
+    type TreeState = (
+        riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+        Vec<SettingsAction>,
+    );
+    type TreeHarness<'a> = egui_kittest::Harness<'a, TreeState>;
+
+    /// One whole Rule row as a draft: a field with `Is` and a text value —
+    /// the shape [`riff_gui::ui::rule_row::RuleDraft::from_rule`] reads back,
+    /// distinct per row so a frame's labels spell the list's order.
+    fn filled_rule_row(
+        field: riff_backend::domain::MatchableField,
+        text: &str,
+    ) -> riff_gui::ui::rule_row::RuleDraft {
+        use riff_backend::domain::{Comparison, Rule, RuleValue};
+
+        riff_gui::ui::rule_row::RuleDraft::from_rule(&Rule::new(
+            field,
+            Comparison::Is,
+            Some(RuleValue::Text(text.to_string())),
+        ))
+    }
+
+    /// The field of the Rule child at `index`, panicking when the child is a
+    /// Box or the row is not whole — the test-side spelling of "which Rule
+    /// sits where".
+    fn child_field(
+        root: &riff_gui::ui::rule_box::RuleBoxDraft,
+        index: usize,
+    ) -> riff_backend::domain::MatchableField {
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let RuleChildDraft::Rule(draft) = &root.children[index] else {
+            panic!("child {index} is a Box, not a Rule");
+        };
+        draft.field.expect("the fixture rows are whole Rules")
+    }
+
+    /// Drag one node's centre onto another's: press, move, release — one
+    /// real pointer gesture per frame, the playlist-reorder recipe.
+    fn drag_rects(harness: &mut TreeHarness<'_>, from: egui::Rect, to: egui::Rect) {
+        harness.drag_at(from.center());
+        harness.run();
+        harness.hover_at(to.center());
+        harness.run();
+        harness.drop_at(to.center());
+        harness.run();
+    }
+
+    /// The rect of the `nth` node labeled `label` in the last frame, failing
+    /// loudly with the count when there is no such node — a control that is
+    /// not in the frame is not draggable, whatever a picture suggests.
+    fn rect_of_nth(harness: &TreeHarness<'_>, label: &str, nth: usize) -> egui::Rect {
+        use egui_kittest::kittest::Queryable as _;
+
+        let nodes: Vec<_> = harness.query_all_by_label(label).collect();
+        assert!(
+            nodes.len() > nth,
+            "{label:?} has no node #{nth} of {} in the frame",
+            nodes.len()
+        );
+        nodes[nth].rect()
+    }
+
+    /// A Rule drags to a new position among its siblings, and the resulting
+    /// draft renumbers the one interleaved sibling order wholesale — the Box
+    /// between the two Rules shifts with them, in one numbering. Pinned as
+    /// the typed intent and as the resulting order, the way the playlist
+    /// reorder is pinned; the redrawn frame then draws the moved row at its
+    /// new position.
+    #[test]
+    fn test_a_rule_row_drags_to_a_new_position_among_its_siblings() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        let from = rect_of_nth(&harness, "Title", 0);
+        let to = rect_of_nth(&harness, "Album", 0);
+        assert!(
+            from.top() < to.top(),
+            "the fixture rows draw in sibling order before the gesture"
+        );
+        drag_rects(&mut harness, from, to);
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 2,
+                }),
+            "the drop reports the gesture as a typed intent: the first row onto the third"
+        );
+        let root = &harness.state().0.root;
+        assert!(
+            matches!(&root.children[0], RuleChildDraft::Box(_)),
+            "the Box between the Rules slid up one position"
+        );
+        assert_eq!(child_field(root, 1), MatchableField::Album);
+        assert_eq!(child_field(root, 2), MatchableField::Title);
+        assert!(
+            rect_of_nth(&harness, "Title", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
+            "the next frame redraws the moved row at its new position"
+        );
+    }
+
+    /// A Box's own control line is its row in the parent's list: dragging it
+    /// moves the whole child — the subtree travels with the line, exactly the
+    /// unit its remove control takes — and the Box and the Rules renumber in
+    /// the one shared sequence.
+    #[test]
+    fn test_a_box_line_drags_its_whole_subtree_among_its_siblings() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        // The nested Box's own combine line — node 1, after the Root Box's —
+        // drags down onto the last Rule.
+        let from = rect_of_nth(&harness, "All of the following", 1);
+        let to = rect_of_nth(&harness, "Album", 0);
+        drag_rects(&mut harness, from, to);
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 1,
+                    to: 2,
+                }),
+            "the Box's drop reports its own slot in the root's list"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(child_field(root, 1), MatchableField::Album);
+        let RuleChildDraft::Box(nested) = &root.children[2] else {
+            panic!("the Box landed at the end of the root's list");
+        };
+        assert_eq!(nested.rule_count(), 1, "the subtree moved with its line");
+        let RuleChildDraft::Rule(inner) = &nested.children[0] else {
+            panic!("the Box still holds its Rule");
+        };
+        assert_eq!(inner.field, Some(MatchableField::Artist));
+        assert!(
+            rect_of_nth(&harness, "Artist", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
+            "the moved Box's row is redrawn below its new neighbour"
+        );
+    }
+
+    /// A drop on the row it came from is a no-op: the gesture is reported —
+    /// the pane reports what was released, and the reorder math owns the
+    /// no-op rule, exactly as the playlist's commit owns its own — and the
+    /// tree changes nothing.
+    #[test]
+    fn test_a_drop_on_the_row_it_came_from_changes_nothing() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        // A real drag released back over its own row (press on Title, move
+        // to Album so the drag genuinely starts, back to Title, release).
+        let row = rect_of_nth(&harness, "Title", 0);
+        let away = rect_of_nth(&harness, "Album", 0);
+        harness.drag_at(row.center());
+        harness.run();
+        harness.hover_at(away.center());
+        harness.run();
+        harness.hover_at(row.center());
+        harness.run();
+        harness.drop_at(row.center());
+        harness.run();
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 0,
+                }),
+            "the drop is reported as the gesture it was: row 0 onto row 0"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(
+            root.children.len(),
+            3,
+            "a self-drop changes nothing, applied through the real applier"
+        );
+        assert_eq!(child_field(root, 0), MatchableField::Title);
+        assert!(matches!(&root.children[1], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 2), MatchableField::Album);
+        assert!(
+            harness.state().1.iter().all(|action| !matches!(
+                action,
+                SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+            )),
+            "no move was inferred from a self-drop"
+        );
+    }
+
+    /// A drop across a Box boundary moves nothing, in either direction. This
+    /// is the failure a bare sibling index creates: each list starts at zero,
+    /// so a payload of index 1 released over the root's row 0 would read as
+    /// "move root child 1 here" — the Box would silently cross its own
+    /// boundary and look like a success.
+    ///
+    /// The control at the end is the point: the same drag shape inside one
+    /// list reports the move, so the two silent gestures above prove the
+    /// boundary refusal, not a gesture the harness could never make.
+    #[test]
+    fn test_a_drop_across_a_box_boundary_moves_nothing_in_either_direction() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![
+                    RuleChildDraft::Rule(filled_rule_row(MatchableField::Artist, "beta")),
+                    RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+                ],
+            }),
+        ];
+        harness.run();
+
+        /// The shape this test guards: the root's two children, the Box's two
+        /// — every list in the state the fixture spelled.
+        fn shape_holds(harness: &TreeHarness<'_>) {
+            use riff_gui::ui::rule_box::RuleChildDraft;
+
+            let root = &harness.state().0.root;
+            assert_eq!(root.children.len(), 2, "the root's list is untouched");
+            assert_eq!(child_field(root, 0), MatchableField::Title);
+            let RuleChildDraft::Box(nested) = &root.children[1] else {
+                panic!("the Box is still the root's second child");
+            };
+            assert_eq!(nested.children.len(), 2, "the Box's list is untouched");
+            assert_eq!(child_field(nested, 0), MatchableField::Artist);
+            assert_eq!(child_field(nested, 1), MatchableField::Album);
+            assert!(
+                harness.state().1.iter().all(|action| !matches!(
+                    action,
+                    SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+                )),
+                "a cross-boundary gesture never raised a move"
+            );
+        }
+
+        // Outward: the Box's second Rule (index 1 of the Box's list) onto the
+        // root's first row. A bare index would move root child 1 — the Box
+        // itself — in front of the Rule.
+        let inner = rect_of_nth(&harness, "Album", 0);
+        let root_row = rect_of_nth(&harness, "Title", 0);
+        drag_rects(&mut harness, inner, root_row);
+        shape_holds(&harness);
+
+        // Inward: the root's first Rule onto the Box's second row.
+        let root_row = rect_of_nth(&harness, "Title", 0);
+        let inner = rect_of_nth(&harness, "Album", 0);
+        drag_rects(&mut harness, root_row, inner);
+        shape_holds(&harness);
+
+        // The control: the same gesture shape inside one list — the Box's
+        // second Rule onto its first — reports and applies the move.
+        let inner_late = rect_of_nth(&harness, "Album", 0);
+        let inner_first = rect_of_nth(&harness, "Artist", 0);
+        drag_rects(&mut harness, inner_late, inner_first);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root().child(1),
+                    from: 1,
+                    to: 0,
+                }),
+            "the harness can make this exact gesture when the lists match"
+        );
+        let root = &harness.state().0.root;
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the Box is still the root's second child");
+        };
+        assert_eq!(child_field(nested, 0), MatchableField::Album);
+        assert_eq!(child_field(nested, 1), MatchableField::Artist);
+    }
+
+    /// A Box cannot be dropped inside its own descendant: dragging the Box's
+    /// own line onto a row inside it changes nothing, so no cycle prevention
+    /// and no drop-time depth check are needed anywhere. The control drag —
+    /// the same line onto its own sibling — shows the line's drag really
+    /// reports when the list matches.
+    #[test]
+    fn test_a_box_cannot_be_dropped_inside_its_own_descendant() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                open: false,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+        ];
+        harness.run();
+
+        // The nested Box's own line — node 1, after the Root Box's — onto the
+        // row the Box contains.
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let inside = rect_of_nth(&harness, "Artist", 0);
+        drag_rects(&mut harness, box_line, inside);
+
+        let root = &harness.state().0.root;
+        assert_eq!(
+            root.children.len(),
+            2,
+            "the Box stayed in its parent's list"
+        );
+        assert_eq!(child_field(root, 0), MatchableField::Title);
+        let RuleChildDraft::Box(nested) = &root.children[1] else {
+            panic!("the Box is still a child of the root");
+        };
+        assert_eq!(nested.children.len(), 1, "the Box did not swallow itself");
+        assert_eq!(child_field(nested, 0), MatchableField::Artist);
+        assert!(
+            harness.state().1.iter().all(|action| !matches!(
+                action,
+                SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+            )),
+            "the descendant drop raised no move"
+        );
+
+        // The control: the same line onto its sibling Rule, in the same list,
+        // really reports — the Box lands at the Rule's position.
+        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let sibling = rect_of_nth(&harness, "Title", 0);
+        drag_rects(&mut harness, box_line, sibling);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 1,
+                    to: 0,
+                }),
+            "the Box's own line reports a move among its siblings"
+        );
+        let root = &harness.state().0.root;
+        assert!(matches!(&root.children[0], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 1), MatchableField::Title);
+    }
+
+    /// The hit-area-before-paint discipline, measured from the production
+    /// pane: with the drag wired, a Rule row's own field control still takes
+    /// a real click — the header opens its list and the option click lands —
+    /// and the same wiring still starts drags (the reorder tests above).
+    #[test]
+    fn test_a_rule_rows_field_control_still_takes_clicks_under_the_drag_wiring() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::RuleChildDraft;
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        // The blank row's field header: a click must open its list…
+        harness.get_by_label("Choose a field").click();
+        harness.run();
+        // …whose options are then real: clicking Genre selects it.
+        let genre: Vec<_> = harness
+            .query_all_by_role_and_label(egui::accesskit::Role::RadioButton, "Genre")
+            .collect();
+        assert_eq!(genre.len(), 1, "the field list offers Genre once");
+        genre[0].click();
+        harness.run();
+
+        let RuleChildDraft::Rule(draft) = &harness.state().0.root.children[0] else {
+            panic!("the first row is a Rule");
+        };
+        assert_eq!(
+            draft.field,
+            Some(MatchableField::Genre),
+            "the click reached the header inside the drag hit-area"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Genre").count(),
+            1,
+            "and the row redrew with the chosen field"
+        );
+    }
+
+    /// The shared text control inside a drag-wrapped row still takes a real
+    /// click and still accepts typed input — the exact failure the ticket
+    /// names: a drag hit-area above the row would leave this well unfocusable,
+    /// so a click never reaches it. The click is a pointer event, and the
+    /// typing goes to whatever holds focus, so the committed value is the
+    /// proof the click landed.
+    #[test]
+    fn test_a_rule_rows_text_well_still_takes_a_click_and_a_typed_value() {
+        use egui_kittest::kittest::Queryable as _;
+        use riff_backend::domain::{Comparison, MatchableField};
+        use riff_gui::ui::rule_box::RuleChildDraft;
+        use riff_gui::ui::rule_row::{ComparisonChoice, RuleDraft, RuleIntent, RuleValueDraft};
+
+        let content = sample_content();
+        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        // One row with a field and a comparison chosen the way the row
+        // chooses them, and nothing typed: the value well is the shared text
+        // field, empty.
+        let mut draft = RuleDraft::blank();
+        draft.apply(&RuleIntent::FieldChosen {
+            field: MatchableField::Title,
+        });
+        draft.apply(&RuleIntent::ComparisonChosen {
+            choice: ComparisonChoice::Stored(Comparison::Is),
+        });
+        harness.state_mut().0.root.children = vec![RuleChildDraft::Rule(draft)];
+        harness.run();
+
+        // The pane's two text inputs: the name field, and the row's well —
+        // the later one in reading order.
+        let inputs: Vec<_> = harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .collect();
+        assert_eq!(inputs.len(), 2, "the name field and the row's value well");
+        inputs[1].click();
+        harness.run();
+        let well = harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .last()
+            .expect("the well is still in the frame");
+        assert!(
+            well.is_focused(),
+            "the click reached the shared text field through the drag hit-area"
+        );
+        well.type_text("jazz");
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+
+        let RuleChildDraft::Rule(draft) = &harness.state().0.root.children[0] else {
+            panic!("the row is a Rule");
+        };
+        assert_eq!(
+            draft.value,
+            RuleValueDraft::Text("jazz".to_string()),
+            "the typed value committed through the row"
+        );
     }
 
     fn sample_content() -> SettingsContent {
@@ -15164,7 +16373,7 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
-    use egui_kittest::kittest::{By, Queryable};
+    use egui_kittest::kittest::{By, NodeT as _, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
     use riff_backend::app::scan_service::ScanOutcome;
@@ -15741,6 +16950,99 @@ mod whole_frame_tests {
             y_of(&shell.harness, "Artist - Beta") < y_of(&shell.harness, "Artist - Gamma")
                 && y_of(&shell.harness, "Artist - Gamma") < y_of(&shell.harness, "Artist - Alpha"),
             "the next real frame renders the committed order with no explicit invalidation"
+        );
+    }
+
+    /// A real drag on the Smart Playlists page reorders the Rules, and the
+    /// next frame draws the rows in the new order. The page is reached the
+    /// way a listener reaches it — Settings, the nav item, the list's own
+    /// row — so the drag has to survive the whole frame protocol to land,
+    /// and the drop runs through the typed `SettingsAction` and the applier,
+    /// never a test-side shortcut.
+    #[test]
+    fn test_a_real_drag_reorders_rule_rows_in_a_composed_frame() {
+        use riff_backend::app::state::ViewMode;
+        use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
+            RuleValue,
+        };
+
+        // One saved list, three Rules in its Root Box, each with its own
+        // header label so the frame's order is readable.
+        let id = PlaylistId::new("spl-morning-1");
+        let mut mock = MockLibraryQueryStore {
+            custom_smart_playlists: vec![CustomSmartPlaylist {
+                id: id.clone(),
+                name: "Morning drive".to_string(),
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            ..Default::default()
+        };
+        mock.smart_playlist_trees.insert(
+            id,
+            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+                vec![
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Title,
+                        Comparison::Is,
+                        Some(RuleValue::Text("midnight".to_string())),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Year,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(1975)),
+                    )),
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::PlayCount,
+                        Comparison::GreaterThan,
+                        Some(RuleValue::Number(10)),
+                    )),
+                ],
+            ))),
+        );
+        let (mut shell, _transport) = recording_transport_shell(mock);
+        shell.harness.step();
+
+        // Settings → Smart Playlists → the list's row, all by real clicks.
+        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        // The nav click applies at the end of its frame; the pane paints the
+        // next one, and the list's row exists only after that.
+        shell.harness.run_steps(2);
+        // The name sits twice in the a11y tree now — the sidebar's own custom
+        // row (ticket 12) and this pane's list row — so the click is scoped
+        // to the pane: the sidebar never crosses its 280px panel edge.
+        shell
+            .harness
+            .query_all_by_label("Morning drive")
+            .find(|node| node.rect().left() > 300.0)
+            .expect("the pane's list row renders on the stage")
+            .click();
+        shell.harness.run_steps(2);
+
+        assert!(
+            y_of(&shell.harness, "Title") < y_of(&shell.harness, "Year")
+                && y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays"),
+            "the pane renders the stored order top to bottom"
+        );
+
+        // Drag the first row onto the third: press, move, release.
+        let src = shell.harness.get_by_label("Title").rect();
+        let dst = shell.harness.get_by_label("Plays").rect();
+        shell.harness.drag_at(src.center());
+        shell.harness.step();
+        shell.harness.hover_at(dst.center());
+        shell.harness.step();
+        shell.harness.drop_at(dst.center());
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays")
+                && y_of(&shell.harness, "Plays") < y_of(&shell.harness, "Title"),
+            "the next frame draws the reordered draft: Title moved to the end"
         );
     }
 
@@ -18269,6 +19571,88 @@ mod whole_frame_tests {
         );
     }
 
+    /// The six Built-in Smart Playlists exist only as code, so no store query
+    /// can refuse a Playlist named after one — the application layer does it,
+    /// on the create prompt, before the store is ever asked. Without it the
+    /// sidebar would show two rows reading "Most Played" (story 8).
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_create_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::default());
+        shell.harness.step();
+        open_playlist_create_prompt(&mut shell);
+        focus_and_type(&mut shell, "  most played ");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Create").is_some(),
+            "the refusal keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("  most played "),
+            "the name they typed is still in the field, un-trimmed as typed"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "the check refused before the store was asked: it committed nothing"
+        );
+    }
+
+    /// The same application-layer half of the name rule on the rename prompt:
+    /// a Playlist may not take a Built-in's name either, and the store cannot
+    /// say so. The refusal names the conflict and leaves the row's old name
+    /// standing.
+    #[test]
+    fn a_builtin_smart_list_name_is_refused_on_the_rename_prompt() {
+        let (mut shell, committed) = prompt_mock_shell(MockPlaylistStore::with_playlists(vec![(
+            PlaylistId::new("most"),
+            "Most".to_string(),
+            vec![],
+        )]));
+        shell.harness.step();
+        open_playlist_rename_prompt(&mut shell);
+        focus_and_type_at(&mut shell, "Save", " Played");
+
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains(
+                    "a Built-in Smart Playlist is already named \"Most Played\""
+                )
+                .is_some(),
+            "the reason names the conflict, quoting the built-in's own spelling"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Most Played"),
+            "the name they edited is still in the field, as typed"
+        );
+        assert!(
+            shell.harness.query_by_label("Most").is_some(),
+            "the row keeps its old name — the refusal ran before the store was asked"
+        );
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "a refused rename committed nothing"
+        );
+    }
+
     /// `StoreError` has ONE variant for every fault the Application Store can
     /// meet on a write — `SqliteStore::mutate` wraps a constraint violation, a
     /// failed transaction and an IO failure into
@@ -19743,6 +21127,217 @@ mod whole_frame_tests {
         (shell, dir, list_id, store)
     }
 
+    /// The editor's Save, driven through a real Application Store in a
+    /// composed frame: one click writes the name **and** the whole tree in the
+    /// store's single call (D12), the listener stays on the page, and the
+    /// sidebar's SMART LISTS section shows the list under the name that was
+    /// typed — the committed write moves the Playlists generation the
+    /// sidebar's own enumeration is stamped on, so the next frame reads it.
+    ///
+    /// A second Save, under the name the list already holds, is not a conflict
+    /// with itself: the plan hands the store this row's id, which ticket 03's
+    /// rule exempts — the same exemption the sidebar Rename uses.
+    #[test]
+    fn saving_from_the_editor_writes_the_name_and_the_tree_and_the_sidebar_shows_the_row() {
+        let (mut shell, _dir, id, mut store) = custom_list_store_shell();
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The premise: the sidebar already lists the saved list — the row
+        // that must read the new name after the save.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar lists the saved list before the save"
+        );
+
+        // Load the saved list into the draft through the page's own row. The
+        // sidebar row wears the same label, so the locator is geometry: the
+        // page's row sits in the stage, right of the sidebar's width.
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The load filled the name field with the saved name; the listener
+        // types the rest of a new one. Focus, re-query, type at the end.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field holds the loaded name")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("Late night jazz"),
+            )
+            .expect("the name field survives being focused")
+            .type_text(" X");
+        shell.harness.step();
+
+        // The store's cross-table half of the name rule, reached first: an
+        // ordinary Playlist holds the name the listener just typed, and the
+        // store's own words are what the listener reads — prefix and all,
+        // never reworded — while the draft is left exactly as typed.
+        let blocker = store
+            .create_playlist("Late night jazz X", &[])
+            .expect("the name is free for a Playlist while the list still holds the old one");
+        shell.harness.step();
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_some(),
+            "the store's refusal is painted, prefix and all"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("already exists")
+                .is_some(),
+            "and it names the conflict the store refused"
+        );
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "a refused save leaves the draft exactly as typed"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists
+                .iter()
+                .map(|list| list.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Late night jazz"],
+            "a refused save wrote nothing: the list keeps its old name, and one row exists"
+        );
+
+        // The obstruction goes — the listener's own route in riff is deleting
+        // the Playlist from the sidebar, which this test performs directly so
+        // the retry below is the editor's Save and nothing else.
+        store
+            .delete_playlist(&blocker)
+            .expect("the Playlist holding the name is deleted");
+        shell.harness.step();
+
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // One store call wrote the name and the tree together, on the row the
+        // draft was written against.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(
+            lists.len(),
+            1,
+            "one list — the save updated, not duplicated"
+        );
+        assert_eq!(
+            lists[0].id, id,
+            "the list keeps the identity it was saved under"
+        );
+        assert_eq!(
+            lists[0].name, "Late night jazz X",
+            "the name typed while writing is the name the store holds"
+        );
+        let tree = store
+            .smart_playlist_tree(&id)
+            .expect("the read works")
+            .expect("the tree exists");
+        assert_eq!(
+            tree.root(),
+            one_rule_tree().root(),
+            "and the whole tree was written in the same call"
+        );
+
+        // The sidebar shows it under the typed name, with no navigation: the
+        // committed write moved the generation the sidebar's read is stamped
+        // on, so the next frame lists the new name.
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz X")
+                .any(|node| node.rect().center().x < riff_gui_theme::theme::SIDEBAR_W),
+            "the sidebar's SMART LISTS section lists the list under its new name"
+        );
+
+        // The listener is still on the page, editing the list that just saved.
+        assert!(
+            shell
+                .harness
+                .query(
+                    By::new()
+                        .role(egui::accesskit::Role::TextInput)
+                        .value("Late night jazz X"),
+                )
+                .is_some(),
+            "the name field still holds the saved name"
+        );
+        assert!(
+            shell
+                .harness
+                .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
+                .is_some(),
+            "the editor still edits the list it just saved"
+        );
+
+        // A re-save under the list's own name is not a conflict with itself.
+        shell
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+            .click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("Invalid operation")
+                .is_none(),
+            "the store did not refuse the list against its own name"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].name, "Late night jazz X");
+    }
+
     /// A stale custom id — the list was deleted from under the frame, with no
     /// UI gesture — never leaves the stage on a listing of something that no
     /// longer exists, and never on an empty listing, which reads as a
@@ -19908,7 +21503,482 @@ mod whole_frame_tests {
         );
     }
 
-    /// The row pass's typed intent, at the widget seam: a click on a custom
+    // --- Ticket 21: the Custom row's context menu -------------------------------
+    //
+    // Right-clicking a Custom Smart Playlist row offers exactly Duplicate,
+    // Rename and Delete. A Built-in row and an ordinary Playlist row offer
+    // nothing new — the Built-ins deliberately get no menu, which is what
+    // makes forking one into an editable Rule set impossible to reach. The
+    // menu is opened with a REAL secondary click
+    // (`click_secondary()` + two settling steps), never an intent injection;
+    // every assertion reads what a gesture DID.
+
+    /// Open the row's context menu the way a listener does: a real secondary
+    /// click at the row's hit area, then the two settling steps the popup
+    /// needs before its items are queryable (the harness's measured recipe).
+    fn open_custom_row_menu(shell: &mut Shell, row_label: &str) {
+        shell.harness.get_by_label(row_label).click_secondary();
+        shell.harness.step();
+        shell.harness.step();
+    }
+
+    /// The shell's tree-read counter for one identity — the observable an
+    /// open custom list leaves behind (the stage asks the store whether the
+    /// open id still exists).
+    fn tree_reads_for(mock: &Arc<Mutex<MockLibraryQueryStore>>, id: &PlaylistId) -> usize {
+        mock.lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, LibraryQueryCall::SmartPlaylistTree(rid) if rid == id))
+            .count()
+    }
+
+    /// A real secondary click on a Custom row opens the real popup, offering
+    /// exactly Duplicate, Rename and Delete — and the SAME hit area keeps the
+    /// primary-click open gesture. Both gestures are proven here, in one
+    /// composed frame, because a control that paints is not a control that is
+    /// reachable (this repo has five measured cases).
+    ///
+    /// The secondary probe starts from the Settings view on purpose: opening
+    /// the menu must not also open the list, and "the view stayed where it
+    /// was, and no tree read was issued" is that fact.
+    #[test]
+    fn a_secondary_click_opens_the_menu_and_the_primary_click_still_opens_the_list() {
+        let id = PlaylistId("spl-late-night-1".to_string());
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: [(id.clone(), one_rule_tree())].into(),
+            ..MockLibraryQueryStore::default()
+        });
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        for item in ["Duplicate", "Rename", "Delete"] {
+            assert!(
+                shell.harness.query(By::new().label(item)).is_some(),
+                "the secondary click opened its menu, and {item} is on it"
+            );
+        }
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("Edit")
+                .next()
+                .is_none(),
+            "the menu offers no route to editing Rules"
+        );
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Settings,
+            "opening the menu is not opening the list: the view did not move"
+        );
+        assert_eq!(
+            tree_reads_for(&mock, &id),
+            0,
+            "and a right-click issues no read for the list — the open gesture did not fire"
+        );
+
+        // Escape dismisses the popup, exactly as it does anywhere else.
+        shell.harness.key_press(egui::Key::Escape);
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Duplicate")).is_none(),
+            "Escape closes the menu"
+        );
+
+        // The row's primary gesture is untouched: the same hit area opens the
+        // list, which is what the store-backed read below proves happened.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Library,
+            "the primary click still lands on the Library view"
+        );
+        assert_eq!(
+            tree_reads_for(&mock, &id),
+            1,
+            "and the list the click opened is the one the stage read"
+        );
+    }
+
+    /// A Built-in row and an ordinary Playlist row offer nothing new on a
+    /// right-click: no menu is attached, so no item ever appears. That is the
+    /// deliberate asymmetry — forking a Built-in into a Rule set stays out of
+    /// scope, and the way to make it unreachable is not to offer it.
+    #[test]
+    fn built_in_and_playlist_rows_offer_no_menu() {
+        let settings_calls = Arc::new(Mutex::new(Vec::new()));
+        let (playlist_store, views) = crate::composed_shell::playlist_ports(
+            Box::new(MockLibraryQueryStore {
+                custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+                ..MockLibraryQueryStore::default()
+            }),
+            MockPlaylistStore::with_playlists(vec![(
+                PlaylistId("pl-gym".to_string()),
+                "Gym".to_string(),
+                Vec::new(),
+            )]),
+        );
+        let mut shell = build(
+            Box::new(MockTransport::new()),
+            MockScans::default(),
+            Box::new(MockSettingsStore::with_shared_calls(Arc::clone(
+                &settings_calls,
+            ))),
+            settings_calls,
+            playlist_store,
+            Box::new(MockLibraryMutationStore::new()),
+            views,
+        );
+        shell.harness.step();
+        shell.harness.step();
+
+        for row in ["Favorites (0)", "Gym"] {
+            open_custom_row_menu(&mut shell, row);
+            for item in ["Duplicate", "Rename", "Delete"] {
+                assert!(
+                    shell.harness.query(By::new().label(item)).is_none(),
+                    "{row} offers no {item}: neither Built-in nor Playlist rows carry a menu"
+                );
+            }
+        }
+
+        // The custom row still does, in the same frame — the negative above
+        // is not the whole app losing its menus.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        assert!(
+            shell.harness.query(By::new().label("Duplicate")).is_some(),
+            "the Custom row's menu is unaffected by the two rows that have none"
+        );
+    }
+
+    /// Duplicate, chosen from the real menu: the copy is written immediately
+    /// with the store's own name choice — one transaction, so a second
+    /// Duplicate lands on `Copy of X 2` — and the page opens on the copy so
+    /// the listener can start varying it.
+    #[test]
+    fn duplicating_from_the_menu_writes_the_copy_and_opens_it() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_some(),
+            "the Library's flat listing is what the frame starts on"
+        );
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Duplicate").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The copy exists, named by the store inside its one transaction.
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads");
+        let names: Vec<&str> = lists.iter().map(|list| list.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz", "Copy of Late night jazz"],
+            "the copy is written straight away, under the store-chosen name"
+        );
+        let original = store
+            .smart_playlist_tree(&id)
+            .expect("the tree read works")
+            .expect("the original holds a tree");
+        let copy = store
+            .smart_playlist_tree(&lists[1].id)
+            .expect("the tree read works")
+            .expect("the copy holds a tree");
+        assert_eq!(
+            copy.root().rule_count(),
+            original.root().rule_count(),
+            "the copy carries the same Rules (fresh ids, same tree)"
+        );
+        assert_ne!(
+            lists[0].id, lists[1].id,
+            "and it is its own row, not a rename"
+        );
+
+        // The page opens on the COPY: its row is the selected one, and the
+        // custom listing replaced the Library's own one.
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "a custom list's listing replaced the Library's flat one"
+        );
+        // `register_row_a11y` registers a sidebar row's `selected` through
+        // egui's `WidgetInfo::labeled` — whose second slot is the ENABLED
+        // flag, the harness's measured shape — so the open row is the enabled
+        // one and every idle row reads disabled. (`toggled()` is the
+        // OptionList's projection, not a row's.)
+        assert!(
+            !shell
+                .harness
+                .get_by_label("Copy of Late night jazz")
+                .accesskit_node()
+                .is_disabled(),
+            "the copy's row is the selected one — the page opened on the copy"
+        );
+        assert!(
+            shell
+                .harness
+                .get_by_label("Late night jazz")
+                .accesskit_node()
+                .is_disabled(),
+            "not on the original: its row is idle"
+        );
+
+        // A second Duplicate of the same original: the name collision is
+        // resolved by the store's transaction, not by the UI.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Duplicate").click();
+        shell.harness.step();
+        shell.harness.step();
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Late night jazz".to_string(),
+                "Copy of Late night jazz".to_string(),
+                "Copy of Late night jazz 2".to_string(),
+            ],
+            "two duplicates in a row cannot collide: the second copy is `Copy of X 2`"
+        );
+    }
+
+    /// Delete, chosen from the real menu: the confirmation comes up NAMING the
+    /// list; cancelling deletes nothing; confirming deletes the list (and its
+    /// whole tree) and, because it was the open one, returns the Library view.
+    #[test]
+    fn deleting_from_the_menu_asks_by_name_and_only_a_confirmed_delete_writes() {
+        let (mut shell, _dir, id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        // Open the list first, so the confirmed delete's effect on the open
+        // slot is observable: the Library's own listing must come back.
+        shell.harness.get_by_label("Late night jazz").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Beta"))
+                .is_none(),
+            "the open custom list replaced the Library's flat listing"
+        );
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Delete").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The question is up, on the shared destructive surface, and it names
+        // the list: the row is one label carrying the name, the question is
+        // another.
+        assert!(
+            shell.harness.query(By::new().label("Confirm")).is_some(),
+            "the destructive confirmation is what a Delete raises"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("Late night jazz")
+                .count()
+                >= 2,
+            "the question names the list, not just `this list`"
+        );
+
+        // Cancelling writes nothing and closes the question.
+        shell.harness.get_by_label("Cancel").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Confirm")).is_none(),
+            "Cancel closes the confirmation"
+        );
+        assert_eq!(
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .len(),
+            1,
+            "cancelling deletes nothing"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_some(),
+            "and the row is still there"
+        );
+
+        // Now confirm: the list and its tree go, and the open slot clears, so
+        // the Library view returns.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Delete").click();
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Confirm").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        assert!(
+            store
+                .custom_smart_playlists()
+                .expect("the enumeration reads")
+                .is_empty(),
+            "the confirmed delete is one durable store transaction"
+        );
+        assert!(
+            store
+                .smart_playlist_tree(&id)
+                .expect("the tree read works")
+                .is_none(),
+            "and its whole tree went with it: no Box or Rule answers under the id"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz"))
+                .is_none(),
+            "the deleted list's row is gone from the sidebar"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Artist - Alpha"))
+                .is_some()
+                && shell
+                    .harness
+                    .query(By::new().label("Artist - Beta"))
+                    .is_some(),
+            "deleting the open list returns the Library view — the same fall-through a \
+             deleted open Playlist gets"
+        );
+    }
+
+    /// Rename, chosen from the real menu: the same inline prompt a Playlist
+    /// row uses (its `Save` label, its pre-filled draft), and Enter commits it
+    /// through the store. The button is exercised by Enter, not by a click:
+    /// this build's prompt buttons are measurably unclickable
+    /// (`.scratch/prompt-confirm-unclickable/issues/01`), so the keyboard is
+    /// the gesture the widget actually offers.
+    #[test]
+    fn renaming_from_the_menu_opens_the_prompt_and_enter_commits() {
+        let (mut shell, _dir, _id, store) = custom_list_store_shell();
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "Rename opens the same inline prompt a Playlist row uses"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz"),
+            "pre-filled with the current name"
+        );
+
+        // Append to the draft (the field holds the caret at the end), then
+        // commit the way the prompt's own contract does: Enter.
+        focus_and_type_at(&mut shell, "Save", " deep");
+        confirm_prompt(&mut shell);
+
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Late night jazz deep".to_string()],
+            "the renamed name is the one in the store"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Late night jazz deep"))
+                .is_some(),
+            "and the sidebar row wears it on the next frame"
+        );
+    }
+
+    /// A refused rename: the name another list already holds is refused by the
+    /// store, and the prompt stays open with the typed draft and the store's
+    /// reason under it — the reporting ticket 05 built, reused here because
+    /// this menu opens the same prompt.
+    #[test]
+    fn a_refused_rename_keeps_the_prompt_open_with_the_reason() {
+        let (mut shell, _dir, _id, mut store) = custom_list_store_shell();
+        store
+            .save_smart_playlist(None, "Late night jazz copy", &one_rule_tree())
+            .expect("the second list saves");
+        shell.harness.step();
+        shell.harness.step();
+
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Rename").click();
+        shell.harness.step();
+        shell.harness.step();
+        // The taken name is typed by appending to the pre-filled draft.
+        focus_and_type_at(&mut shell, "Save", " copy");
+        confirm_prompt(&mut shell);
+
+        assert!(
+            shell.harness.query(By::new().label("Save")).is_some(),
+            "a refused rename keeps the prompt open instead of vanishing"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label_contains("already exists")
+                .next()
+                .is_some(),
+            "the store's own reason is written under the prompt, where it can be read"
+        );
+        assert_eq!(
+            focused_prompt_text(&mut shell).as_deref(),
+            Some("Late night jazz copy"),
+            "and the draft they typed is still in the field, un-trimmed"
+        );
+        let names: Vec<String> = store
+            .custom_smart_playlists()
+            .expect("the enumeration reads")
+            .into_iter()
+            .map(|list| list.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Late night jazz".to_string(),
+                "Late night jazz copy".to_string(),
+            ],
+            "the refused write changed no name"
+        );
+    }
+
+    /// The row pass's typed intents, at the widget seam: a click on a custom
     /// row reports `OpenSmartList(Custom(that row's id))` — its own id, not a
     /// sibling's — and nothing else. No store, no slot, no frame in the way;
     /// the composed frame above proves the same intent reaches the slot.
@@ -19925,12 +21995,23 @@ mod whole_frame_tests {
             custom_list("spl-late-night-1", "Late night jazz"),
             custom_list("spl-deep-focus-1", "Deep focus"),
         ];
+        let mut rename = None;
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, 120.0))
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, report: &mut SidebarReport| {
-                    custom_smart_list_rows(ui, &mut cache, &palette, false, &lists, None, report);
+                    custom_smart_list_rows(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        &lists,
+                        None,
+                        &mut rename,
+                        None,
+                        report,
+                    );
                 },
                 SidebarReport::default(),
             );
@@ -20675,6 +22756,330 @@ mod whole_frame_tests {
                 .query(By::new().label("Artist - Sunrise"))
                 .is_some(),
             "and its own rows, through its own whole-list read"
+        );
+    }
+
+    /// The menu's typed intents at the same widget seam: each of the three
+    /// items reports `CustomSmartList` with the row's id, the painted name and
+    /// its own action — and nothing else. No store, no slot, no frame in the
+    /// way; the composed frames above prove what each intent's appliers do.
+    #[test]
+    fn test_the_custom_row_menu_reports_each_choice_as_its_typed_intent() {
+        use riff_gui::ui::app::{CustomSmartListAction, custom_smart_list_rows};
+        use riff_gui::ui::frame::{SidebarAction, SidebarReport};
+        use riff_gui_theme::icons::IconCache;
+        use riff_gui_theme::theme::Palette;
+
+        let palette = Palette::dark();
+        let mut cache = IconCache::new();
+        let lists = vec![custom_list("spl-late-night-1", "Late night jazz")];
+        let mut rename = None;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(280.0, 160.0))
+            .with_pixels_per_point(1.0)
+            .build_ui_state(
+                move |ui, report: &mut SidebarReport| {
+                    custom_smart_list_rows(
+                        ui,
+                        &mut cache,
+                        &palette,
+                        false,
+                        &lists,
+                        None,
+                        &mut rename,
+                        None,
+                        report,
+                    );
+                },
+                SidebarReport::default(),
+            );
+        harness.run();
+
+        for (item, action) in [
+            ("Duplicate", CustomSmartListAction::Duplicate),
+            ("Rename", CustomSmartListAction::Rename),
+            ("Delete", CustomSmartListAction::Delete),
+        ] {
+            harness.state_mut().actions.clear();
+            harness.get_by_label("Late night jazz").click_secondary();
+            harness.step();
+            harness.step();
+            harness.get_by_label(item).click();
+            harness.step();
+            assert_eq!(
+                harness.state().actions,
+                vec![SidebarAction::CustomSmartList {
+                    id: PlaylistId("spl-late-night-1".to_string()),
+                    name: "Late night jazz".to_string(),
+                    action,
+                }],
+                "{item} reports its own typed intent, and nothing else"
+            );
+        }
+    }
+    // --- Ticket 17: the live match line -----------------------------------------
+    //
+    // The line counts the draft tree against the real store, on the UI thread,
+    // and refreshes when a change is **committed** — a value accepted on
+    // Enter or blur, a selection made, a row added or removed — never per
+    // keystroke and never per repaint. The cadence is pinned as read counts
+    // at the seam (the mock records the paged read), and the failure paths
+    // are pinned as what the line says instead of a number.
+
+    /// The custom-listing **count** reads the mock recorded — the page reads
+    /// that carried `limit 0`, the count sentinel — in call order. A window
+    /// read is not one, which is half the point of counting them this way.
+    fn custom_count_reads(mock: &Arc<Mutex<MockLibraryQueryStore>>) -> usize {
+        mock.lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    LibraryQueryCall::CustomSmartPlaylistPage(_, _, _, _, 0)
+                )
+            })
+            .count()
+    }
+
+    /// Open the Smart Playlists section and load the saved list through the
+    /// page's own row — the two gestures every count-line test starts from.
+    /// The sidebar row wears the same label, so the row locator is geometry:
+    /// the page's row sits in the stage, right of the sidebar's width.
+    fn open_saved_list_in_editor(shell: &mut Shell) {
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+    }
+
+    /// Opening a saved list puts its real store count on the line, and the
+    /// blank row of the empty-state draft before it is not counted: the line
+    /// reports the block with Save's own words, never "Matches 0 songs" —
+    /// while the page's list column row keeps wearing its count-less label.
+    #[test]
+    fn the_live_match_line_counts_the_opened_list_against_the_real_store() {
+        let (mut shell, _dir, _id, _store) = custom_list_store_shell();
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The page opens on a new draft holding one blank Rule row: a draft
+        // that cannot be counted is not counted.
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("this rule needs a field")
+                .is_some(),
+            "the blank row blocks the line with the words Save uses"
+        );
+        assert!(
+            shell.harness.query_by_label_contains("Matches ").is_none(),
+            "a draft that cannot be counted reports the block, never a number"
+        );
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The loaded Rule is `Title is "alpha"` and the store holds one
+        // scanned "Alpha" among three Tracks: the line counts the real store.
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 1 song"))
+                .is_some(),
+            "the live line counts the loaded list's real matches"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz")
+                .any(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W),
+            "the list column's row is the exact label — no count folded in"
+        );
+    }
+
+    /// The cadence, pinned as read counts at the seam: opening the list is
+    /// one page read for the total alone, then one read per committed shape —
+    /// a repaint adds none, a keystroke adds none, and a value committed back
+    /// to a shape already counted is served from the held answer.
+    #[test]
+    fn the_live_match_line_reads_once_per_committed_shape_and_never_per_keystroke() {
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: std::collections::HashMap::from([(
+                PlaylistId("spl-late-night-1".to_string()),
+                one_rule_tree(),
+            )]),
+            custom_page: vec![
+                crate::test_utils::create_test_track("0", "f:\\0.mp3"),
+                crate::test_utils::create_test_track("1", "f:\\1.mp3"),
+                crate::test_utils::create_test_track("2", "f:\\2.mp3"),
+            ],
+            ..MockLibraryQueryStore::default()
+        });
+
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            0,
+            "the empty-state draft's blank row is not counted, so the seam is never asked"
+        );
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 3 songs"))
+                .is_some(),
+            "the loaded shape's count is on the line"
+        );
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "one read for the loaded shape — the total alone"
+        );
+        assert!(
+            mock.lock().unwrap().window_calls().is_empty(),
+            "and a count read is never a window read"
+        );
+
+        // Repaints of the unchanged tree cost no further read.
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "a repaint of an unchanged tree does not re-query"
+        );
+
+        // Typing in the value well moves the buffer, not the committed
+        // answer, so the counted shape is unchanged and no read follows.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alpha"),
+            )
+            .expect("the value well holds the loaded value")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alpha"),
+            )
+            .expect("the well survives being focused")
+            .type_text("x");
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "typing without committing does not re-query"
+        );
+
+        // Enter commits the typed value: a new shape, one read.
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            2,
+            "an accepted value is one committed shape, one read"
+        );
+
+        // Back to the value the line already counted, committed again: the
+        // held answer is served and no third read is issued.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alphax"),
+            )
+            .expect("the committed value is the buffer now")
+            .focus();
+        shell.harness.step();
+        shell.harness.key_press(egui::Key::Backspace);
+        shell.harness.step();
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            2,
+            "editing the Rule back to its previous value reuses the held count"
+        );
+    }
+
+    /// A tree the engine cannot compute puts the store's own reason on the
+    /// line — the same words the listing would show for the same tree — and
+    /// never "Matches 0 songs".
+    #[test]
+    fn a_refused_count_shows_the_stores_reason_and_never_zero_songs() {
+        let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: std::collections::HashMap::from([(
+                PlaylistId("spl-late-night-1".to_string()),
+                one_rule_tree(),
+            )]),
+            failing: vec![FailingQuery::CustomSmartPlaylistCount],
+            ..MockLibraryQueryStore::default()
+        });
+
+        open_saved_list_in_editor(&mut shell);
+
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("custom smart playlist boom")
+                .is_some(),
+            "the store's own reason is what the line shows"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 0 songs"))
+                .is_none(),
+            "a refused count is never rendered as 0 songs"
         );
     }
 }

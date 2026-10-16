@@ -978,32 +978,74 @@ pub struct ReorderableRow {
     pub favorite_toggled: Option<bool>,
 }
 
-/// One 40px tree row wrapped in built-in drag-and-drop support: press-drag
-/// picks the row up (it follows the pointer as a floating layer), and
-/// releasing over another row reports the move through
-/// [`ReorderableRow::drop_from`] — combining `(source, this row's index)`
-/// is the caller's job. Clicks, double-clicks, and context menus pass
-/// through untouched, and a stale payload (a drag that ended off every row)
-/// is cleared automatically so it can never fire a phantom reorder on a
-/// later plain click.
+/// What one [`drag_row`] slot reported this frame: the painted row's own
+/// value, the row's response (or the reserved slot's while the row floats),
+/// and the payload a drag released over the row this frame carried.
+pub(crate) struct DragRow<T, R> {
+    /// What the caller's paint produced this frame — the floating copy's
+    /// value while the row is in flight.
+    pub inner: R,
+    /// Union of the drag hit-area and the row's own response: clicks on the
+    /// row's controls and drags from the slot both answer here. While the
+    /// row floats this is the reserved slot's hover-only response, so its
+    /// controls take no part in interaction.
+    pub response: egui::Response,
+    /// The payload of a drag released over this row this frame, already
+    /// passed through the caller's `accepts` check and taken from the
+    /// drag-and-drop store, so exactly one row can ever see it. `None` when
+    /// nothing was released here or the payload is not this row's to accept.
+    pub dropped: Option<std::sync::Arc<T>>,
+    /// Whether the row painted as the floating copy this frame; a caller
+    /// must not apply intents or drops read off it.
+    pub in_flight: bool,
+}
+
+/// One row's drag-and-drop scaffolding, for every draggable row in the app:
+/// reserve the layout slot, register the drag hit-area BEFORE the row paints,
+/// float the row after the pointer while it is in flight, and decode the
+/// payload a drag released here carried.
 ///
-/// The drag hit-area is registered BEFORE the row paints (the titlebar
-/// drag-region precedent): egui's hit test swallows clicks that land on a
-/// drag-only widget stacked above a click widget, so the row must sit on
-/// top for selection and menus to keep working.
-pub fn reorderable_row(
+/// **Hit-area before paint, always.** egui's hit test chooses click and drag
+/// candidates separately, and when a drag-only widget sits ABOVE a click
+/// widget at the same spot the click candidate is discarded outright ("it
+/// would be confusing if clicking a drag-widget clicked something behind
+/// it"). So registering the drag hit-area after the row — above it — stops
+/// the row taking clicks: every button and text field under the hit-area
+/// goes inert, and a shared text field cannot be focused or selected at all.
+/// Registering the hit-area first (below the row) leaves the row's own
+/// widgets as the click candidates while the drag candidate stays the
+/// hit-area: a plain click lands on the control under the pointer, and a
+/// press-and-move from anywhere on the slot starts the drag. Which of the
+/// two answers is decided by egui's own click/drag threshold, not by this
+/// code.
+///
+/// `id` is the row's drag identity, `slot_size` the layout slot the row
+/// reserves while it paints into it or floats away, and `payload` what the
+/// row sets while it is the one in flight. `accepts` decides whether a
+/// payload in flight may be dropped on this row — the seam that scopes a
+/// drag to one list: a payload it refuses is neither ringed as a drop target
+/// nor taken on release, so a gesture from another list fails safe (nothing
+/// moves) instead of being read as a legal move here. `paint` draws the row
+/// into the reserved slot and answers its value plus **the row's own
+/// response** — the one clicks land on, which the returned response unions
+/// with the hit-area. A scope's response is hover-only and must not stand in
+/// for it: unioning that would drop every click on the row.
+pub(crate) fn drag_row<T, R>(
     ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    reduce_motion: bool,
     id: egui::Id,
-    index: usize,
-    row: TreeRow<'_>,
-) -> ReorderableRow {
+    slot_size: egui::Vec2,
+    palette: &Palette,
+    payload: T,
+    accepts: impl Fn(&T) -> bool,
+    paint: impl FnOnce(&mut egui::Ui) -> (R, egui::Response),
+) -> DragRow<T, R>
+where
+    T: Clone + Send + Sync + 'static,
+{
     // A payload can only outlive its own gesture when the drag ended off
     // every row. Drop it before it can misfire: on a genuine drop frame
     // `any_released` is true, so the rows below still consume it first.
-    if egui::DragAndDrop::has_payload_of_type::<RowDrag>(ui.ctx()) {
+    if egui::DragAndDrop::has_payload_of_type::<T>(ui.ctx()) {
         let released_this_frame = ui.ctx().input(|i| i.pointer.any_released());
         let pointer_down = ui.ctx().input(|i| i.pointer.any_down());
         if !pointer_down && !released_this_frame {
@@ -1013,25 +1055,25 @@ pub fn reorderable_row(
 
     // Reserve this row's layout slot up front so the list never shifts,
     // whether the row paints in place or floats after the pointer.
-    let (slot_rect, slot_response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_H),
-        egui::Sense::hover(),
-    );
+    let (slot_rect, slot_response) = ui.allocate_exact_size(slot_size, egui::Sense::hover());
 
-    let (response, favorite_toggled) = if ui.ctx().is_being_dragged(id) {
+    let in_flight = ui.ctx().is_being_dragged(id);
+    let (inner, response) = if in_flight {
         // This row is in flight: carry the payload and paint it into a
         // floating tooltip layer that follows the pointer (what
         // `Ui::dnd_drag_source` does for its own wrappers).
-        egui::DragAndDrop::set_payload(ui.ctx(), RowDrag(index));
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
         let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
-        let floated = ui.scope_builder(
-            egui::UiBuilder::new()
-                .layer_id(layer_id)
-                .max_rect(slot_rect),
-            |ui| tree_row(ui, cache, palette, reduce_motion, row),
-        );
+        let (inner, row_response) = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .layer_id(layer_id)
+                    .max_rect(slot_rect),
+                paint,
+            )
+            .inner;
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-            let delta = pointer_pos - floated.inner.response.rect.center();
+            let delta = pointer_pos - row_response.rect.center();
             ui.ctx().transform_layer_shapes(
                 layer_id,
                 egui::emath::TSTransform::from_translation(delta),
@@ -1039,26 +1081,27 @@ pub fn reorderable_row(
         }
         // A floating row takes no part in hit-testing, and its controls do
         // not fire: the drag gesture in flight owns the interaction.
-        (slot_response, None)
+        (inner, slot_response)
     } else {
         // Drag hit-area first, row on top: clicks land on the row, drags on
-        // the hit-area (see the module-level note above).
+        // the hit-area (see the doc above).
         let drag_area = ui
             .interact(slot_rect, id, egui::Sense::drag())
             .on_hover_cursor(egui::CursorIcon::Grab);
-        let row = ui
-            .scope_builder(egui::UiBuilder::new().max_rect(slot_rect), |ui| {
-                tree_row(ui, cache, palette, reduce_motion, row)
-            })
+        let (inner, row_response) = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(slot_rect), paint)
             .inner;
-        let favorite_toggled = row.favorite_toggled;
-        (drag_area | row.response, favorite_toggled)
+        (inner, drag_area | row_response)
     };
 
-    // Ring the hovered drop target while a row is in flight — egui
-    // suppresses ordinary hover fills on non-dragged widgets mid-drag, so
-    // the focus-ring token carries the affordance instead.
-    if egui::DragAndDrop::has_payload_of_type::<RowDrag>(ui.ctx()) && response.contains_pointer() {
+    // Ring the hovered drop target while a row of this kind is in flight —
+    // egui suppresses ordinary hover fills on non-dragged widgets mid-drag,
+    // so the focus-ring token carries the affordance instead. A payload this
+    // row would refuse draws nothing: a ring is a promise to accept.
+    if let Some(held) = egui::DragAndDrop::payload::<T>(ui.ctx())
+        && accepts(&held)
+        && response.contains_pointer()
+    {
         ui.painter_at(response.rect).rect_stroke(
             response.rect,
             theme::RADIUS_MD,
@@ -1067,13 +1110,64 @@ pub fn reorderable_row(
         );
     }
 
-    let drop_from = response
-        .dnd_release_payload::<RowDrag>()
-        .map(|payload| payload.0);
+    // The payload a release over this row dropped — but only when this row
+    // is the one allowed to take it. `dnd_release_payload` itself checks the
+    // pointer is over the row and released this frame, and *takes* the
+    // payload, so no second row can read the same drop.
+    let dropped = egui::DragAndDrop::payload::<T>(ui.ctx())
+        .filter(|held| accepts(held))
+        .and_then(|_| response.dnd_release_payload::<T>());
 
-    ReorderableRow {
+    DragRow {
+        inner,
         response,
-        drop_from,
-        favorite_toggled,
+        dropped,
+        in_flight,
+    }
+}
+
+/// One 40px tree row wrapped in built-in drag-and-drop support: press-drag
+/// picks the row up (it follows the pointer as a floating layer), and
+/// releasing over another row reports the move through
+/// [`ReorderableRow::drop_from`] — combining `(source, this row's index)`
+/// is the caller's job. Clicks, double-clicks, and context menus pass
+/// through untouched, and a stale payload (a drag that ended off every row)
+/// is cleared automatically so it can never fire a phantom reorder on a
+/// later plain click.
+///
+/// The mechanism itself is [`drag_row`], shared with every other draggable
+/// row shape; the hit-area-before-paint rule it owns is documented there.
+pub fn reorderable_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    id: egui::Id,
+    index: usize,
+    row: TreeRow<'_>,
+) -> ReorderableRow {
+    let drag = drag_row(
+        ui,
+        id,
+        egui::vec2(ui.available_width(), ROW_H),
+        palette,
+        RowDrag(index),
+        |_| true,
+        |ui| {
+            let row = tree_row(ui, cache, palette, reduce_motion, row);
+            let response = row.response.clone();
+            (row, response)
+        },
+    );
+    ReorderableRow {
+        response: drag.response,
+        drop_from: drag.dropped.map(|payload| payload.0),
+        // The floating copy's controls do not fire, so a favorite toggle may
+        // only be read off the in-place row (the pre-refactor behavior).
+        favorite_toggled: if drag.in_flight {
+            None
+        } else {
+            drag.inner.favorite_toggled
+        },
     }
 }

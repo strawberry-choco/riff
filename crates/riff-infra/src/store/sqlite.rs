@@ -16,6 +16,7 @@
 
 use crossbeam_channel::Sender;
 use riff_persistence::errors::StoreError;
+use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
@@ -30,6 +31,8 @@ use rusqlite::{Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::field_columns::{is_genre_set, picker_column};
 
 /// A migration is an ordered schema step with a stable identity and content
 /// checksum so accidental edits are detected instead of silently applied.
@@ -2907,6 +2910,115 @@ impl LibraryQueryStore for SqliteStore {
             ])
         })
         .map_err(|e| op_error("smart list counts failed", e))
+    }
+
+    /// At most `limit` distinct values of the pickable text column behind
+    /// `field_id`, byte-wise ascending.
+    ///
+    /// Two shapes, chosen by what the column stores:
+    ///
+    /// * `genre` holds a `;`-separated set and a Rule tests one whole
+    ///   *segment*, so the pickable values are the tag's trimmed entries.
+    ///   SQLite splits them in a recursive CTE so the dedup, the order and
+    ///   the `LIMIT` all land in the store — splitting in Rust could only
+    ///   bound the answer after reading every tag in the Library. The
+    ///   split's trim-and-drop-empty rule mirrors [`genre_segments`], the
+    ///   aggregate the genre listing already splits with, so a picked value
+    ///   is always a value the genre filter can actually answer for.
+    /// * Every other pickable text column is single-valued, so
+    ///   `SELECT DISTINCT` over it answers directly. `TRIM(col) <> ''`
+    ///   excludes an absent value however it arrived — `NULL`, `''` or a
+    ///   whitespace-only tag — so no picker entry is ever blank, while the
+    ///   value handed back stays verbatim, because that is what the Rule's
+    ///   `is` test compares the column against.
+    ///
+    /// The column name comes from [`FIELD_COLUMNS`](super::field_columns::FIELD_COLUMNS)
+    /// and nowhere else: `field_id` is only ever a lookup key into that table,
+    /// and an id the table does not catalogue as a text field is rejected here,
+    /// before a single SQL character is built. `limit` is the only other thing
+    /// reaching the query, and it arrives as a bound parameter.
+    ///
+    /// Ordering is ascending byte-wise (`SQLite` `BINARY`), the order
+    /// [`Self::genre_counts`] and [`Self::all_artists`] already answer their
+    /// lists with, so a picker list and the listing it echoes never disagree
+    /// and a bounded answer is a deterministic *prefix* of the full one rather
+    /// than an arbitrary sample. No `DISTINCT` read here is index-backed: the
+    /// schema carries no indexes for these columns, which is why each list
+    /// runs once when a picker opens rather than on a per-frame path.
+    fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+        let Some(entry) = picker_column(field_id, ValueType::Text) else {
+            return Err(StoreError::InvalidOperation(format!(
+                "field {field_id:?} names no pickable text column"
+            )));
+        };
+        let column = entry.column;
+        let sql = if is_genre_set(field_id) {
+            // `tagged` narrows to the genre-bearing rows first, then `split`
+            // peels one `;`-delimited segment per step: seeding with a trailing
+            // `;` means every real segment — last one included — is emitted,
+            // and `rest` shrinks by at least the delimiter each step, so the
+            // recursion always terminates.
+            format!(
+                "WITH RECURSIVE
+                     tagged(genre) AS (SELECT genre FROM tracks WHERE {HAS_GENRE_SQL}),
+                     split(segment, rest) AS (
+                         SELECT '', genre || ';' FROM tagged
+                         UNION ALL
+                         SELECT substr(rest, 1, instr(rest, ';') - 1),
+                                substr(rest, instr(rest, ';') + 1)
+                         FROM split WHERE rest <> ''
+                     )
+                 SELECT DISTINCT trim(segment) FROM split
+                 WHERE trim(segment) <> ''
+                 ORDER BY trim(segment) ASC
+                 LIMIT ?1"
+            )
+        } else {
+            format!(
+                "SELECT DISTINCT {column} FROM tracks
+                 WHERE {column} IS NOT NULL AND TRIM({column}) <> ''
+                 ORDER BY {column} ASC
+                 LIMIT ?1"
+            )
+        };
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect()
+        })
+        .map_err(|e| op_error("picker text read failed", e))
+    }
+
+    /// At most `limit` distinct values of the pickable numeric column behind
+    /// `field_id`, ascending. `IS NOT NULL` is the whole absence test here: a
+    /// stored `0` is a present value and is offered like any other. Same
+    /// column-table-only interpolation, same bound parameter, and the same
+    /// one-open-per-picker cadence as [`Self::picker_texts`].
+    fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
+        let Some(entry) = picker_column(field_id, ValueType::Number) else {
+            return Err(StoreError::InvalidOperation(format!(
+                "field {field_id:?} names no pickable numeric column"
+            )));
+        };
+        let column = entry.column;
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM tracks
+             WHERE {column} IS NOT NULL
+             ORDER BY {column} ASC
+             LIMIT ?1"
+        );
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect()
+        })
+        .map_err(|e| op_error("picker number read failed", e))
     }
 }
 

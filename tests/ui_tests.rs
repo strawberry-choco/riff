@@ -21083,9 +21083,11 @@ mod rule_row_ui_tests {
     use riff_backend::app::store::StoreGeneration;
     use riff_backend::app::views::SessionViews;
     use riff_backend::domain::field_catalog::{ValueType, spec};
-    use riff_backend::domain::{Comparison, MatchableField, RuleValue};
+    use riff_backend::domain::{CivilDateTime, Comparison, MatchableField, Rule, RuleValue};
+    use riff_gui::ui::rule_date::RuleDateIntent;
     use riff_gui::ui::rule_row::{
-        PICKER_LIMIT, RuleDraft, RuleIntent, RulePanel, RulePickerValues, rule_row,
+        PICKER_LIMIT, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, RuleValueDraft,
+        ValueGap, rule_row,
     };
     use riff_gui_theme::icons::IconCache;
     use riff_gui_theme::theme::Palette;
@@ -21672,7 +21674,7 @@ mod rule_row_ui_tests {
     }
 
     #[test]
-    fn a_date_rule_stays_half_formed_until_ticket_20_lands() {
+    fn a_date_rule_names_its_missing_value_half_before_any_date_is_entered() {
         let (mut harness, host, _mock) = specimen(1, genre_mock());
         seed(
             &mut harness,
@@ -21692,11 +21694,237 @@ mod rule_row_ui_tests {
         );
         assert_eq!(
             draft.gap(),
-            Some(riff_gui::ui::rule_row::RuleGap::Value(
-                riff_gui::ui::rule_row::ValueGap::Missing
-            )),
-            "the row names its missing value half rather than pretending a calendar exists"
+            Some(RuleGap::Value(ValueGap::Missing)),
+            "the row names its missing value half, exactly as it does for every \
+             other half-filled Rule"
         );
         assert!(draft.rule().is_none());
+    }
+
+    // --- ticket 20's date controls, through composed frames ---------------------
+
+    /// A specimen pane sized to show a whole date row: the module's 560-wide
+    /// pane clips the typed time off the row's right edge, and a control under
+    /// the clip rect proves nothing by a click landing on it. The real pane's
+    /// own width arithmetic is the Settings page's (tickets 15/16).
+    fn date_specimen(
+        rows: usize,
+    ) -> (
+        egui_kittest::Harness<'static>,
+        RuleRowHost,
+        Arc<Mutex<MockLibraryQueryStore>>,
+    ) {
+        let (host, mock) = RuleRowHost::new(rows, genre_mock());
+        let drawn = host.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(920.0, 1_000.0))
+            .with_pixels_per_point(1.0)
+            .build_ui(move |ui| drawn.render(ui));
+        harness.step();
+        (harness, host, mock)
+    }
+
+    /// The date row's seed: a chosen `(field, comparison)` and whatever date
+    /// buffers the test wants shown, landed the way the host lands them.
+    fn date_seed(
+        harness: &mut egui_kittest::Harness<'_>,
+        host: &RuleRowHost,
+        field: MatchableField,
+        comparison: Comparison,
+        buffers: &[RuleDateIntent],
+    ) {
+        let mut intents = vec![
+            RuleIntent::FieldChosen { field },
+            RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(comparison),
+            },
+        ];
+        intents.extend(buffers.iter().cloned().map(RuleIntent::Date));
+        seed(harness, host, 0, &intents);
+    }
+
+    /// Type `text` into the specimen's `index`-th text well, in draw order —
+    /// the module's focus-then-re-query-then-type cadence, per well.
+    fn type_into(harness: &mut egui_kittest::Harness<'_>, index: usize, text: &str) {
+        harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .nth(index)
+            .unwrap_or_else(|| panic!("the specimen has no text well #{index}"))
+            .focus();
+        harness.run_steps(1);
+        harness
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .nth(index)
+            .expect("the well survives being focused")
+            .type_text(text);
+        harness.run_steps(1);
+    }
+
+    #[test]
+    fn the_day_window_takes_a_whole_number_of_days_by_typing() {
+        let (mut harness, host, _mock) = date_specimen(1);
+        date_seed(
+            &mut harness,
+            &host,
+            MatchableField::DateAdded,
+            Comparison::InLast,
+            &[],
+        );
+        type_into(&mut harness, 0, "7");
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::Date(RuleDateIntent::WindowDays(
+                "7".to_string()
+            ))],
+            "one typed day count, reported once — a typed well has no commit \
+             gesture of its own here, it reports each edit"
+        );
+        let draft = host.draft(0);
+        assert_eq!(draft.gap(), None);
+        assert_eq!(
+            draft.rule().expect("a whole rule").value(),
+            Some(&RuleValue::Days(7)),
+            "and the stored value is a whole day count, not a resolved instant"
+        );
+        for _ in 0..4 {
+            harness.step();
+        }
+        assert!(
+            host.take_intents().is_empty(),
+            "a repaint of the same buffer reports nothing more"
+        );
+    }
+
+    #[test]
+    fn the_calendar_opens_by_a_real_click_and_its_day_lands_in_the_draft() {
+        let (mut harness, host, _mock) = date_specimen(1);
+        date_seed(
+            &mut harness,
+            &host,
+            MatchableField::LastPlayed,
+            Comparison::Before,
+            &[RuleDateIntent::Day("2024-03-02".to_string())],
+        );
+        // The button shows the day it holds; clicking it opens the calendar.
+        click(&mut harness, "2024-03-02");
+        assert!(
+            harness.query_by_label("15").is_some(),
+            "the open calendar's day cells are in the frame, not merely painted"
+        );
+        click(&mut harness, "15");
+        click(&mut harness, "Save");
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::Date(RuleDateIntent::Day(
+                "2024-03-15".to_string()
+            ))],
+            "the day the calendar saved is the one intent the host lands"
+        );
+        let draft = host.draft(0);
+        let RuleValueDraft::Date { draft: buffers, .. } = &draft.value else {
+            panic!("the date half must still be the date buffers");
+        };
+        assert_eq!(buffers.day, "2024-03-15");
+        assert!(
+            harness.query_by_label("2024-03-15").is_some(),
+            "the button now shows the picked day"
+        );
+        assert_eq!(
+            draft.gap(),
+            Some(RuleGap::Value(ValueGap::Missing)),
+            "the day alone is not the pair: the time is still missing, and the \
+             row says so instead of failing"
+        );
+    }
+
+    #[test]
+    fn the_typed_time_is_three_numbers_that_store_as_one_zone_less_pair() {
+        let (mut harness, host, _mock) = date_specimen(1);
+        date_seed(
+            &mut harness,
+            &host,
+            MatchableField::LastPlayed,
+            Comparison::Before,
+            &[RuleDateIntent::Day("2024-03-02".to_string())],
+        );
+        // hh, mm, ss in draw order. Each well reports the pair's new buffer,
+        // and the buffers keep a half-typed time so the edit can continue.
+        type_into(&mut harness, 0, "23");
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::Date(RuleDateIntent::Time("23::".to_string()))],
+            "the hours well reports the merged pair, and a half-typed pair is \
+             still a buffer rather than an error"
+        );
+        type_into(&mut harness, 1, "30");
+        type_into(&mut harness, 2, "00");
+        assert_eq!(
+            host.take_intents(),
+            vec![
+                RuleIntent::Date(RuleDateIntent::Time("23:30:".to_string())),
+                RuleIntent::Date(RuleDateIntent::Time("23:30:00".to_string())),
+            ],
+        );
+        let draft = host.draft(0);
+        assert_eq!(draft.gap(), None);
+        assert_eq!(
+            draft.rule(),
+            Some(Rule::new(
+                MatchableField::LastPlayed,
+                Comparison::Before,
+                Some(RuleValue::DateTime(CivilDateTime {
+                    year: 2024,
+                    month: 3,
+                    day: 2,
+                    hour: 23,
+                    minute: 30,
+                    second: 0,
+                })),
+            )),
+            "the pair stores exactly as typed — the listener's own clock reads \
+             it, so no zone or instant is baked in here"
+        );
+    }
+
+    #[test]
+    fn two_date_rows_in_one_pane_open_their_own_calendars() {
+        let (mut harness, host, _mock) = date_specimen(2);
+        date_seed(
+            &mut harness,
+            &host,
+            MatchableField::LastPlayed,
+            Comparison::Before,
+            &[RuleDateIntent::Day("2024-03-02".to_string())],
+        );
+        for intent in [
+            RuleIntent::FieldChosen {
+                field: MatchableField::DateAdded,
+            },
+            RuleIntent::ComparisonChosen {
+                choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::After),
+            },
+            RuleIntent::Date(RuleDateIntent::Day("2024-05-10".to_string())),
+        ] {
+            host.drafts.borrow_mut()[1].apply(&intent);
+        }
+        host.log.borrow_mut().clear();
+        harness.step();
+        click(&mut harness, "2024-03-02");
+        assert_eq!(
+            harness.query_all_by_label("Save").count(),
+            1,
+            "one click opens one calendar"
+        );
+        click(&mut harness, "15");
+        click(&mut harness, "Save");
+        assert_eq!(
+            host.take_intents(),
+            vec![RuleIntent::Date(RuleDateIntent::Day(
+                "2024-03-15".to_string()
+            ))],
+            "and it is the clicked row's calendar: the day the picker saved is \
+             March's, not the other row's May — the caller-supplied id salts \
+             the picker's own state"
+        );
     }
 }

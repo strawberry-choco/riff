@@ -7411,6 +7411,79 @@ mod tests {
         assert_eq!(root.children.len(), 2);
     }
 
+    /// The live match line (ticket 17) paints what the app's refresh wrote:
+    /// the count folded into a sentence with the singular handled, a block in
+    /// ticket 18's own words, or a store refusal verbatim — and it is silent
+    /// only before the first refresh has run for the draft in hand.
+    #[test]
+    fn test_the_live_match_line_paints_the_count_the_block_or_the_reason() {
+        use egui_kittest::kittest::{By, Queryable as _};
+        use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
+
+        let content = sample_content();
+        for (line, expected) in [
+            (SmartPlaylistMatchLine::Matches(1), "Matches 1 song"),
+            (SmartPlaylistMatchLine::Matches(7), "Matches 7 songs"),
+            (
+                SmartPlaylistMatchLine::Uncountable("this rule needs a value".to_string()),
+                "this rule needs a value",
+            ),
+            (
+                SmartPlaylistMatchLine::Failed(
+                    "Invalid operation: cannot match this Custom Smart Playlist: a Rule Box \
+                     holds no Rule, so there is nothing to match"
+                        .to_string(),
+                ),
+                "Invalid operation: cannot match this Custom Smart Playlist: a Rule Box holds \
+                 no Rule, so there is nothing to match",
+            ),
+        ] {
+            let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+            harness.state_mut().0.match_line = Some(line);
+            harness.run();
+            assert!(
+                harness.query(By::new().label(expected)).is_some(),
+                "{expected:?} must be painted on the live match line"
+            );
+        }
+
+        // A draft whose line was never written paints no count and no reason:
+        // the line exists only once a refresh has answered for the draft.
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+        assert!(
+            harness.query_by_label_contains("Matches ").is_none(),
+            "no line before the first refresh"
+        );
+    }
+
+    /// The page's own list column shows no count beside a row: a counted row
+    /// would wear "Name (count)", so the exact label is the assertion — the
+    /// same shape ticket 12 pins for the sidebar rows.
+    #[test]
+    fn test_the_pages_list_column_rows_carry_no_count() {
+        use egui_kittest::kittest::{By, Queryable as _};
+
+        let id = PlaylistId("spl-late-night-2".to_string());
+        let content = SettingsContent {
+            custom_smart_playlists: vec![custom_list(&id, "Late night jazz")],
+            ..sample_content()
+        };
+        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        harness.run();
+
+        assert!(
+            harness.query(By::new().label("Late night jazz")).is_some(),
+            "the exact label is what a row without a count wears"
+        );
+        assert!(
+            harness
+                .query_by_label_contains("Late night jazz (")
+                .is_none(),
+            "no count folds into the page's list column"
+        );
+    }
+
     /// Removing a Rule reports its slot and takes exactly that row, leaving
     /// its siblings' positions intact.
     #[test]
@@ -22016,6 +22089,271 @@ mod whole_frame_tests {
                 "{item} reports its own typed intent, and nothing else"
             );
         }
+    }
+    // --- Ticket 17: the live match line -----------------------------------------
+    //
+    // The line counts the draft tree against the real store, on the UI thread,
+    // and refreshes when a change is **committed** — a value accepted on
+    // Enter or blur, a selection made, a row added or removed — never per
+    // keystroke and never per repaint. The cadence is pinned as read counts
+    // at the seam (the mock records the paged read), and the failure paths
+    // are pinned as what the line says instead of a number.
+
+    /// The custom-listing **count** reads the mock recorded — the page reads
+    /// that carried `limit 0`, the count sentinel — in call order. A window
+    /// read is not one, which is half the point of counting them this way.
+    fn custom_count_reads(mock: &Arc<Mutex<MockLibraryQueryStore>>) -> usize {
+        mock.lock()
+            .unwrap()
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    LibraryQueryCall::CustomSmartPlaylistPage(_, _, _, _, 0)
+                )
+            })
+            .count()
+    }
+
+    /// Open the Smart Playlists section and load the saved list through the
+    /// page's own row — the two gestures every count-line test starts from.
+    /// The sidebar row wears the same label, so the row locator is geometry:
+    /// the page's row sits in the stage, right of the sidebar's width.
+    fn open_saved_list_in_editor(shell: &mut Shell) {
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+    }
+
+    /// Opening a saved list puts its real store count on the line, and the
+    /// blank row of the empty-state draft before it is not counted: the line
+    /// reports the block with Save's own words, never "Matches 0 songs" —
+    /// while the page's list column row keeps wearing its count-less label.
+    #[test]
+    fn the_live_match_line_counts_the_opened_list_against_the_real_store() {
+        let (mut shell, _dir, _id, _store) = custom_list_store_shell();
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The page opens on a new draft holding one blank Rule row: a draft
+        // that cannot be counted is not counted.
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("this rule needs a field")
+                .is_some(),
+            "the blank row blocks the line with the words Save uses"
+        );
+        assert!(
+            shell.harness.query_by_label_contains("Matches ").is_none(),
+            "a draft that cannot be counted reports the block, never a number"
+        );
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+
+        // The loaded Rule is `Title is "alpha"` and the store holds one
+        // scanned "Alpha" among three Tracks: the line counts the real store.
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 1 song"))
+                .is_some(),
+            "the live line counts the loaded list's real matches"
+        );
+        assert!(
+            shell
+                .harness
+                .query_all_by_label("Late night jazz")
+                .any(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W),
+            "the list column's row is the exact label — no count folded in"
+        );
+    }
+
+    /// The cadence, pinned as read counts at the seam: opening the list is
+    /// one page read for the total alone, then one read per committed shape —
+    /// a repaint adds none, a keystroke adds none, and a value committed back
+    /// to a shape already counted is served from the held answer.
+    #[test]
+    fn the_live_match_line_reads_once_per_committed_shape_and_never_per_keystroke() {
+        let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: std::collections::HashMap::from([(
+                PlaylistId("spl-late-night-1".to_string()),
+                one_rule_tree(),
+            )]),
+            custom_page: vec![
+                crate::test_utils::create_test_track("0", "f:\\0.mp3"),
+                crate::test_utils::create_test_track("1", "f:\\1.mp3"),
+                crate::test_utils::create_test_track("2", "f:\\2.mp3"),
+            ],
+            ..MockLibraryQueryStore::default()
+        });
+
+        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            0,
+            "the empty-state draft's blank row is not counted, so the seam is never asked"
+        );
+
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the page's own row for the saved list");
+        pane_row.click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 3 songs"))
+                .is_some(),
+            "the loaded shape's count is on the line"
+        );
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "one read for the loaded shape — the total alone"
+        );
+        assert!(
+            mock.lock().unwrap().window_calls().is_empty(),
+            "and a count read is never a window read"
+        );
+
+        // Repaints of the unchanged tree cost no further read.
+        shell.harness.step();
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "a repaint of an unchanged tree does not re-query"
+        );
+
+        // Typing in the value well moves the buffer, not the committed
+        // answer, so the counted shape is unchanged and no read follows.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alpha"),
+            )
+            .expect("the value well holds the loaded value")
+            .focus();
+        shell.harness.step();
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alpha"),
+            )
+            .expect("the well survives being focused")
+            .type_text("x");
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            1,
+            "typing without committing does not re-query"
+        );
+
+        // Enter commits the typed value: a new shape, one read.
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            2,
+            "an accepted value is one committed shape, one read"
+        );
+
+        // Back to the value the line already counted, committed again: the
+        // held answer is served and no third read is issued.
+        shell
+            .harness
+            .query(
+                By::new()
+                    .role(egui::accesskit::Role::TextInput)
+                    .value("alphax"),
+            )
+            .expect("the committed value is the buffer now")
+            .focus();
+        shell.harness.step();
+        shell.harness.key_press(egui::Key::Backspace);
+        shell.harness.step();
+        shell.harness.key_press(egui::Key::Enter);
+        shell.harness.step();
+        shell.harness.step();
+        assert_eq!(
+            custom_count_reads(&mock),
+            2,
+            "editing the Rule back to its previous value reuses the held count"
+        );
+    }
+
+    /// A tree the engine cannot compute puts the store's own reason on the
+    /// line — the same words the listing would show for the same tree — and
+    /// never "Matches 0 songs".
+    #[test]
+    fn a_refused_count_shows_the_stores_reason_and_never_zero_songs() {
+        let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
+            custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
+            smart_playlist_trees: std::collections::HashMap::from([(
+                PlaylistId("spl-late-night-1".to_string()),
+                one_rule_tree(),
+            )]),
+            failing: vec![FailingQuery::CustomSmartPlaylistCount],
+            ..MockLibraryQueryStore::default()
+        });
+
+        open_saved_list_in_editor(&mut shell);
+
+        assert!(
+            shell
+                .harness
+                .query_by_label_contains("custom smart playlist boom")
+                .is_some(),
+            "the store's own reason is what the line shows"
+        );
+        assert!(
+            shell
+                .harness
+                .query(By::new().label("Matches 0 songs"))
+                .is_none(),
+            "a refused count is never rendered as 0 songs"
+        );
     }
 }
 

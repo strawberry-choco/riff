@@ -39,6 +39,17 @@
 //! projection enforces the consequence: such a list issues **no query at
 //! all** — it matches nothing — and carries why out through
 //! [`CustomListDegraded`] instead of collapsing to a silent zero.
+//!
+//! ## The draft tree's count is keyed on the tree, not on a generation
+//!
+//! The editor's live "matches N songs" line counts a tree that is **not
+//! saved**: no [`PlaylistId`] to look one up by, and a shape that changes
+//! several times inside one library generation. [`Self::count_tree`] serves
+//! it over the same bounded Listing Page read (the total alone, `limit 0`),
+//! and holds each answer against the **compiled tree's shape** for the
+//! library generation it was read at — so a repaint of an unchanged tree,
+//! and an edit that brings a Rule back to a value it held before, both come
+//! from the hold instead of the store.
 
 use crate::app::projection::windowed_list::WindowedListProjection;
 use crate::app::store::{
@@ -137,7 +148,8 @@ type PageReader<'a> = &'a mut dyn FnMut(
 ) -> Result<Page<Track>, StoreError>;
 
 /// The bounded window-plus-count projection over Custom Smart Playlist
-/// listings, plus the generation-cached tree read those rows compile from.
+/// listings, plus the generation-cached tree read those rows compile from
+/// and the shape-keyed hold behind the editor's live count.
 ///
 /// One instance serves whichever list is open: retargeting happens through
 /// [`CustomListKey`] on every call, so switching lists, sorts, or needles
@@ -154,6 +166,14 @@ pub struct CustomPlaylistProjection {
     /// The bounded windows and total, keyed by the whole query signature,
     /// stamped at the library generation.
     windows: WindowedListProjection<CustomListKey, Track>,
+    /// The draft trees' held match counts, one bundle per library
+    /// generation, keyed inside the bundle on the compiled shape
+    /// ([`Self::count_tree`]). Its own cache because it is its own question:
+    /// a draft has no list id to key the trees cache on and no playlist
+    /// generation to stamp, and its shape changes several times inside one
+    /// library generation, which is exactly what a per-generation hold
+    /// serves.
+    tree_counts: GenerationCache<(), TreeCounts>,
     /// Which list the last successful tree load answered — [`Self::cached_tree`]
     /// only serves a tree to the id it was loaded for; a failed load leaves
     /// the previous entry untouched (the `GenerationCache` invariant).
@@ -175,6 +195,54 @@ enum NoQuery {
     Unreadable(String),
 }
 
+/// How many distinct draft-tree shapes one library generation's counts are
+/// held for before the oldest leaves.
+///
+/// The hold exists so a repaint and an edit-back cost no store read; a
+/// listener writing a long rule set can commit more shapes than this inside
+/// one generation, and each shape beyond the bound is simply re-read when it
+/// comes back — correct, just not free. The bound keeps the hold small the
+/// way every other cache here is bounded, and it is deliberately not the
+/// window house's numbers: those count row windows, this counts whole-tree
+/// answers.
+const TREE_COUNT_HOLD_CAP: usize = 8;
+
+/// The match counts held for one library generation, each against the
+/// compiled tree shape that produced it.
+///
+/// A `Vec` rather than a map because a compiled tree is a compound value
+/// [`RuleTree`] does not hash; the hold is bounded, and a linear scan over
+/// a handful of small trees costs far less than the store read it saves.
+#[derive(Default)]
+struct TreeCounts {
+    /// The held `(shape, count)` pairs, oldest first.
+    held: Vec<(RuleTree, usize)>,
+}
+
+impl TreeCounts {
+    /// The count held for `shape`, or `None` when this generation has not
+    /// answered this shape yet.
+    fn count(&self, shape: &RuleTree) -> Option<usize> {
+        self.held
+            .iter()
+            .find(|(held, _)| held == shape)
+            .map(|(_, count)| *count)
+    }
+
+    /// Hold `count` as the answer for `shape`, replacing an earlier answer
+    /// for the same shape and letting the oldest shape leave at the bound.
+    fn hold(&mut self, shape: RuleTree, count: usize) {
+        if let Some(slot) = self.held.iter_mut().find(|(held, _)| held == &shape) {
+            slot.1 = count;
+            return;
+        }
+        if self.held.len() == TREE_COUNT_HOLD_CAP {
+            self.held.remove(0);
+        }
+        self.held.push((shape, count));
+    }
+}
+
 impl CustomPlaylistProjection {
     /// Start the projection observing both session counters: the playlist
     /// generation for the tree read, the library generation for the rows.
@@ -182,7 +250,11 @@ impl CustomPlaylistProjection {
     pub fn new(playlist_generation: StoreGeneration, library_generation: StoreGeneration) -> Self {
         Self {
             trees: GenerationCache::new(playlist_generation),
-            windows: WindowedListProjection::new(library_generation, CustomListKey::never_opened()),
+            windows: WindowedListProjection::new(
+                library_generation.clone(),
+                CustomListKey::never_opened(),
+            ),
+            tree_counts: GenerationCache::new(library_generation),
             loaded_for: None,
             queried_for: None,
         }
@@ -350,6 +422,65 @@ impl CustomPlaylistProjection {
             self.trees.peek().cloned().flatten()
         } else {
             None
+        }
+    }
+
+    /// How many Tracks the tree a draft spells currently matches — the live
+    /// count behind the editor's "matches N songs" line, read for a tree
+    /// rather than a saved list.
+    ///
+    /// A draft has no [`PlaylistId`] and no playlist generation of its own,
+    /// which is why the id-keyed reads above cannot serve it: there is no
+    /// stored tree to load and no playlist epoch to stamp, and its shape
+    /// changes several times inside one library generation. What there is,
+    /// is the tree itself — so this read compiles it through the same ONE
+    /// bridge the saved listing uses (an Unreadable Rule means no query at
+    /// all, with the listing's own reason) and asks the same bounded Listing
+    /// Page for the total alone (`limit 0`, the count sentinel). The answer
+    /// is held against the **compiled shape** for the library generation it
+    /// was read at, so a repaint of an unchanged tree reuses the hold, and
+    /// so does a Rule edited back to a value it held before; a library write
+    /// — which is what moves which tracks match — refetches.
+    ///
+    /// # Errors
+    /// `Err` carries the value to draw beside the reason: the last good
+    /// count for this exact shape (or `0` when nothing is held), and the
+    /// store's refusal verbatim when the engine cannot compute the tree —
+    /// which is the same reason the listing shows for the same tree.
+    pub fn count_tree(
+        &mut self,
+        tree: &SmartPlaylistTree,
+        read_page: PageReader<'_>,
+    ) -> Result<usize, CustomListDegraded<usize>> {
+        let Some(shape) = RuleTree::from_smart_playlist_tree(tree) else {
+            return Err(CustomListDegraded {
+                value: 0,
+                reason: unreadable_reason(tree),
+            });
+        };
+        let held_shape = shape.clone();
+        let result = self.tree_counts.level(
+            &(),
+            |held| held.count(&shape),
+            || read_page(&shape, TrackListOrder::default(), None, 0, 0).map(|page| page.total()),
+            |held, count| {
+                held.hold(held_shape, count);
+                count
+            },
+        );
+        match result {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                tracing::warn!("Failed to count the tracks a draft Rule tree matches: {error}");
+                Err(CustomListDegraded {
+                    value: self
+                        .tree_counts
+                        .peek()
+                        .and_then(|held| held.count(&shape))
+                        .unwrap_or(0),
+                    reason: error.to_string(),
+                })
+            }
         }
     }
 

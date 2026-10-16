@@ -605,3 +605,245 @@ fn the_stores_refusal_is_carried_verbatim() {
     editor.refuse_save(text.clone());
     assert_eq!(editor.refusal, Some(SmartPlaylistRefusal::Save(text)));
 }
+
+// --- The live match line's committed tree (ticket 17) ---------------------------
+//
+// What the line counts is the draft's **committed** tree: every Rule row
+// spelled from the answers a commit landed, never from the live buffers. The
+// distinction is the whole cadence — a keystroke edits a buffer, so a shape
+// derived from buffers would move (and re-query) on every keystroke. The
+// blocks reuse ticket 18's own ladder and sentences, so the line and a
+// refused Save teach the same words.
+
+/// A row the listener has committed through the row's own intents, so its
+/// buffers and its committed answer agree exactly as a real Enter leaves
+/// them.
+fn committed_rule(field: MatchableField, comparison: Comparison, value: RuleValue) -> RuleDraft {
+    let mut draft = RuleDraft::blank();
+    draft.apply(&RuleIntent::FieldChosen { field });
+    draft.apply(&RuleIntent::ComparisonChosen {
+        choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(comparison),
+    });
+    draft.apply(&RuleIntent::ValueCommitted { value });
+    draft
+}
+
+/// The `Title is "alpha"` tree one committed root row spells.
+fn one_title_rule_tree(value: &str) -> SmartPlaylistTree {
+    SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+        vec![RuleChild::Rule(Rule::new(
+            MatchableField::Title,
+            Comparison::Is,
+            Some(RuleValue::Text(value.to_string())),
+        ))],
+    )))
+}
+
+/// A loaded list is wholly committed, so the tree the line counts is the
+/// tree that was stored — boxes, order and values included.
+#[test]
+fn the_committed_tree_of_a_loaded_draft_is_the_stored_tree() {
+    let tree = nested_tree();
+    let editor = editor_holding(&tree);
+    assert_eq!(
+        editor.committed_tree().expect("a loaded draft is whole"),
+        tree,
+        "the loaded values are committed answers, so the derived tree is the stored one"
+    );
+}
+
+/// A half-filled row is not counted: the line reports the block, naming what
+/// the row is still missing — the same sentence Save refuses with, in Save's
+/// reading order.
+#[test]
+fn a_half_filled_row_blocks_the_count_and_names_what_is_missing() {
+    let mut editor = SmartPlaylistsEditor::default();
+    assert_eq!(
+        editor
+            .committed_tree()
+            .expect_err("the blank row has no field"),
+        "this rule needs a field"
+    );
+
+    let mut draft = RuleDraft::blank();
+    draft.apply(&RuleIntent::FieldChosen {
+        field: MatchableField::Genre,
+    });
+    editor.root.children[0] = RuleChildDraft::Rule(draft);
+    assert_eq!(
+        editor.committed_tree().expect_err("no comparison chosen"),
+        "this rule needs a comparison"
+    );
+
+    let mut draft = RuleDraft::blank();
+    draft.apply(&RuleIntent::FieldChosen {
+        field: MatchableField::Genre,
+    });
+    draft.apply(&RuleIntent::ComparisonChosen {
+        choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Is),
+    });
+    editor.root.children[0] = RuleChildDraft::Rule(draft);
+    assert_eq!(
+        editor.committed_tree().expect_err("no value committed"),
+        "this rule needs a value"
+    );
+}
+
+/// An Unreadable Rule blocks the count ahead of a half-filled one — ticket
+/// 18's ladder order, and the same sentence Save uses — and the draft cannot
+/// be counted at all while it holds one.
+#[test]
+fn an_unreadable_row_blocks_the_count_ahead_of_a_half_filled_one() {
+    let root = RootBox::new(
+        RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+            MatchableField::Title,
+            Comparison::Is,
+            Some(RuleValue::Text("kept".to_string())),
+        ))]),
+    );
+    let tree = SmartPlaylistTree::new(root).with_unreadable(vec![unreadable(Vec::new(), 1)]);
+    let mut editor = editor_holding(&tree);
+    editor.add_rule(&BoxPath::root()); // a blank, half-filled row too
+
+    assert_eq!(
+        editor
+            .committed_tree()
+            .expect_err("the unreadable row blocks"),
+        "riff can't understand this rule — delete the row to save the list",
+        "the block names the unreadable row first, as Save does"
+    );
+
+    // The row's own delete control is the way out, and the count follows.
+    editor.remove_child(&BoxPath::root(), 1);
+    editor.remove_child(&BoxPath::root(), 1);
+    assert_eq!(
+        editor.committed_tree().expect("whole again"),
+        one_title_rule_tree("kept")
+    );
+}
+
+/// Typing edits a row's buffer and nothing else: the committed tree — the
+/// shape the count is keyed on — does not move until the value is committed
+/// on Enter or blur, which is what keeps a keystroke from re-querying.
+#[test]
+fn typing_a_value_changes_no_committed_answer() {
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.root.children[0] = RuleChildDraft::Rule(committed_rule(
+        MatchableField::Title,
+        Comparison::Is,
+        RuleValue::Text("rock".to_string()),
+    ));
+    let counted = editor.committed_tree().expect("the row is whole");
+    assert_eq!(counted, one_title_rule_tree("rock"));
+
+    // What typing does to the row: the buffer changes, the answer does not.
+    let RuleChildDraft::Rule(draft) = &mut editor.root.children[0] else {
+        panic!("the row is a Rule");
+    };
+    draft.value = riff_gui::ui::rule_row::RuleValueDraft::Text("jazz".to_string());
+    assert_eq!(
+        editor.committed_tree().expect("still whole"),
+        counted,
+        "a keystroke lands in the buffer only, so the counted shape is unchanged"
+    );
+
+    // Committing the typed value is what moves the shape.
+    let RuleChildDraft::Rule(draft) = &mut editor.root.children[0] else {
+        panic!("the row is a Rule");
+    };
+    draft.apply(&RuleIntent::ValueCommitted {
+        value: RuleValue::Text("jazz".to_string()),
+    });
+    assert_eq!(
+        editor.committed_tree().expect("the commit lands it"),
+        one_title_rule_tree("jazz"),
+        "Enter or blur is what the line counts"
+    );
+}
+
+/// Committing one value, then another, then the first one back spells the
+/// first tree again — byte for byte, which is what lets the seam serve the
+/// held count instead of querying a third time.
+#[test]
+fn committing_the_previous_value_back_spells_the_previous_tree() {
+    let mut editor = SmartPlaylistsEditor::default();
+    let RuleChildDraft::Rule(draft) = &mut editor.root.children[0] else {
+        panic!("the default draft's row is a Rule");
+    };
+    draft.apply(&RuleIntent::FieldChosen {
+        field: MatchableField::Title,
+    });
+    draft.apply(&RuleIntent::ComparisonChosen {
+        choice: riff_gui::ui::rule_row::ComparisonChoice::Stored(Comparison::Is),
+    });
+
+    let spell = |editor: &mut SmartPlaylistsEditor, value: &str| {
+        let RuleChildDraft::Rule(draft) = &mut editor.root.children[0] else {
+            panic!("the row is a Rule");
+        };
+        draft.apply(&RuleIntent::ValueCommitted {
+            value: RuleValue::Text(value.to_string()),
+        });
+        editor.committed_tree().expect("every row is whole")
+    };
+
+    let rock = spell(&mut editor, "rock");
+    let jazz = spell(&mut editor, "jazz");
+    let back = spell(&mut editor, "rock");
+    assert_ne!(rock, jazz);
+    assert_eq!(
+        back, rock,
+        "the earlier value's tree is spelled again, so the seam's shape key hits"
+    );
+}
+
+/// The line's own sentences: the count folds into a sentence, and a block or
+/// a failure is shown exactly as it was given — never as a number, and never
+/// as "0 songs".
+#[test]
+fn the_match_line_says_the_count_or_the_reason_but_never_zero() {
+    use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
+
+    assert_eq!(
+        SmartPlaylistMatchLine::Matches(0).text(),
+        "Matches 0 songs",
+        "a counted empty list is an honest zero"
+    );
+    assert_eq!(SmartPlaylistMatchLine::Matches(1).text(), "Matches 1 song");
+    assert_eq!(
+        SmartPlaylistMatchLine::Matches(42).text(),
+        "Matches 42 songs"
+    );
+    assert_eq!(
+        SmartPlaylistMatchLine::Uncountable("this rule needs a value".to_string()).text(),
+        "this rule needs a value",
+        "the block is reported verbatim"
+    );
+    assert_eq!(
+        SmartPlaylistMatchLine::Failed(
+            "Invalid operation: cannot match this Custom Smart \
+            Playlist: a Rule Box holds no Rule, so there is nothing to match"
+                .to_string()
+        )
+        .text(),
+        "Invalid operation: cannot match this Custom Smart Playlist: a Rule Box holds no Rule, \
+         so there is nothing to match",
+        "a failure is the store's own words — a reason, never a number"
+    );
+}
+
+/// A replaced draft carries no answer from the draft it replaced: the line
+/// is whatever the next refresh derives from the draft in hand.
+#[test]
+fn a_reloaded_draft_starts_with_no_held_match_line() {
+    use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
+
+    let tree = nested_tree();
+    let mut editor = editor_holding(&tree);
+    editor.match_line = Some(SmartPlaylistMatchLine::Matches(3));
+    editor.load_saved(&list("spl-other-1", "Other"), Some(&tree));
+    assert_eq!(
+        editor.match_line, None,
+        "switching lists drops the previous draft's answer with the draft"
+    );
+}

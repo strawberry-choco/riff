@@ -57,7 +57,9 @@ use crate::ui::sidebar::{self, TreeRow};
 use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
 use riff_backend::domain::field_catalog::{ValueType, spec};
-use riff_backend::domain::{Combine, MatchableField, PlaylistId};
+use riff_backend::domain::{
+    Combine, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
+};
 use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
 use riff_gui_components::ghost_icon_button::ghost_icon_button;
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
@@ -117,6 +119,51 @@ pub enum SmartPlaylistRefusal {
     /// field owns it: the Application Store refused the write as a whole and
     /// this is its own string, verbatim.
     Save(String),
+}
+
+/// What the editor's live match line shows: how many Tracks the draft tree
+/// matches, or why no number can be shown (ticket 17).
+///
+/// The distinction between the two reason variants is where the reason came
+/// from, and the pane paints them differently: a draft the listener has not
+/// finished blocks the count (a hint, phrased with the same words a refused
+/// Save uses), while a tree the engine cannot compute is a broken answer and
+/// says so in the store's own words, verbatim — never as a number, and never
+/// as "0 songs".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmartPlaylistMatchLine {
+    /// The draft tree was counted: the Tracks it matches.
+    Matches(usize),
+    /// The draft cannot be counted as it stands: a half-filled Rule named by
+    /// what it is missing, or an Unreadable Rule. The sentence is the block
+    /// Save refuses the same tree with.
+    Uncountable(String),
+    /// The engine could not compute the tree: the store's own reason, the
+    /// same reason the listing shows for the same tree.
+    Failed(String),
+}
+
+impl SmartPlaylistMatchLine {
+    /// The words the line shows: the count in a sentence, or the reason
+    /// exactly as it was given.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Matches(1) => "Matches 1 song".to_string(),
+            Self::Matches(count) => format!("Matches {count} songs"),
+            Self::Uncountable(reason) | Self::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
+/// Why the committed walk cannot spell a tree.
+enum DraftBlock {
+    /// The draft holds a stored Rule this build cannot read — for which no
+    /// tree can be written, and none is invented.
+    Unreadable,
+    /// The first Rule row whose committed answers are not whole, and what it
+    /// is still missing.
+    Gap(RuleGap),
 }
 
 /// The state a draft was opened from: the name and the tree as the store last
@@ -190,6 +237,14 @@ pub struct SmartPlaylistsEditor {
     /// single slot is the tag editor's shape (`draft.error`), shared, and it
     /// is cleared only by a Save that passes every local check.
     pub refusal: Option<SmartPlaylistRefusal>,
+    /// What the live match line shows: the count of the draft's committed
+    /// tree, or why no number can be shown. Written by the app's per-frame
+    /// refresh through [`SessionViews::custom_list_match_count`]
+    /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
+    /// costs — and painted by the pane. `None` until the first refresh has
+    /// run for the draft in hand; a replaced draft carries no answer from
+    /// the draft it replaced.
+    pub match_line: Option<SmartPlaylistMatchLine>,
 }
 
 impl Default for SmartPlaylistsEditor {
@@ -208,6 +263,7 @@ impl Default for SmartPlaylistsEditor {
             picker: None,
             pending_picker: None,
             refusal: None,
+            match_line: None,
         }
     }
 }
@@ -374,10 +430,53 @@ impl SmartPlaylistsEditor {
         self.picker = None;
         self.pending_picker = None;
         self.refusal = None;
+        // The live match line is an answer about the draft being replaced:
+        // it goes with it, and the next refresh derives the line for the
+        // draft in hand.
+        self.match_line = None;
         self.original = SmartPlaylistOriginal {
             name: self.name.clone(),
             root: self.root.clone(),
         };
+    }
+
+    /// The tree this draft **counts** as it stands — every Rule row spelled
+    /// from its committed answers, every Box's combine, in the stored shape —
+    /// or the reason it cannot be counted at all.
+    ///
+    /// The **committed** answers, not the live buffers: a well's buffer
+    /// changes on every keystroke ([`RuleDraft::value`] is the row's typing
+    /// state), so a shape derived from buffers would move per keystroke and
+    /// re-query with it — the one thing the live line must not do. What a
+    /// value accepted on Enter or blur, a selection, or a picker choice
+    /// lands is [`RuleDraft::committed_value`], and that is what this walk
+    /// spells. A value typed but not yet committed is therefore not part of
+    /// the counted tree: the line keeps the previous answer (or block) until
+    /// the commit, which is the cadence rule, not an omission.
+    ///
+    /// The block, when there is one, is ticket 18's own ladder in its own
+    /// order: an Unreadable Rule first — the one row a listener cannot
+    /// resolve by completing it — then the first half-filled row, named by
+    /// what it is missing ([`RuleGap`]). The sentences are [`gap_reason`]'s
+    /// and `UNREADABLE_BLOCK_REASON`'s, the same words a refused Save
+    /// paints, so the line and Save teach one vocabulary.
+    ///
+    /// `Err` is the sentence to paint **instead of a number** — never a zero
+    /// standing in for a count, and never a tree riff cannot spell.
+    pub fn committed_tree(&self) -> Result<SmartPlaylistTree, String> {
+        if first_unreadable(&self.root, &BoxPath::root()).is_some() {
+            return Err(UNREADABLE_BLOCK_REASON.to_string());
+        }
+        // The walk's own Unreadable arm is unreachable through the check
+        // above, exactly as `prepare_save`'s spelling arm is — but a draft
+        // that cannot spell a tree must never be counted, so it reports the
+        // block rather than falling through.
+        committed_rule_box(&self.root)
+            .map(|root| SmartPlaylistTree::new(RootBox::new(root)))
+            .map_err(|block| match block {
+                DraftBlock::Unreadable => UNREADABLE_BLOCK_REASON.to_string(),
+                DraftBlock::Gap(gap) => gap_reason(gap).to_string(),
+            })
     }
 
     /// One row's library picker opened for `field` at `slot`: remember the
@@ -565,6 +664,77 @@ fn gap_reason(gap: RuleGap) -> &'static str {
             "this rule's value can't be read as this field's kind"
         }
     }
+}
+
+/// The committed walk's spelling of one Box: its combine, and its children —
+/// Rules from their committed answers, Boxes recursively — or the first block
+/// in draw order.
+fn committed_rule_box(boxed: &RuleBoxDraft) -> Result<RuleBox, DraftBlock> {
+    let mut children = Vec::with_capacity(boxed.children.len());
+    for child in &boxed.children {
+        children.push(match child {
+            RuleChildDraft::Rule(draft) => RuleChild::Rule(committed_rule(draft)?),
+            RuleChildDraft::Box(nested) => RuleChild::Box(committed_rule_box(nested)?),
+            RuleChildDraft::Unreadable(_) => return Err(DraftBlock::Unreadable),
+        });
+    }
+    Ok(RuleBox::new(boxed.combine).with_children(children))
+}
+
+/// The Rule one row's **committed** answers spell, or the part they are
+/// still missing — the same questions [`RuleDraft::gap`] and
+/// [`RuleDraft::rule`] ask, taken over the committed value
+/// ([`RuleDraft::committed_value`]) instead of the parse of the live
+/// buffers.
+///
+/// The committed value can hold no unparseable answer: a commit only ever
+/// lands a value the row parsed against the field's own type, so the only
+/// value gap this walk can find is a missing one.
+fn committed_rule(draft: &RuleDraft) -> Result<Rule, DraftBlock> {
+    let Some(field) = draft.field else {
+        return Err(DraftBlock::Gap(RuleGap::Field));
+    };
+    let Some(comparison) = draft.comparison else {
+        return Err(DraftBlock::Gap(RuleGap::Comparison));
+    };
+    if !spec(field).permits(comparison) {
+        return Err(DraftBlock::Gap(RuleGap::Comparison));
+    }
+    let value = if draft.value_widgets().is_empty() {
+        None
+    } else {
+        Some(
+            draft
+                .committed_value()
+                .cloned()
+                .ok_or(DraftBlock::Gap(RuleGap::Value(ValueGap::Missing)))?,
+        )
+    };
+    let rule = if draft.negated {
+        Rule::new(field, comparison, value).negated()
+    } else {
+        Rule::new(field, comparison, value)
+    };
+    Ok(rule)
+}
+
+/// The live match line: the count, or the reason no number can be shown.
+///
+/// The count is secondary text. A draft the listener has not finished blocks
+/// it in the hint tone — its sentence is the same one a refused Save uses, so
+/// it reads as what is still owed, not as an error — while a tree the engine
+/// cannot compute is a broken answer and wears the error tone.
+fn match_line_label(ui: &mut egui::Ui, palette: &Palette, line: &SmartPlaylistMatchLine) {
+    let color = match line {
+        SmartPlaylistMatchLine::Matches(_) => palette.ink_2,
+        SmartPlaylistMatchLine::Uncountable(_) => palette.ink_3,
+        SmartPlaylistMatchLine::Failed(_) => palette.error,
+    };
+    ui.label(
+        egui::RichText::new(line.text())
+            .color(color)
+            .size(theme::TEXT_XS),
+    );
 }
 
 /// Which picker values a row asked for: the catalog's `Number` fields read
@@ -810,6 +980,15 @@ fn editor_column(
     if let Some(SmartPlaylistRefusal::Name(reason)) = &editor.refusal {
         ui.add_space(theme::SPACE_XS);
         ui.colored_label(palette.error, reason);
+    }
+
+    // The live match line (ticket 17): how many Tracks the committed tree
+    // matches, or why no number can be shown. It paints what the app's
+    // refresh last wrote — nothing on this paint path reaches a store — and
+    // it is silent only on a frame before that refresh has run.
+    if let Some(line) = &editor.match_line {
+        ui.add_space(theme::SPACE_XS);
+        match_line_label(ui, palette, line);
     }
     ui.add_space(theme::SPACE_MD);
 

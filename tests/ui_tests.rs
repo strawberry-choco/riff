@@ -18741,7 +18741,21 @@ mod whole_frame_tests {
         // The value is scoped to the text input on purpose — the list's own
         // sidebar-style row is a `Role::Label` node, whose accesskit value is
         // its label text, so a bare value query matches two nodes here.
-        shell.harness.get_by_label("Late night jazz").click();
+        //
+        // The click is scoped to the PAGE, not the sidebar: ticket 12 put the
+        // listener's lists in the sidebar too, so this label now matches two
+        // nodes — the sidebar's own row and the page's. Both wear the same
+        // `sidebar::tree_row` primitive and the a11y tree cannot tell them
+        // apart, so the locator is geometry: the page's row sits in the
+        // stage, right of the sidebar's width.
+        let pane_row = shell
+            .harness
+            .query_all_by_label("Late night jazz")
+            .find(|node| {
+                node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W
+            })
+            .expect("the page's own row for the saved list");
+        pane_row.click();
         shell.harness.step();
         shell.harness.step();
         shell.harness.step();

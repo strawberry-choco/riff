@@ -586,7 +586,8 @@ fn duration_seconds(track: &Track) -> f32 {
 mod tests {
     use super::*;
     use crate::app::errors::LibraryError;
-    use crate::app::store::{FullScanSummary, StoreError};
+    use crate::app::store::{FullScanSummary, SmartPlaylistTree, StoreError};
+    use riff_persistence::playlist::PlaylistId;
     use riff_persistence::test_support::{StubLibraryMutationStore, StubLibraryQueryStore};
     use riff_persistence::track::TrackMetadata;
     use std::collections::HashSet;
@@ -900,6 +901,30 @@ mod tests {
         }
         fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
             self.noop.stamp_metadata_version(version)
+        }
+        fn save_smart_playlist(
+            &mut self,
+            id: Option<&PlaylistId>,
+            name: &str,
+            tree: &SmartPlaylistTree,
+        ) -> Result<PlaylistId, StoreError> {
+            self.noop.save_smart_playlist(id, name, tree)
+        }
+        fn rename_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+            new_name: &str,
+        ) -> Result<bool, StoreError> {
+            self.noop.rename_smart_playlist(id, new_name)
+        }
+        fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
+            self.noop.delete_smart_playlist(id)
+        }
+        fn duplicate_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+        ) -> Result<Option<PlaylistId>, StoreError> {
+            self.noop.duplicate_smart_playlist(id)
         }
     }
 

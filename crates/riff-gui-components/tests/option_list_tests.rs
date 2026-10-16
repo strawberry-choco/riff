@@ -46,7 +46,7 @@ fn selector_harness(
     let options = choices();
     // The draw closure MOVES its fixtures in, so it is `'static` and the
     // harness it builds owns everything it reads.
-    let harness = egui_kittest::Harness::builder()
+    egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(
@@ -65,8 +65,7 @@ fn selector_harness(
                 }
             },
             initial.map(str::to_string),
-        );
-    harness
+        )
 }
 
 /// A click on an option reports that option's key into the caller's buffer,

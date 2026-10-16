@@ -20,8 +20,8 @@ use riff_persistence::field_catalog::ValueType;
 use riff_persistence::playlist::{Playlist, PlaylistId};
 use riff_persistence::store::{
     FullScanSummary, LOST_GEMS_THRESHOLD, LibraryCounts, LibraryMutationStore, LibraryQueryStore,
-    Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SortDirection,
-    StoreChanged, StoreGeneration, StoreMigrations, TrackListOrder, WatchState,
+    Page, PlaylistEntry, PlaylistStore, ScalarSettings, Settings, SettingsStore, SmartPlaylistTree,
+    SortDirection, StoreChanged, StoreGeneration, StoreMigrations, TrackListOrder, WatchState,
 };
 use riff_persistence::sync::MutexExt;
 use riff_persistence::track::{
@@ -964,11 +964,18 @@ fn system_time_from_nanos(nanos: i64) -> SystemTime {
     }
 }
 
-fn nanos_from_system_time(time: SystemTime) -> i64 {
+pub(crate) fn nanos_from_system_time(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
         Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
     }
+}
+
+/// The clock a Custom Smart Playlist row is stamped with: the same
+/// Unix-nanosecond reading the play-history facts use, so `created_at` is
+/// comparable with them.
+pub(crate) fn now_nanos() -> i64 {
+    nanos_from_system_time(SystemTime::now())
 }
 
 impl PlaylistStore for SqliteStore {
@@ -1365,6 +1372,44 @@ impl LibraryMutationStore for SqliteStore {
             },
         )
     }
+
+    // The four Custom Smart Playlist writes. Each is one durable transaction of
+    // the same shape as every mutation above, and each moves the **playlist**
+    // generation — a list's name and Rule tree are list identity — while which
+    // Tracks match moves with the Library generation, because that is a query
+    // over Tracks. The odd pairing is intentional and is stated on the port.
+    //
+    // Bodies live in [`super::smart_playlist_tree`], one module holding the whole
+    // rule-tree storage question, so this file stays the place where the
+    // transaction and generation discipline is written once.
+
+    fn save_smart_playlist(
+        &mut self,
+        id: Option<&PlaylistId>,
+        name: &str,
+        tree: &SmartPlaylistTree,
+    ) -> Result<PlaylistId, StoreError> {
+        self.save_smart_playlist_write(id, name, tree)
+    }
+
+    fn rename_smart_playlist(
+        &mut self,
+        id: &PlaylistId,
+        new_name: &str,
+    ) -> Result<bool, StoreError> {
+        self.rename_smart_playlist_write(id, new_name)
+    }
+
+    fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
+        self.delete_smart_playlist_write(id)
+    }
+
+    fn duplicate_smart_playlist(
+        &mut self,
+        id: &PlaylistId,
+    ) -> Result<Option<PlaylistId>, StoreError> {
+        self.duplicate_smart_playlist_write(id)
+    }
 }
 
 /// UTC epoch-nanosecond integer encoding for a `Duration` (the store's
@@ -1421,7 +1466,7 @@ fn op_error(context: &str, e: impl std::fmt::Display) -> StoreError {
 /// by each mutation instead of being derived from it.
 /// [`None`](Self::None) is the durable write no Session Projection keys on.
 #[derive(Clone, Copy)]
-enum SessionGeneration {
+pub(crate) enum SessionGeneration {
     /// The session Library generation
     /// ([`SqliteStore::library_generation`]), whose notice is
     /// [`StoreChanged::Library`].
@@ -1454,7 +1499,7 @@ impl SqliteStore {
     /// pattern). The writes that must NOT bump say so twice over —
     /// [`SessionGeneration::None`] and an always-false predicate — so the
     /// exception is stated rather than implied by a line that is not there.
-    fn mutate<T>(
+    pub(crate) fn mutate<T>(
         &mut self,
         generation: SessionGeneration,
         committed: impl FnOnce(&Result<T, StoreError>) -> bool,
@@ -3020,6 +3065,19 @@ impl LibraryQueryStore for SqliteStore {
         })
         .map_err(|e| op_error("picker number read failed", e))
     }
+
+    /// One acquisition, three tables: the playlist's Root Box, every nested Rule
+    /// Box and every Rule, in the stored sibling order, with any Rule this build
+    /// cannot read reported beside the tree.
+    ///
+    /// Body lives in [`super::smart_playlist_tree`] with the writes that produce
+    /// the rows it reads.
+    fn smart_playlist_tree(
+        &self,
+        id: &PlaylistId,
+    ) -> Result<Option<SmartPlaylistTree>, StoreError> {
+        self.read_smart_playlist_tree(id)
+    }
 }
 
 impl SqliteStore {
@@ -3753,7 +3811,7 @@ const SIDEBAR_NAME_TABLES: &[&str] = &["playlists", "smart_playlists"];
 /// The code rides along as a constraint violation because that is precisely
 /// the constraint the database cannot express across two tables — the check
 /// itself is this crate's Rust, never a SQL failure.
-fn store_refusal(reason: String) -> rusqlite::Error {
+pub(crate) fn store_refusal(reason: String) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
         Some(reason),

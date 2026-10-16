@@ -1,8 +1,9 @@
 # riff-gui — the frontend: egui UI, tray icon, native dialogs, and the
 # `riff` binary entry point.
 #
-# Owns egui/eframe (egui workspace-inherited), epi/egui_extras, rfd, and
-# tray-icon/muda. The design authority (`riff-gui-theme`) and the
+# Owns egui/eframe (egui workspace-inherited), epi/egui_extras (`image` +
+# `datepicker` + the `serde` the datepicker needs; see the dependency line),
+# rfd, and tray-icon/muda. The design authority (`riff-gui-theme`) and the
 # presentation primitives (`riff-gui-components`) it renders with are
 # workspace crates (ADR 0018).
 #
@@ -45,7 +46,23 @@ riff-gui-components = { path = "../riff-gui-components" }
 # UI
 egui.workspace = true
 eframe = { version = "0.35", features = ["default", "persistence"] }
-epi = { package = "egui_extras", version = "0.35", features = ["image"] }
+# `epi` is `egui_extras`, aliased. Three features, all frontend-only: `image`
+# (the image-loader back-end), `datepicker` (the widget the rule editor's date
+# row is built from) and `serde`, which `datepicker` is not buildable without:
+# the picker's `DatePickerButtonState`/`DatePickerPopupState` derive their
+# serde traits only under that feature, yet egui's `get_persisted` is called
+# unconditionally, and this crate turns `egui/persistence` on through
+# `eframe`'s `persistence` feature — so without `serde` the datepicker module
+# fails to compile with 36 `SerializableAny` trait-bound errors (verified at
+# egui/egui_extras 0.35.0). `datepicker` is the only thing in the workspace
+# that pulls `jiff` — the project's first civil-date library, whose
+# `civil::Date` the picker reads and writes — into the graph. It is switched
+# on here as a build/MSRV proof, not as a use: no source file names `epi` yet,
+# so the whole dependency is inert and nothing here should be read as a live
+# call site.
+epi = { package = "egui_extras", version = "0.35", features = [
+    "image", "datepicker", "serde",
+] }
 
 # Window-handle access for eframe's window-chrome metrics (the macOS
 # traffic-light clearance)

@@ -7280,7 +7280,17 @@ mod tests {
     /// Click the `index`-th node bearing `label`, failing loudly with the
     /// count when there is no such node — a control that is not in the frame
     /// is not clickable, whatever a picture suggests.
-    fn click_nth(harness: &mut egui_kittest::Harness<'_, (riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor, Vec<SettingsAction>)>, label: &str, index: usize) {
+    fn click_nth(
+        harness: &mut egui_kittest::Harness<
+            '_,
+            (
+                riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
+                Vec<SettingsAction>,
+            ),
+        >,
+        label: &str,
+        index: usize,
+    ) {
         use egui_kittest::kittest::Queryable as _;
 
         let nodes: Vec<_> = harness.query_all_by_label(label).collect();
@@ -7509,7 +7519,11 @@ mod tests {
 
         // The root's own combine can be changed first: its header is the
         // Button, the word it opens is the RadioButton option row.
-        click_role(&mut harness, egui::accesskit::Role::Button, "All of the following");
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::Button,
+            "All of the following",
+        );
         click_role(
             &mut harness,
             egui::accesskit::Role::RadioButton,
@@ -7528,7 +7542,11 @@ mod tests {
 
         // Now a nested box: its header is the only all-of Button left.
         click_nth(&mut harness, "Add box", 0);
-        click_role(&mut harness, egui::accesskit::Role::Button, "All of the following");
+        click_role(
+            &mut harness,
+            egui::accesskit::Role::Button,
+            "All of the following",
+        );
         click_role(
             &mut harness,
             egui::accesskit::Role::RadioButton,
@@ -7719,7 +7737,9 @@ mod tests {
     /// cap is an editor rule the store and the compiler do not share.
     #[test]
     fn test_the_editor_tree_saves_and_reads_back_through_a_real_store() {
-        use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree};
+        use riff_backend::app::store::{
+            LibraryMutationStore, LibraryQueryStore, SmartPlaylistTree,
+        };
         use riff_backend::domain::{
             Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
         };

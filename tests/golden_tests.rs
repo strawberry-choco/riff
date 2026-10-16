@@ -2248,29 +2248,27 @@ mod tests {
             name: "Morning drive".to_string(),
             created_at: std::time::SystemTime::UNIX_EPOCH,
         }];
-        let root = RootBox::new(
-            RuleBox::new(Combine::All).with_children(vec![
+        let root = RootBox::new(RuleBox::new(Combine::All).with_children(vec![
+            RuleChild::Rule(Rule::new(
+                MatchableField::Title,
+                Comparison::Is,
+                Some(RuleValue::Text("midnight".to_string())),
+            )),
+            RuleChild::Box(RuleBox::new(Combine::Any).with_children(vec![
                 RuleChild::Rule(Rule::new(
-                    MatchableField::Title,
-                    Comparison::Is,
-                    Some(RuleValue::Text("midnight".to_string())),
+                    MatchableField::Year,
+                    Comparison::GreaterThan,
+                    Some(RuleValue::Number(1975)),
                 )),
-                RuleChild::Box(RuleBox::new(Combine::Any).with_children(vec![
-                    RuleChild::Rule(Rule::new(
-                        MatchableField::Year,
+                RuleChild::Box(
+                    RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
+                        MatchableField::PlayCount,
                         Comparison::GreaterThan,
-                        Some(RuleValue::Number(1975)),
-                    )),
-                    RuleChild::Box(RuleBox::new(Combine::All).with_children(vec![
-                        RuleChild::Rule(Rule::new(
-                            MatchableField::PlayCount,
-                            Comparison::GreaterThan,
-                            Some(RuleValue::Number(10)),
-                        )),
-                    ])),
-                ])),
-            ]),
-        );
+                        Some(RuleValue::Number(10)),
+                    ))]),
+                ),
+            ])),
+        ]));
         seed.query
             .smart_playlist_trees
             .insert(id.clone(), SmartPlaylistTree::new(root));

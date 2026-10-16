@@ -31,8 +31,10 @@
 //! level on membership: every leaf is already two-valued, so `AND` / `OR` over
 //! two-valued arms cannot produce a third answer, and the fold is defence in
 //! depth for a leaf shape the compiler does not know yet. Ticket 09 mutated it
-//! away and nothing went red; this suite reconfirms that over generated trees
-//! rather than assuming it. So `test_the_box_level_fold_is_pinned_by_the_engine_depth_it_spends`
+//! away and nothing went red on its matrix; ticket 10's own mutation run — the
+//! fold removed, the whole `riff-infra` integration target walked: 253 passed,
+//! 2 failed, both engine-depth pins, zero membership or paging reds —
+//! reconfirms it over these generated trees rather than assuming it. So `test_the_box_level_fold_is_pinned_by_the_engine_depth_it_spends`
 //! pins the fold the only way it is observable — the expression depth it costs
 //! per Box level, measured at the exact engine boundary — and no test here
 //! claims the fold changes an answer.

@@ -48,9 +48,9 @@ use super::super::browser;
 use super::super::column::ColumnIdentity;
 use super::super::scroll_memory::{DrillSlot, ScrollMemory};
 use super::{
-    COVER_THUMB, ColumnKind, RiffApp, RowCovers, apply_collection_menu, apply_detail_action,
-    apply_entity_selection, column_plan, resolve_detail_content, resolve_inspector,
-    smart_list_openable,
+    COVER_THUMB, ColumnKind, RiffApp, RowCovers, SmartListIdentity, apply_collection_menu,
+    apply_detail_action, apply_entity_selection, column_plan, resolve_detail_content,
+    resolve_inspector, smart_list_openable,
 };
 use riff_gui_theme::theme::Palette;
 
@@ -64,6 +64,8 @@ enum SingleStage {
     UserPlaylist(PlaylistId),
     /// An opened read-only smart list.
     SmartPlaylist(SmartPlaylistKind),
+    /// An opened Custom Smart Playlist, by its store id.
+    CustomSmartList(PlaylistId),
     /// The Folders browse mode's folder tree.
     Folders,
 }
@@ -88,14 +90,22 @@ impl RiffApp {
         // query no longer takes over the stage — each LIBRARY section's own
         // columns filter to hits instead, and the Folders tree keeps its
         // pruned shape under a query.
+        //
+        // The smart-list arm answers the two-case identity (ticket 12): a
+        // Built-in opens under the Advanced-mode rule as it always did, and a
+        // Custom list opens only while the store still holds it — see
+        // [`Self::custom_list_stage`].
         let query = library.search_query.clone();
         let single = if let Some(pid) = self.playlist_view.clone() {
             Some(SingleStage::UserPlaylist(pid))
-        } else if let Some(kind) = self
-            .smart_playlist_view
-            .filter(|kind| smart_list_openable(*kind, library.ui_flags.advanced_mode))
-        {
-            Some(SingleStage::SmartPlaylist(kind))
+        } else if let Some(identity) = self.smart_playlist_view.clone() {
+            match identity {
+                SmartListIdentity::BuiltIn(kind) => {
+                    smart_list_openable(kind, library.ui_flags.advanced_mode)
+                        .then_some(SingleStage::SmartPlaylist(kind))
+                }
+                SmartListIdentity::Custom(id) => self.custom_list_stage(&id),
+            }
         } else if library.browse_mode == BrowseMode::Folders {
             Some(SingleStage::Folders)
         } else {
@@ -141,6 +151,26 @@ impl RiffApp {
         );
     }
 
+    /// Which single stage an open Custom Smart Playlist routes to — or none,
+    /// when the id no longer answers a Rule tree.
+    ///
+    /// `custom_list_tree` answers `Ok(None)` only when the store holds no row
+    /// for `id`: the list was deleted. Routing nothing then lets the stage
+    /// fall through to the Library columns, so a stale id cannot paint an
+    /// empty listing, which reads as a matching bug (ticket 12). The tree
+    /// read is the projection's own generation cache, so this costs one
+    /// store read per list per epoch, never one per frame.
+    ///
+    /// A *failed* tree read routes anyway: `Err` is not the store saying the
+    /// list is gone, and the listing's own reads carry the reason out
+    /// (`custom_list_count`'s contract) when ticket 13's surface draws it.
+    fn custom_list_stage(&mut self, id: &PlaylistId) -> Option<SingleStage> {
+        match self.views.custom_list_tree(id) {
+            Ok(None) => None,
+            Ok(Some(_)) | Err(_) => Some(SingleStage::CustomSmartList(id.clone())),
+        }
+    }
+
     /// Render one list column of the elastic stage inside its
     /// width-constrained child ui. Root columns keep the existing section
     /// renderers (A–Z sort, genre chips, list/grid toggle); the drill
@@ -177,6 +207,9 @@ impl RiffApp {
                 }
                 Some(SingleStage::SmartPlaylist(kind)) => {
                     self.render_smart_playlist_view(ui, library, playback, *kind);
+                }
+                Some(SingleStage::CustomSmartList(id)) => {
+                    self.render_custom_smart_list_view(ui, id);
                 }
                 Some(SingleStage::Folders) => self.render_folder_tree(ui, library, playback, query),
                 _ => unreachable!("a Single column renders only for the single-list stages"),

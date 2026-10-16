@@ -3843,7 +3843,9 @@ mod tests {
         let pid = store.create_playlist("Focus", &[]).unwrap();
 
         let mut view = None;
-        let mut smart_view = Some(SmartPlaylistKind::MostPlayed);
+        let mut smart_view = Some(riff_gui::ui::app::SmartListIdentity::BuiltIn(
+            SmartPlaylistKind::MostPlayed,
+        ));
         let mut rename_slot = None;
         let mut create_slot = None;
 

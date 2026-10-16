@@ -3360,6 +3360,14 @@ mod scan_service_tests {
             Ok(Vec::new())
         }
 
+        fn picker_texts(&self, _field_id: &str, _limit: usize) -> Result<Vec<String>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Result<Vec<i64>, StoreError> {
+            Ok(Vec::new())
+        }
+
         fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
             Ok(Vec::new())
         }
@@ -5187,6 +5195,14 @@ mod tag_edit_service_tests {
         }
 
         fn genre_counts(&self) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn picker_texts(&self, _field_id: &str, _limit: usize) -> Result<Vec<String>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Result<Vec<i64>, StoreError> {
             Ok(Vec::new())
         }
 

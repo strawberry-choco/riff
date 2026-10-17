@@ -61,7 +61,7 @@ documentation = "https://github.com/strawberry-choco/riff/tree/master/docs"
 # either version, and the damage lands entirely in the committed goldens.
 # Revisit only after checking the upstream fix status; do not bump the pin
 # to "catch up" and re-baseline the snapshots to make the diff go away.
-egui = "0.35"
+egui = "0.36"
 
 # Workspace-level profiles and lints apply to every member.
 [profile.release]

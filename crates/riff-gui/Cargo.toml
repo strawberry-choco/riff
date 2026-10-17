@@ -45,7 +45,7 @@ riff-gui-components = { path = "../riff-gui-components" }
 
 # UI
 egui.workspace = true
-eframe = { version = "0.35", features = ["default", "persistence"] }
+eframe = { version = "0.36", features = ["default", "persistence"] }
 # `epi` is `egui_extras`, aliased. Three features, all frontend-only: `image`
 # (the image-loader back-end), `datepicker` (the widget the rule editor's date
 # row is built from) and `serde`, which `datepicker` is not buildable without:

@@ -30,7 +30,7 @@ riff-gui-theme = { path = "../riff-gui-theme" }
 # on a committed baseline — the golden images stay in the root `riff-tests`
 # crate.
 [dev-dependencies]
-egui_kittest = { version = "0.35", features = ["wgpu"] }
+egui_kittest = { version = "0.36", features = ["wgpu"] }
 # Counting pixels in headlessly rendered frames.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

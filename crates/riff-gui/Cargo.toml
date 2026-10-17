@@ -82,7 +82,7 @@ crossbeam-channel = "0.5"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24"
-muda = "0.19"
+muda = "0.21"
 rfd = "0.17"
 
 # macOS traffic-light placement (`ui::traffic_lights`). Pinned to 0.3.2 —

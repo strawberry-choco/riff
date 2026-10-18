@@ -105,6 +105,138 @@ fn test_lofty_writer_full_edit_lands_on_disk_and_reads_back() {
     assert_eq!(metadata.track_number, Some(1));
 }
 
+// lofty 0.25.4's ADTS parser treats any false `0xFF XX` sync word with
+// `sample_rate_idx == 15` as a hard error during its bitrate-averaging
+// walk (`lofty/src/aac/header.rs:83-89`). Files with any such byte pattern
+// in their payload fail loudly; lofty never returns `Ok` for them. The
+// fallback at `LoftyMetadataReader::read_all` re-runs the probe through
+// symphonia's `AdtsReader` on that failure, which is more conservative
+// and handles the same bytes without error. These tests exercise the
+// fallback boundary directly: a crafted file where lofty is known to
+// fail, plus a clean-format control where lofty succeeds without
+// triggering it.
+
+/// Build an ADTS frame of the given total length. MPEG-4, AAC-LC, 44.1 kHz,
+/// stereo, no CRC; the payload bytes are zero-filled.
+fn build_adts_frame(len: u16) -> Vec<u8> {
+    let mut f: Vec<u8> = Vec::with_capacity(len as usize);
+    f.push(0xff); // sync[0]
+    f.push(0xf1); // sync[1] | MPEG-4 | layer 0 | protection=1 (no CRC)
+    f.push(0x50); // AAC-LC | sf=4 (44.1 kHz) | private=0 | ch_high=0
+    f.push(0x80 | ((len >> 10) & 0x03) as u8); // ch_low=10 (stereo) | M[14:13]
+    f.push(((len >> 3) & 0xff) as u8); // M[12:5]
+    f.push(((len & 0x07) << 5) as u8); // M[4:0] | buffer_fullness | num_raw_block=0
+    f.push(0u8);
+    while f.len() < len as usize {
+        f.push(0);
+    }
+    f
+}
+
+/// Three 7-byte ADTS frames, a false `0xFF XX` sync word with
+/// `sample_rate_idx == 15`, then more frames. lofty's `find_next_frame`
+/// walk encounters the false sync as a real frame header (with the
+/// forbidden sample rate) and hard-errors; symphonia's more conservative
+/// parser reads the frames and moves on. Empirically, lofty requires at
+/// least two frames after the false sync to trigger the walk (a single
+/// trailing frame slips past the walk's `find_next_frame` call), so the
+/// fixture emits two trailing frames to guarantee the bug surfaces.
+fn build_adts_with_false_sync() -> Vec<u8> {
+    let mut v = Vec::new();
+    for _ in 0..3 {
+        v.extend(build_adts_frame(7));
+    }
+    v.push(0xff);
+    v.push(0xf8); // second byte has `sample_rate_idx == 15` (bits 2-5 all set)
+    for _ in 0..2 {
+        v.extend(build_adts_frame(7));
+    }
+    v
+}
+
+#[test]
+fn test_metadata_reader_falls_back_to_symphonia_on_adts_with_false_sync() {
+    // lofty 0.25.4's ADTS parser treats any false `0xFF XX` sync word with
+    // `sample_rate_idx == 15` as a hard error during its bitrate-averaging
+    // walk. Files with such a byte pattern fail loudly through lofty. The
+    // fallback at `LoftyMetadataReader::read_all` re-runs the probe through
+    // symphonia's `AdtsReader`, which handles the same bytes without error.
+    //
+    // The test asserts lofty genuinely fails on the fixture (proving the
+    // bug is present), then that the reader still succeeds by falling
+    // through, and that the fallback surfaces the expected format facts.
+    // ReplayGain is not surfaced by symphonia — the fallback leaves it
+    // unset — and cover art is not surfaced either.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("false_sync.aac");
+    std::fs::write(&path, build_adts_with_false_sync()).unwrap();
+
+    // Guard: confirm lofty actually errors on the fixture. If lofty ever
+    // fixes this, the guard fails loudly rather than silently no-op'ing
+    // the fallback coverage.
+    let lofty_result = lofty::read_from_path(&path);
+    assert!(
+        lofty_result.is_err(),
+        "the fixture should fail lofty's ADTS walk; if it doesn't, the \
+        fixture no longer models the lofty bug and the fallback test below \
+        is not exercising the intended path"
+    );
+
+    let reader = LoftyMetadataReader::new();
+    let (metadata, _duration, cover, format) = reader
+        .read_all(&path)
+        .expect("the fallback should recover the file from lofty's error");
+
+    // The fixture has no tags, so every text field stays unset.
+    assert_eq!(metadata.title, None);
+    assert_eq!(metadata.artist, None);
+    // The fallback surfaces the frame header's facts: 44.1 kHz stereo.
+    assert_eq!(format.sample_rate, 44_100);
+    assert_eq!(format.channels, 2);
+    // The fallback does not surface cover art.
+    assert!(
+        matches!(cover, CoverSource::None),
+        "the fallback does not surface cover art"
+    );
+    // Symphonia does not read ReplayGain. If lofty ever regresses and the
+    // fallback path stops firing, these stay None; a caller that expected
+    // gains to round-trip must not rely on this path.
+    assert_eq!(metadata.replaygain_track_gain, None);
+    assert_eq!(metadata.replaygain_album_gain, None);
+}
+
+#[test]
+fn test_metadata_reader_uses_lofty_on_a_format_lofty_handles() {
+    // Existing behavior for a format lofty handles natively: `write_minimal_wav`
+    // emits a clean PCM WAV, lofty's RIFF parser reads it without error, and
+    // the fallback path is never entered. Pinning this in the same suite as
+    // the fallback test above makes the two paths distinguishable - a caller
+    // of `read_all` that silently fell through to symphonia on every input
+    // would still pass the crafted-ADTS test, but would regress a clean WAV.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clean.wav");
+    write_minimal_wav(&path);
+
+    let result = lofty::read_from_path(&path);
+    assert!(
+        result.is_ok(),
+        "lofty should handle a clean WAV without any error - the fallback should not fire"
+    );
+
+    let reader = LoftyMetadataReader::new();
+    let (_metadata, _duration, cover, format) = reader
+        .read_all(&path)
+        .expect("reader must succeed on a clean WAV");
+
+    // WAV is PCM mono 8 kHz in our fixture: the exact facts lofty surfaces.
+    assert_eq!(format.sample_rate, 8_000);
+    assert_eq!(format.channels, 1);
+    assert!(
+        matches!(cover, CoverSource::None),
+        "a fresh WAV fixture carries no cover"
+    );
+}
+
 #[test]
 fn test_lofty_writer_partial_edit_preserves_untouched_tags_on_disk() {
     let dir = tempfile::tempdir().unwrap();

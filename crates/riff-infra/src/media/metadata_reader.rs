@@ -1,12 +1,34 @@
+//! The lofty tag reader for riff. `lofty::read_from_path` is the primary
+//! path — its tag coverage is broader than the fallback's, so a file lofty
+//! can read stays on the lofty path. Every lofty error funnels through a
+//! fallback that re-reads the file via symphonia's format probe (the same
+//! crate the audio engine already uses for playback), so a lofty parse bug
+//! does not drop the file from the Library entirely.
+//!
+//! The fallback is deliberately keyed on lofty's result, not on the file
+//! extension: if lofty fails for any reason on any format, symphonia gets
+//! a shot, and every fallback is logged via `tracing::warn!` so a new lofty
+//! bug surfaces as an observable event rather than silent data loss.
+//!
+//! Limitation: symphonia cannot read ReplayGain. A file lofty fails to read
+//! will not surface ReplayGain values, even if the file carries them. The
+//! four ReplayGain fields of the fallback's `TrackMetadata` are `None`.
 use lofty::file::TaggedFile;
 use lofty::prelude::*;
 use lofty::read_from_path;
 use lofty::tag::{ItemKey, Tag};
 use riff_library::app::errors::LibraryError;
+use riff_playback::domain::duration_from_frames;
 use riff_persistence::track::{CoverSource, TrackMetadata};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::meta::StandardTag;
+use symphonia::default::get_probe;
 
 /// Parse a `ReplayGain` gain string such as `"-6.54 dB"`, `"+3.21 dB"`, or a
 /// bare `"3.21"` into dB. Strips a trailing `dB` (case-insensitive, without
@@ -206,6 +228,175 @@ impl LoftyMetadataReader {
     }
 }
 
+// Fallback: symphonia. Called only when lofty's `read_from_path` fails, so
+// the tags come from symphonia's `MetadataLog` rather than lofty's `Tag`.
+// The statelessness convention (`#[allow(clippy::unused_self)]`) carries
+// over so the port implementations can delegate one-for-one.
+#[allow(clippy::unused_self)]
+impl LoftyMetadataReader {
+    /// Read the file through symphonia's format probe when lofty errors.
+    /// Tags are pulled from the latest metadata revision's media container;
+    /// stream facts come from the first audio track. ReplayGain is not
+    /// exposed by symphonia's metadata layer, so those four fields stay
+    /// `None`. Cover art is not surfaced either — the fallback returns
+    /// `CoverSource::None`.
+    fn read_via_symphonia(
+        &self,
+        path: &Path,
+    ) -> Result<
+        (
+            TrackMetadata,
+            Option<Duration>,
+            CoverSource,
+            AudioFormatInfo,
+        ),
+        LibraryError,
+    > {
+        let source = std::fs::File::open(path).map_err(|e| {
+            LibraryError::MetadataRead(format!("Failed to open file: {e}"))
+        })?;
+        let mss = symphonia::core::io::MediaSourceStream::new(
+            Box::new(source),
+            symphonia::core::io::MediaSourceStreamOptions::default(),
+        );
+        let mut format: Box<dyn FormatReader> = get_probe()
+            .probe(
+                &Hint::new(),
+                mss,
+                FormatOptions::default(),
+                symphonia::core::meta::MetadataOptions::default(),
+            )
+            .map_err(|e| LibraryError::MetadataRead(format!("Symphonia probe failed: {e}")))?;
+
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| {
+                matches!(
+                    t.codec_params,
+                    Some(CodecParameters::Audio(ref p)) if p.codec != CODEC_ID_NULL_AUDIO
+                )
+            })
+            .ok_or_else(|| LibraryError::MetadataRead("No audio track found".to_string()))?;
+
+        let audio = match track.codec_params.as_ref() {
+            Some(CodecParameters::Audio(p)) => p,
+            _ => unreachable!("track filter guarantees Audio codec params"),
+        };
+        let sample_rate = audio
+            .sample_rate
+            .ok_or_else(|| LibraryError::MetadataRead("Unknown sample rate".to_string()))?;
+        let channels = audio
+            .channels
+            .as_ref()
+            .map_or(2u16, |c| u16::try_from(c.count()).unwrap_or(u16::MAX));
+        let duration = track
+            .num_frames
+            .map(|frames| duration_from_frames(frames, sample_rate));
+
+        // Pull the media-level tags out of the metadata log. The revision
+        // reference returned by `skip_to_latest` is scoped to this block so
+        // the borrow on `format.metadata()` cannot outlive the local.
+        let tags_copy: Vec<symphonia::core::meta::Tag> = {
+            let mut metadata = format.metadata();
+            match metadata.skip_to_latest() {
+                Some(revision) => revision.media.tags.clone(),
+                None => Vec::new(),
+            }
+        };
+
+        // The first tag whose standard form matches one of the given variant
+        // extractors, mapped to a String (numbers are stringified for the
+        // shared `Option<String>` return). Returning `None` when the file's
+        // tags don't set that field matches lofty's own behavior.
+        let first_std =
+            |variants: &[fn(&StandardTag) -> Option<String>]| -> Option<String> {
+                variants.iter().find_map(|variant| {
+                    tags_copy
+                        .iter()
+                        .find_map(|t| t.std.as_ref().and_then(variant))
+                })
+            };
+
+        let mut metadata = TrackMetadata::default();
+        metadata.title = first_std(&[
+            |s| match s {
+                StandardTag::TrackTitle(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.artist = first_std(&[
+            |s| match s {
+                StandardTag::Artist(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.album = first_std(&[
+            |s| match s {
+                StandardTag::Album(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.album_artist = first_std(&[
+            |s| match s {
+                StandardTag::AlbumArtist(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.composer = first_std(&[
+            |s| match s {
+                StandardTag::Composer(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.comment = first_std(&[
+            |s| match s {
+                StandardTag::Comment(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.genre = first_std(&[
+            |s| match s {
+                StandardTag::Genre(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ]);
+        metadata.track_number = first_std(&[
+            |s| match s {
+                StandardTag::TrackNumber(v) => Some(v.to_string()),
+                _ => None,
+            },
+        ])
+        .and_then(|s| s.parse::<u32>().ok());
+        metadata.disc_number = first_std(&[
+            |s| match s {
+                StandardTag::DiscNumber(v) => Some(v.to_string()),
+                _ => None,
+            },
+        ])
+        .and_then(|s| s.parse::<u32>().ok());
+        metadata.year = first_std(&[
+            |s| match s {
+                StandardTag::RecordingYear(v) => Some((*v as u32).to_string()),
+                _ => None,
+            },
+            |s| match s {
+                StandardTag::RecordingTime(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            },
+        ])
+        .and_then(|s| year_from_text(&s));
+
+        let audio_format = AudioFormatInfo {
+            sample_rate,
+            channels,
+            duration: Some(duration.unwrap_or_default()),
+        };
+
+        Ok((metadata, duration, CoverSource::None, audio_format))
+    }
+}
+
 // The reader is stateless, but the read methods take `&self` so the
 // port implementations can delegate to them one-for-one.
 #[allow(clippy::unused_self)]
@@ -229,7 +420,11 @@ impl LoftyMetadataReader {
     }
 
     /// One-pass read: metadata, duration, cover source, and audio format in
-    /// a single file open.
+    /// a single file open. When lofty's `read_from_path` fails, fall back
+    /// to symphonia's format probe so the file still enters the Library
+    /// with its stream facts and any tags symphonia can surface. The
+    /// fallback loses ReplayGain and cover art, which are not readable via
+    /// symphonia's metadata layer.
     pub fn read_all(
         &self,
         path: &Path,
@@ -242,7 +437,17 @@ impl LoftyMetadataReader {
         ),
         LibraryError,
     > {
-        let tagged_file = Self::read_tagged_file(path)?;
+        let tagged_file = match Self::read_tagged_file(path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "lofty failed for {:?}: {}; falling back to symphonia",
+                    path,
+                    e
+                );
+                return self.read_via_symphonia(path);
+            }
+        };
 
         let metadata = Self::best_tag(&tagged_file).map_or_else(TrackMetadata::default, |tag| {
             Self::metadata_from_tag(tag, Self::is_opus(&tagged_file))

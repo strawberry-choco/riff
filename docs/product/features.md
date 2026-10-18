@@ -8,7 +8,7 @@ The core playback system: decoding multiple audio formats, managing the audio ou
 
 | Feature | Summary | Status | Depends On |
 |---|---|---|---|
-| Multi-format Decoding | Decode MP3, AAC, Opus, FLAC, OGG, WAV via symphonia | implemented | — |
+| Multi-format Decoding | Decode MP3, AAC (raw ADTS and M4A), Opus, FLAC, OGG, WAV via symphonia | implemented | — |
 | Playback Control | Play, pause, stop, seek, volume with cpal output | implemented | Multi-format Decoding |
 | Playback Queue | Queue management, next/previous track, shuffle, repeat | implemented | Playback Control |
 | Gapless Playback | Pre-decode the next track for gap-free transitions at track boundaries | implemented | Playback Queue |

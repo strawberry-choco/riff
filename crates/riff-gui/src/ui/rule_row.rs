@@ -885,8 +885,10 @@ pub(crate) fn chip(
 /// The library-picker toggle is the row's last part still wearing a chevron.
 /// It is the one part whose label is not the current answer — "Choose…" says
 /// what the click does, not what the Rule holds — and the chevron is what keeps
-/// it distinguishable from the two chips, whose word *is* their state.
-fn header(
+/// it distinguishable from the two chips, whose word *is* their state. The
+/// Smart Playlists pane borrows it for a nested Box's combine control, whose
+/// header is the same shape.
+pub(crate) fn header(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
@@ -921,7 +923,7 @@ fn header(
 
 /// A header is as wide as its label plus its glyph, bounded by the pane, so
 /// the four parts still sit on one line at the stage's minimum width.
-fn header_width(ui: &egui::Ui, palette: &Palette, label: &str) -> f32 {
+pub(crate) fn header_width(ui: &egui::Ui, palette: &Palette, label: &str) -> f32 {
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
         theme::styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS),

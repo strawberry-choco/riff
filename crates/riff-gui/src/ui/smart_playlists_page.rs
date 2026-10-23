@@ -62,15 +62,13 @@ use riff_backend::domain::field_catalog::{ValueType, spec};
 use riff_backend::domain::{
     Combine, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
 };
-use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
+use riff_gui_components::button::{FlowTextButton, Variant, flow_text_button};
 use riff_gui_components::ghost_icon_button::ghost_icon_button;
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
 use riff_gui_components::text_field::{TextField, TrailingText, TrailingTone, text_field};
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_box;
-use riff_gui_theme::theme::geometry::rule_row::{
-    HEADER_H, HEADER_LABEL_PAD, LIST_TOP_GAP, PART_GAP, WELL_H,
-};
+use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, LIST_TOP_GAP, PART_GAP, WELL_H};
 use riff_gui_theme::theme::geometry::settings::SECTION_GAP;
 use riff_gui_theme::theme::{self, Palette};
 
@@ -893,15 +891,19 @@ fn lists_column(
 ) {
     sidebar::section_header(ui, palette, "Smart Playlists");
     ui.add_space(theme::SPACE_SM);
-    if pane_button(
+    if flow_text_button(
         ui,
         cache,
         palette,
         content.reduce_motion,
-        "New smart playlist",
-        egui::Id::new("smart_playlists_new"),
-        Some(Icon::Plus),
-        Variant::Primary,
+        &FlowTextButton {
+            id: egui::Id::new("smart_playlists_new"),
+            label: "New smart playlist",
+            icon: Some(Icon::Plus),
+            small: false,
+            variant: Variant::Primary,
+            enabled: true,
+        },
     ) {
         actions.push(SettingsAction::NewSmartPlaylist);
     }
@@ -1317,15 +1319,19 @@ fn draw_box_add_controls(
     actions: &mut Vec<SettingsAction>,
 ) {
     ui.horizontal(|ui| {
-        if pane_button(
+        if flow_text_button(
             ui,
             cache,
             palette,
             reduce_motion,
-            "Add rule",
-            box_id.with("add_rule"),
-            Some(Icon::Plus),
-            Variant::Secondary,
+            &FlowTextButton {
+                id: box_id.with("add_rule"),
+                label: "Add rule",
+                icon: Some(Icon::Plus),
+                small: false,
+                variant: Variant::Secondary,
+                enabled: true,
+            },
         ) {
             actions.push(SettingsAction::AddSmartPlaylistRule {
                 parent: path.clone(),
@@ -1333,15 +1339,19 @@ fn draw_box_add_controls(
         }
         ui.add_space(theme::SPACE_SM);
         if path.accepts_a_box()
-            && pane_button(
+            && flow_text_button(
                 ui,
                 cache,
                 palette,
                 reduce_motion,
-                "Add group",
-                box_id.with("add_box"),
-                Some(Icon::Plus),
-                Variant::Secondary,
+                &FlowTextButton {
+                    id: box_id.with("add_box"),
+                    label: "Add group",
+                    icon: Some(Icon::Plus),
+                    small: false,
+                    variant: Variant::Secondary,
+                    enabled: true,
+                },
             )
         {
             actions.push(SettingsAction::AddSmartPlaylistBox {
@@ -1539,43 +1549,6 @@ fn draw_unreadable_child(
     }
 }
 
-/// The Box's combine control: the current choice's word with a disclosure
-/// chevron, opening the two-word list below it. A real button under its own
-/// id — the same shape ticket 14's row headers keep — so it is reachable by
-/// pointer, by keyboard and through the a11y tree.
-fn box_header(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    id: egui::Id,
-    label: &str,
-    open: bool,
-) -> bool {
-    let width = header_width(ui, palette, label);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
-    text_button(
-        ui,
-        cache,
-        palette,
-        false,
-        &TextButton {
-            id,
-            rect,
-            label,
-            a11y: label,
-            tooltip: None,
-            icon: Some(if open {
-                Icon::ChevronDown
-            } else {
-                Icon::ChevronRight
-            }),
-            small: true,
-            variant: Variant::Secondary,
-            enabled: true,
-        },
-    )
-}
-
 /// What a Box's control line reported this frame.
 struct BoxLineReport {
     /// The combine control was pressed.
@@ -1658,7 +1631,7 @@ fn box_control_line(
 ) -> BoxLineReport {
     let mut remove_pressed = false;
     let line = ui.horizontal_top(|ui| {
-        let pressed = box_header(ui, cache, palette, box_id.with("combine"), label, listed);
+        let pressed = rule_row::header(ui, cache, palette, box_id.with("combine"), label, listed);
         if removable {
             ui.add_space(theme::SPACE_SM);
             remove_pressed = remove_button(
@@ -1748,18 +1721,6 @@ fn draw_combine_list(
     )
 }
 
-/// A combine control is as wide as its label plus its glyph and padding,
-/// bounded by the pane — the measurement the Rule row's own headers share,
-/// `HEADER_LABEL_PAD` included.
-fn header_width(ui: &egui::Ui, palette: &Palette, label: &str) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        theme::styled_font(ui, egui::TextStyle::Button, theme::TEXT_XS),
-        palette.ink,
-    );
-    (galley.size().x + HEADER_LABEL_PAD).min(ui.available_width().max(0.0))
-}
-
 /// The two words a Box's combine choice is made of, as its list offers them and
 /// as the Root Box's sentence wears one of them. The stored [`Combine`]
 /// vocabulary is unchanged; only the clause it is wrapped in is shorter, because
@@ -1813,75 +1774,36 @@ fn save_cancel_row(
     reduce_motion: bool,
     actions: &mut Vec<SettingsAction>,
 ) {
-    if pane_button(
+    if flow_text_button(
         ui,
         cache,
         palette,
         reduce_motion,
-        "Save",
-        egui::Id::new("smart_playlists_save"),
-        None,
-        Variant::Primary,
+        &FlowTextButton {
+            id: egui::Id::new("smart_playlists_save"),
+            label: "Save",
+            icon: None,
+            small: false,
+            variant: Variant::Primary,
+            enabled: true,
+        },
     ) {
         actions.push(SettingsAction::SaveSmartPlaylist);
     }
-    if pane_button(
+    if flow_text_button(
         ui,
         cache,
         palette,
         reduce_motion,
-        "Cancel",
-        egui::Id::new("smart_playlists_cancel"),
-        None,
-        Variant::Secondary,
+        &FlowTextButton {
+            id: egui::Id::new("smart_playlists_cancel"),
+            label: "Cancel",
+            icon: None,
+            small: false,
+            variant: Variant::Secondary,
+            enabled: true,
+        },
     ) {
         actions.push(SettingsAction::CancelSmartPlaylist);
     }
-}
-
-/// One flow-placed shared text button: the size is measured, the slot
-/// allocated, and the control registered under its own id — a painted rect
-/// is not a control, and every clickable thing in this pane goes through
-/// the component's own `ui.interact` with a fresh id.
-///
-/// The measurement is `text_button_size`'s plus the leading glyph's own
-/// room: the component's paint charges 16px of glyph and an 8px gap before
-/// the label and centres the pair in the rect, a charge
-/// `text_button_size(label)` does not know about — so an icon button sized
-/// by its label alone clips its own words at `painter_at`'s rect edges.
-/// The `16.0 + 8.0` is the button component's arithmetic, spelled out here
-/// exactly as the Settings header's Back control spells it.
-#[expect(clippy::too_many_arguments, reason = "one button-paint call")]
-fn pane_button(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    reduce_motion: bool,
-    label: &str,
-    id: egui::Id,
-    icon: Option<Icon>,
-    variant: Variant,
-) -> bool {
-    let mut size = text_button_size(ui, palette, label, false);
-    if icon.is_some() {
-        size.x += 16.0 + 8.0;
-    }
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    text_button(
-        ui,
-        cache,
-        palette,
-        reduce_motion,
-        &TextButton {
-            id,
-            rect,
-            label,
-            a11y: label,
-            tooltip: None,
-            icon,
-            small: false,
-            variant,
-            enabled: true,
-        },
-    )
 }

@@ -7337,7 +7337,7 @@ mod tests {
         let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
         harness.run();
 
-        click_nth(&mut harness, "Add box", 0);
+        click_nth(&mut harness, "Add group", 0);
         assert!(
             harness
                 .state()
@@ -7345,23 +7345,32 @@ mod tests {
                 .contains(&SettingsAction::AddSmartPlaylistBox {
                     parent: BoxPath::root(),
                 }),
-            "the Root Box's add-box control reports the root as the parent"
+            "the Root Box's add-group control reports the root as the parent"
         );
 
         let root = &harness.state().0.root;
         assert_eq!(root.children.len(), 2, "the box joined the root's list");
         assert_eq!(box_paths(root, BoxPath::root()).len(), 2);
 
-        // The new box draws its own combine control under the root's, and
-        // both its add controls. The nested row of them sits one indent step
-        // right of the root's — the measured indentation.
-        let headers: Vec<_> = harness.query_all_by_label("All of the following").collect();
+        // The new box draws its own combine control under the root's, and both
+        // its add controls. The Root Box's chip no longer marks its own left
+        // edge — it sits in the middle of a sentence — so the nesting is
+        // measured from the words that sentence opens with: the nested Box's
+        // control starts inside the card those words sit on top of.
+        let headers: Vec<_> = harness
+            .query_all_by_label("all of the following are true")
+            .collect();
         assert_eq!(headers.len(), 2, "the root's and the nested box's");
+        let prefix = harness
+            .query_all_by_label("Match songs where")
+            .next()
+            .expect("the Root Box opens with its sentence")
+            .rect();
         assert!(
-            headers[1].rect().left() > headers[0].rect().left(),
-            "the nested box's control is indented: {} vs {}",
+            headers[1].rect().left() > prefix.left(),
+            "the nested box's control is inside the Root Box's card: {} vs {}",
             headers[1].rect().left(),
-            headers[0].rect().left()
+            prefix.left()
         );
         let adds: Vec<_> = harness.query_all_by_label("Add rule").collect();
         assert_eq!(adds.len(), 2, "one add-rule control per box");
@@ -7383,7 +7392,7 @@ mod tests {
         let content = sample_content();
         let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
         harness.run();
-        click_nth(&mut harness, "Add box", 0);
+        click_nth(&mut harness, "Add group", 0);
 
         // The nested box's controls are drawn first (depth-first), so node 0
         // of "Add rule" is the nested box's.
@@ -7411,10 +7420,11 @@ mod tests {
         assert_eq!(root.children.len(), 2);
     }
 
-    /// The live match line (ticket 17) paints what the app's refresh wrote:
-    /// the count folded into a sentence with the singular handled, a block in
-    /// ticket 18's own words, or a store refusal verbatim — and it is silent
-    /// only before the first refresh has run for the draft in hand.
+    /// The live count (ticket 17) wears what the app's refresh wrote: the count
+    /// bare with the singular handled, a block in ticket 18's own words, or a
+    /// store refusal verbatim — and before the first refresh has run for the
+    /// draft in hand it wears the well's own standing sentence, which is neither
+    /// a count nor a reason.
     #[test]
     fn test_the_live_match_line_paints_the_count_the_block_or_the_reason() {
         use egui_kittest::kittest::{By, Queryable as _};
@@ -7422,8 +7432,8 @@ mod tests {
 
         let content = sample_content();
         for (line, expected) in [
-            (SmartPlaylistMatchLine::Matches(1), "Matches 1 song"),
-            (SmartPlaylistMatchLine::Matches(7), "Matches 7 songs"),
+            (SmartPlaylistMatchLine::Matches(1), "1 song"),
+            (SmartPlaylistMatchLine::Matches(7), "7 songs"),
             (
                 SmartPlaylistMatchLine::Uncountable("this rule needs a value".to_string()),
                 "this rule needs a value",
@@ -7443,17 +7453,24 @@ mod tests {
             harness.run();
             assert!(
                 harness.query(By::new().label(expected)).is_some(),
-                "{expected:?} must be painted on the live match line"
+                "{expected:?} must be painted inside the name well"
             );
         }
 
-        // A draft whose line was never written paints no count and no reason:
-        // the line exists only once a refresh has answered for the draft.
+        // A draft whose line was never written wears the well's standing
+        // sentence: no number, and no reason either — nothing has been refused,
+        // the read has simply not answered for this draft yet.
         let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
         harness.run();
         assert!(
-            harness.query_by_label_contains("Matches ").is_none(),
-            "no line before the first refresh"
+            harness
+                .query(By::new().label("0 songs — add a rule to start counting"))
+                .is_some(),
+            "the un-refreshed draft says what is coming rather than what is broken"
+        );
+        assert!(
+            harness.query_by_label_contains("this rule needs").is_none(),
+            "no block reason before the first refresh"
         );
     }
 
@@ -7528,16 +7545,16 @@ mod tests {
         let content = sample_content();
         let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
         harness.run();
-        click_nth(&mut harness, "Add box", 0);
+        click_nth(&mut harness, "Add group", 0);
         click_nth(&mut harness, "Add rule", 0);
         assert_eq!(harness.state().0.root.rule_count(), 3);
 
         assert_eq!(
-            harness.query_all_by_label("Remove box").count(),
+            harness.query_all_by_label("Remove group").count(),
             1,
             "only the nested box is removable; the Root Box is not a child"
         );
-        click_nth(&mut harness, "Remove box", 0);
+        click_nth(&mut harness, "Remove group", 0);
         assert!(
             harness
                 .state()
@@ -7554,7 +7571,7 @@ mod tests {
         assert_eq!(root.rule_count(), 1);
         assert!(matches!(root.children[0], RuleChildDraft::Rule(_)));
         assert_eq!(
-            harness.query_all_by_label("Remove box").count(),
+            harness.query_all_by_label("Remove group").count(),
             0,
             "no removable box is left in the frame"
         );
@@ -7595,18 +7612,14 @@ mod tests {
         let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
         harness.run();
 
-        // The root's own combine can be changed first: its header is the
+        // The root's own combine can be changed first: its chip is the
         // Button, the word it opens is the RadioButton option row.
         click_role(
             &mut harness,
             egui::accesskit::Role::Button,
-            "All of the following",
+            "all of the following are true",
         );
-        click_role(
-            &mut harness,
-            egui::accesskit::Role::RadioButton,
-            "Any of the following",
-        );
+        click_role(&mut harness, egui::accesskit::Role::RadioButton, "any");
         assert!(
             harness
                 .state()
@@ -7619,17 +7632,13 @@ mod tests {
         assert_eq!(harness.state().0.root.combine, Combine::Any);
 
         // Now a nested box: its header is the only all-of Button left.
-        click_nth(&mut harness, "Add box", 0);
+        click_nth(&mut harness, "Add group", 0);
         click_role(
             &mut harness,
             egui::accesskit::Role::Button,
-            "All of the following",
+            "all of the following are true",
         );
-        click_role(
-            &mut harness,
-            egui::accesskit::Role::RadioButton,
-            "Any of the following",
-        );
+        click_role(&mut harness, egui::accesskit::Role::RadioButton, "any");
 
         assert!(
             harness
@@ -7649,10 +7658,10 @@ mod tests {
         assert_eq!(root.combine, Combine::Any, "the root keeps its own choice");
     }
 
-    /// The seven-level cap is drawn, not refused: clicking add-box six times
-    /// builds exactly seven levels, the deepest box offers no add-box control
+    /// The seven-level cap is drawn, not refused: clicking add-group six times
+    /// builds exactly seven levels, the deepest box offers no add-group control
     /// at all while every shallower one does, and clicking every remaining
-    /// add-box control never produces an eighth level or a message.
+    /// add-group control never produces an eighth level or a message.
     #[test]
     fn test_the_add_box_control_disappears_at_the_seventh_level() {
         use egui_kittest::kittest::Queryable as _;
@@ -7665,9 +7674,9 @@ mod tests {
         harness.run();
 
         for expected_levels in 2..=7 {
-            // The deepest box's own add-box is node 0: children are drawn
+            // The deepest box's own add-group is node 0: children are drawn
             // before their parent's footer.
-            click_nth(&mut harness, "Add box", 0);
+            click_nth(&mut harness, "Add group", 0);
             let paths = box_paths(&harness.state().0.root, BoxPath::root());
             assert_eq!(paths.len(), expected_levels);
         }
@@ -7683,7 +7692,7 @@ mod tests {
         let accepting = paths.iter().filter(|path| path.accepts_a_box()).count();
         assert_eq!(accepting, 6, "levels one through six accept a box");
         assert_eq!(
-            harness.query_all_by_label("Add box").count(),
+            harness.query_all_by_label("Add group").count(),
             accepting,
             "exactly the boxes that accept an added Box draw the control — the \
              seventh draws none"
@@ -7729,11 +7738,11 @@ mod tests {
             "the Rule joined the seventh-level box"
         );
 
-        // Clicking every add-box control still on screen adds siblings, never
+        // Clicking every add-group control still on screen adds siblings, never
         // depth: node 0 is always the deepest accepting box's control, and no
         // click can reach past the seventh level.
         for _ in 0..accepting {
-            click_nth(&mut harness, "Add box", 0);
+            click_nth(&mut harness, "Add group", 0);
         }
         let root = &harness.state().0.root;
         let paths = box_paths(root, BoxPath::root());
@@ -7743,9 +7752,9 @@ mod tests {
             "no offered control can build an eighth level"
         );
         assert_eq!(
-            harness.query_all_by_label("Add box").count(),
+            harness.query_all_by_label("Add group").count(),
             paths.iter().filter(|path| path.accepts_a_box()).count(),
-            "the painted add-box controls still match the boxes that accept one"
+            "the painted add-group controls still match the boxes that accept one"
         );
         assert!(harness.state().0.refusal.is_none());
     }
@@ -7762,8 +7771,8 @@ mod tests {
         harness.run();
 
         // The box that holds the two values is an any-of box.
-        click_nth(&mut harness, "All of the following", 0);
-        click_nth(&mut harness, "Any of the following", 0);
+        click_nth(&mut harness, "all of the following are true", 0);
+        click_nth(&mut harness, "any", 0);
         click_nth(&mut harness, "Add rule", 0);
         assert_eq!(harness.state().0.root.children.len(), 2);
 
@@ -8655,7 +8664,7 @@ mod tests {
 
         // The nested Box's own combine line — node 1, after the Root Box's —
         // drags down onto the last Rule.
-        let from = rect_of_nth(&harness, "All of the following", 1);
+        let from = rect_of_nth(&harness, "all of the following are true", 1);
         let to = rect_of_nth(&harness, "Album", 0);
         drag_rects(&mut harness, from, to);
 
@@ -8870,7 +8879,7 @@ mod tests {
 
         // The nested Box's own line — node 1, after the Root Box's — onto the
         // row the Box contains.
-        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let box_line = rect_of_nth(&harness, "all of the following are true", 1);
         let inside = rect_of_nth(&harness, "Artist", 0);
         drag_rects(&mut harness, box_line, inside);
 
@@ -8896,7 +8905,7 @@ mod tests {
 
         // The control: the same line onto its sibling Rule, in the same list,
         // really reports — the Box lands at the Rule's position.
-        let box_line = rect_of_nth(&harness, "All of the following", 1);
+        let box_line = rect_of_nth(&harness, "all of the following are true", 1);
         let sibling = rect_of_nth(&harness, "Title", 0);
         drag_rects(&mut harness, box_line, sibling);
         assert!(
@@ -23156,8 +23165,8 @@ mod whole_frame_tests {
 
     /// Opening a saved list puts its real store count on the line, and the
     /// blank row of the empty-state draft before it is not counted: the line
-    /// reports the block with Save's own words, never "Matches 0 songs" —
-    /// while the page's list column row keeps wearing its count-less label.
+    /// reports the block with Save's own words, never a bare zero — while the
+    /// page's list column row keeps wearing its count-less label.
     #[test]
     fn the_live_match_line_counts_the_opened_list_against_the_real_store() {
         let (mut shell, _dir, _id, _store) = custom_list_store_shell();
@@ -23178,7 +23187,10 @@ mod whole_frame_tests {
             "the blank row blocks the line with the words Save uses"
         );
         assert!(
-            shell.harness.query_by_label_contains("Matches ").is_none(),
+            shell
+                .harness
+                .query(By::new().label("0 songs — add a rule to start counting"))
+                .is_none(),
             "a draft that cannot be counted reports the block, never a number"
         );
 
@@ -23194,11 +23206,8 @@ mod whole_frame_tests {
         // The loaded Rule is `Title is "alpha"` and the store holds one
         // scanned "Alpha" among three Tracks: the line counts the real store.
         assert!(
-            shell
-                .harness
-                .query(By::new().label("Matches 1 song"))
-                .is_some(),
-            "the live line counts the loaded list's real matches"
+            shell.harness.query(By::new().label("1 song")).is_some(),
+            "the name well counts the loaded list's real matches"
         );
         assert!(
             shell
@@ -23250,11 +23259,8 @@ mod whole_frame_tests {
         shell.harness.step();
         shell.harness.step();
         assert!(
-            shell
-                .harness
-                .query(By::new().label("Matches 3 songs"))
-                .is_some(),
-            "the loaded shape's count is on the line"
+            shell.harness.query(By::new().label("3 songs")).is_some(),
+            "the loaded shape's count is in the name well"
         );
         assert_eq!(
             custom_count_reads(&mock),
@@ -23341,7 +23347,7 @@ mod whole_frame_tests {
 
     /// A tree the engine cannot compute puts the store's own reason on the
     /// line — the same words the listing would show for the same tree — and
-    /// never "Matches 0 songs".
+    /// never a bare zero.
     #[test]
     fn a_refused_count_shows_the_stores_reason_and_never_zero_songs() {
         let (mut shell, _mock) = counting_mock_shell(MockLibraryQueryStore {
@@ -23364,10 +23370,7 @@ mod whole_frame_tests {
             "the store's own reason is what the line shows"
         );
         assert!(
-            shell
-                .harness
-                .query(By::new().label("Matches 0 songs"))
-                .is_none(),
+            shell.harness.query(By::new().label("0 songs")).is_none(),
             "a refused count is never rendered as 0 songs"
         );
     }

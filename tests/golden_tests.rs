@@ -2287,28 +2287,18 @@ mod tests {
         );
     }
 
-    /// The Smart Playlists pane holding a **nested** tree (ticket 16): a
-    /// saved list whose Rules sit inside Boxes inside Boxes, loaded by
-    /// clicking the list's row. The draft is frontend-local, so the click is
-    /// the only honest way in, and the tree itself is data the query port
-    /// serves like every other row a golden seeds.
-    ///
-    /// What the picture pins: each Box's combine control, the root's own
-    /// Rule above a nested any-of Box drawn one indent step in with its own
-    /// remove control, a Box inside that one two steps in, Rules and Boxes
-    /// interleaved in one list, and every box's own add controls under its
-    /// children.
-    #[test]
-    fn settings_smart_playlists_nested_dark_matches_golden_baseline() {
+    /// The saved Custom Smart Playlist every Smart Playlists golden below
+    /// opens: the list row, its nested tree, and the two Tracks its Rule
+    /// matches, seeded exactly as the query port serves them.
+    fn morning_drive_seed(library: &Library) -> Seed {
         use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
         use riff_backend::domain::{
             Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
             RuleValue,
         };
 
-        let library = Library::geogaddi();
         let id = PlaylistId::new("spl-morning-1");
-        let mut seed = on_settings(scanned(Seed::over(&library), &library, 1284));
+        let mut seed = on_settings(scanned(Seed::over(library), library, 1284));
         seed.query.custom_smart_playlists = vec![CustomSmartPlaylist {
             id: id.clone(),
             name: "Morning drive".to_string(),
@@ -2337,34 +2327,127 @@ mod tests {
         ]));
         seed.query
             .smart_playlist_trees
-            .insert(id.clone(), SmartPlaylistTree::new(root));
-        // The live match line's read (ticket 17): the double serves its canned
-        // listing, so two seeded rows put "Matches 2 songs" into the picture —
-        // a count on the line, not the double's empty zero.
+            .insert(id, SmartPlaylistTree::new(root));
+        // The live count's read (ticket 17): the double serves its canned
+        // listing, so two seeded rows put "2 songs" in the name well — a count,
+        // not the double's empty zero.
         seed.query.custom_page = library.stored().into_iter().take(2).collect();
+        seed
+    }
+
+    /// Open one saved list in the Smart Playlists editor through its own row —
+    /// the honest way in, since the draft is frontend-local. The list's name is
+    /// worn by that row AND by ticket 12's sidebar row: the same shared
+    /// `tree_row` primitive, the same label and role, so the a11y tree cannot
+    /// tell them apart and the click has to take the match right of the
+    /// sidebar, which is what every one of these goldens crops.
+    fn open_saved_smart_playlist(
+        shell: &mut egui_kittest::Harness<'static, riff_gui::ui::RiffApp>,
+        name: &str,
+    ) {
+        use egui_kittest::kittest::Queryable as _;
+
+        click(shell, "Smart Playlists");
+        // The nav click applies at the end of its frame; the list's row exists
+        // in the tree only after the pane has painted.
+        shell.run_steps(2);
+        shell
+            .query_all_by_label(name)
+            .find(|node| node.rect().center().x > theme::SIDEBAR_W)
+            .expect("the pane's own row for the saved list")
+            .click();
+        shell.remove_cursor();
+    }
+
+    /// The Smart Playlists pane holding a **nested** tree (ticket 16): a saved
+    /// list whose Rules sit inside Boxes inside Boxes.
+    ///
+    /// What the picture pins: the Root Box's sentence — "Match songs where",
+    /// its one-word combine chip, "of the following are true" — each Rule as one
+    /// row of chips with no disclosure glyph, and every Box's contents inside a
+    /// card: a step of fill above the page with a left edge, so a nested Box is
+    /// *seen* rather than counted off an indent. Also the count in the name
+    /// well, the interleaved Rules-and-Boxes order, each Box's own remove
+    /// control, and each Box's add controls under its children.
+    #[test]
+    fn settings_smart_playlists_nested_dark_matches_golden_baseline() {
+        let library = Library::geogaddi();
         snapshot_composed(
             "settings_smart_playlists_nested_dark",
             window_with_stage(egui::vec2(1280.0, 960.0)),
             Region::Stage,
             Plan::columns(1),
-            |shell| {
-                click(shell, "Smart Playlists");
-                // The nav click applies at the end of its frame; the list's
-                // row exists in the tree only after the pane has painted.
-                shell.run_steps(2);
-                // The saved list's name is worn by the pane's own row AND by
-                // ticket 12's sidebar row — the same shared `tree_row`
-                // primitive, the same label and role, so the a11y tree cannot
-                // tell them apart. This golden crops the stage, so the click
-                // must take the stage's row: the match right of the sidebar.
-                use egui_kittest::kittest::Queryable as _;
-                let row = shell
-                    .query_all_by_label("Morning drive")
-                    .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-                    .expect("the pane's own row for the saved list");
-                row.click();
-                shell.remove_cursor();
-            },
+            |shell| open_saved_smart_playlist(shell, "Morning drive"),
+            morning_drive_seed(&library),
+        );
+    }
+
+    /// The same pane at a stage too narrow to split — below the
+    /// `MIN_TWO_COL_W` the Library pane already honors — so the lists column
+    /// draws first and the editor sits under it: the sentence, the chips and a
+    /// card inside a card, at the width they have least room at.
+    ///
+    /// Its Rules are `is missing` ones on purpose. A comparison that takes no
+    /// value draws no well, and that is the only row a stage this narrow can
+    /// hold: the value wells are fixed-width, so a full row measures ~415px
+    /// against the ~512 the stacked pane leaves, and no width inside the stacked
+    /// band fits one. A picture with a typed value in it would therefore pin
+    /// nothing but the clipping — a standing defect of the row's own, and not
+    /// what this golden is the guard for.
+    #[test]
+    fn settings_smart_playlists_stacked_dark_matches_golden_baseline() {
+        use riff_backend::app::store::SmartPlaylistTree;
+        use riff_backend::domain::{
+            Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild,
+        };
+
+        let library = Library::geogaddi();
+        let mut seed = morning_drive_seed(&library);
+        let id = seed.query.custom_smart_playlists[0].id.clone();
+        seed.query.smart_playlist_trees.insert(
+            id,
+            SmartPlaylistTree::new(RootBox::new(RuleBox::new(Combine::All).with_children(
+                vec![
+                    RuleChild::Rule(Rule::new(
+                        MatchableField::Title,
+                        Comparison::IsMissing,
+                        None,
+                    )),
+                    RuleChild::Box(RuleBox::new(Combine::Any).with_children(vec![
+                        RuleChild::Rule(Rule::new(
+                            MatchableField::Year,
+                            Comparison::IsMissing,
+                            None,
+                        )),
+                    ])),
+                ],
+            ))),
+        );
+        snapshot_composed(
+            "settings_smart_playlists_stacked_dark",
+            window_with_stage(egui::vec2(560.0, 900.0)),
+            Region::Stage,
+            Plan::columns(1),
+            |shell| open_saved_smart_playlist(shell, "Morning drive"),
+            seed,
+        );
+    }
+
+    /// The name well wearing a count the engine refused: the store's own reason
+    /// in the error ink, and no number standing in for it.
+    #[test]
+    fn settings_smart_playlists_count_failed_dark_matches_golden_baseline() {
+        use crate::mocks::FailingQuery;
+
+        let library = Library::geogaddi();
+        let mut seed = morning_drive_seed(&library);
+        seed.query.failing = vec![FailingQuery::CustomSmartPlaylistCount];
+        snapshot_composed(
+            "settings_smart_playlists_count_failed_dark",
+            window_with_stage(egui::vec2(1280.0, 960.0)),
+            Region::Stage,
+            Plan::columns(1),
+            |shell| open_saved_smart_playlist(shell, "Morning drive"),
             seed,
         );
     }

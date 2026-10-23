@@ -340,7 +340,12 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
 #[test]
 fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
     let tree = nested_tree();
-    let mut editor = editor_holding(&tree);
+    // The draft and the enumeration this test answers with are built from ONE
+    // `list` call: `PlaylistId::new` stamps the wall clock, so a second call
+    // mints a different id whenever the two miss the same millisecond.
+    let saved = list("spl-late-night-2", "Late night jazz");
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(&tree));
     editor.name = "half-typed".to_string();
 
     editor.reconcile(true, Err("the store is locked".to_string()));
@@ -359,7 +364,7 @@ fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
     );
 
     // The read answers again — with the list — and the reason goes with it.
-    editor.reconcile(true, Ok(vec![list("spl-late-night-2", "Late night jazz")]));
+    editor.reconcile(true, Ok(vec![saved.clone()]));
     assert_eq!(editor.lists_reason, None);
     assert_eq!(
         editor.name, "half-typed",
@@ -890,23 +895,19 @@ fn committing_the_previous_value_back_spells_the_previous_tree() {
     );
 }
 
-/// The line's own sentences: the count folds into a sentence, and a block or
-/// a failure is shown exactly as it was given — never as a number, and never
-/// as "0 songs".
+/// The name well's own sentences: the count bare, and a block or a failure
+/// shown exactly as it was given — never as a number.
 #[test]
 fn the_match_line_says_the_count_or_the_reason_but_never_zero() {
     use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
 
     assert_eq!(
         SmartPlaylistMatchLine::Matches(0).text(),
-        "Matches 0 songs",
+        "0 songs",
         "a counted empty list is an honest zero"
     );
-    assert_eq!(SmartPlaylistMatchLine::Matches(1).text(), "Matches 1 song");
-    assert_eq!(
-        SmartPlaylistMatchLine::Matches(42).text(),
-        "Matches 42 songs"
-    );
+    assert_eq!(SmartPlaylistMatchLine::Matches(1).text(), "1 song");
+    assert_eq!(SmartPlaylistMatchLine::Matches(42).text(), "42 songs");
     assert_eq!(
         SmartPlaylistMatchLine::Uncountable("this rule needs a value".to_string()).text(),
         "this rule needs a value",

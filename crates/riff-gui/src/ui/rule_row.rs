@@ -54,7 +54,7 @@
 use eframe::egui;
 use riff_backend::domain::field_catalog::{ValueWidget, spec};
 use riff_backend::domain::{Comparison, MatchableField, Rule, RuleValue};
-use riff_gui_components::button::{TextButton, Variant, text_button};
+use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
 use riff_gui_components::text_field::{TextField, text_field};
 use riff_gui_components::toggle_switch::toggle_switch;
@@ -744,8 +744,10 @@ pub struct RuleRowOutcome {
 /// picker, `None` while none is open or the read has not come back.
 ///
 /// The three lists are the component library's inline selector, one instance
-/// per part with its own derived id; every header is a real button, so each
-/// part is reachable by a click, by the keyboard and by the a11y tree.
+/// per part with its own derived id. Field and comparison are chips — the
+/// current answer's own word on a filled button, no chevron — so the row reads
+/// left to right as one sentence; every part is a real button, so each is
+/// reachable by a click, by the keyboard and by the a11y tree.
 #[must_use = "a row's output is what the listener just decided; dropping it                 loses the choice"]
 pub fn rule_row(
     ui: &mut egui::Ui,
@@ -757,10 +759,10 @@ pub fn rule_row(
 ) -> RuleRowOutcome {
     let mut intents = Vec::new();
     let outer = ui.horizontal(|ui| {
-        draw_field_header(ui, cache, palette, id, draft, &mut intents);
+        draw_field_chip(ui, cache, palette, id, draft, &mut intents);
         ui.add_space(PART_GAP);
         if draft.field.is_some() {
-            draw_comparison_header(ui, cache, palette, id, draft, &mut intents);
+            draw_comparison_chip(ui, cache, palette, id, draft, &mut intents);
             ui.add_space(PART_GAP);
         }
         // The switch's own accessible name is "Not", but a bare pill says
@@ -788,8 +790,8 @@ pub fn rule_row(
     }
 }
 
-/// The field header: the catalog's display name, and the list it opens.
-fn draw_field_header(
+/// The field chip: the catalog's display name, and the list it opens.
+fn draw_field_chip(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
@@ -798,14 +800,8 @@ fn draw_field_header(
     intents: &mut Vec<RuleIntent>,
 ) {
     let open = draft.open == Some(RulePanel::Field);
-    let pressed = header(
-        ui,
-        cache,
-        palette,
-        id.with(("field", "header")),
-        draft.field_label(),
-        open,
-    );
+    let label = draft.field_label();
+    let pressed = chip(ui, cache, palette, id.with(("field", "chip")), label, label);
     if pressed {
         intents.push(RuleIntent::PanelToggled {
             panel: RulePanel::Field,
@@ -814,8 +810,8 @@ fn draw_field_header(
     }
 }
 
-/// The comparison header: this module's word for the catalog's chosen id.
-fn draw_comparison_header(
+/// The comparison chip: this module's word for the catalog's chosen id.
+fn draw_comparison_chip(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
@@ -824,13 +820,14 @@ fn draw_comparison_header(
     intents: &mut Vec<RuleIntent>,
 ) {
     let open = draft.open == Some(RulePanel::Comparison);
-    let pressed = header(
+    let label = draft.current_comparison_label();
+    let pressed = chip(
         ui,
         cache,
         palette,
-        id.with(("comparison", "header")),
-        draft.current_comparison_label(),
-        open,
+        id.with(("comparison", "chip")),
+        label,
+        label,
     );
     if pressed {
         intents.push(RuleIntent::PanelToggled {
@@ -840,8 +837,55 @@ fn draw_comparison_header(
     }
 }
 
+/// One chip: the current choice's own word as a filled button, with no
+/// disclosure glyph. The row reads as a sentence because each part wears the
+/// word it currently holds, and the word is the whole answer — a chevron would
+/// only say "there is a list behind this", which the list itself says better
+/// the moment it opens below. A real button, because a painted rectangle senses
+/// nothing: pointer, keyboard and the a11y tree all reach the part through it.
+///
+/// `a11y` is the name the control answers to, which is the label itself on the
+/// row's own chips and a full clause on the combine chip the Smart Playlists
+/// pane borrows — where the visible word is one of two and a screen reader
+/// needs the sentence around it to say what choosing it does.
+pub(crate) fn chip(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    id: egui::Id,
+    label: &str,
+    a11y: &str,
+) -> bool {
+    let width = text_button_size(ui, palette, label, true)
+        .x
+        .min(ui.available_width().max(0.0));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
+    text_button(
+        ui,
+        cache,
+        palette,
+        false,
+        &TextButton {
+            id,
+            rect,
+            label,
+            a11y,
+            tooltip: None,
+            icon: None,
+            small: true,
+            variant: Variant::Secondary,
+            enabled: true,
+        },
+    )
+}
+
 /// One disclosure header, and whether it was pressed this frame. A real
 /// button, because a painted rectangle senses nothing.
+///
+/// The library-picker toggle is the row's last part still wearing a chevron.
+/// It is the one part whose label is not the current answer — "Choose…" says
+/// what the click does, not what the Rule holds — and the chevron is what keeps
+/// it distinguishable from the two chips, whose word *is* their state.
 fn header(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -1023,6 +1067,7 @@ fn typed_well(
             clear_label: None,
             // Escape belongs to the editor that hosts the row, never to the
             // well the cursor happens to sit in (the tag editor's rule).
+            trailing: None,
             dismiss_on_escape: false,
         },
     );

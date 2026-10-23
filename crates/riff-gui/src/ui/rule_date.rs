@@ -258,6 +258,7 @@ fn draw_window(
             clear_label: None,
             // Escape belongs to the editor that hosts the row, never to the
             // well the cursor happens to sit in (the tag editor's rule).
+            trailing: None,
             dismiss_on_escape: false,
         },
     );
@@ -338,6 +339,7 @@ fn draw_fixed(
                 hint,
                 leading_icon: None,
                 clear_label: None,
+                trailing: None,
                 dismiss_on_escape: false,
             },
         );

@@ -35,7 +35,7 @@ use crate::ui::rule_row::{RuleDraft, RulePanel};
 /// The most Rule Boxes a path from the Root Box may hold.
 ///
 /// A level is a Rule Box and the Root Box is level 1, so a path holds at
-/// most this many boxes and the add-box control disappears at the deepest
+/// most this many boxes and the add-group control disappears at the deepest
 /// level rather than rejecting a save (story 33). It is an **editor rule and
 /// a displayed one only**: nothing in the store or the query compiler counts
 /// levels, and nothing in this module enforces the cap — the one place it is
@@ -78,6 +78,14 @@ impl BoxPath {
         &self.0
     }
 
+    /// Whether this is the Root Box's own path — the empty walk, the one Box
+    /// with no parent. The pane reads it to decide which Box wears the sentence
+    /// the whole tree is a prefix of, rather than a card header of its own.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// This box's level: the Root Box is level 1, one step per nested Box.
     #[must_use]
     pub const fn level(&self) -> usize {
@@ -86,7 +94,7 @@ impl BoxPath {
 
     /// Whether a Rule Box may be added inside the box this path names — the
     /// one place [`MAX_RULE_BOX_LEVELS`] is asked. `false` means the pane
-    /// draws no add-box control there: the cap is displayed by absence, and
+    /// draws no add-group control there: the cap is displayed by absence, and
     /// no message is ever shown for trying to exceed it.
     #[must_use]
     pub const fn accepts_a_box(&self) -> bool {

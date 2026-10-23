@@ -117,8 +117,8 @@ A user-authored condition on Track facts, combined with other Rules by AND or OR
 _Avoid_: condition, clause, filter
 
 **Rule Box**:
-A container in a Custom Smart Playlist that says whether everything inside it must match or whether any one thing may. A box holds Rules and other boxes.
-_Avoid_: rule group, match set, folder
+A container in a Custom Smart Playlist that says whether everything inside it must match or whether any one thing may. A box holds Rules and other boxes. The editor calls one a **group** — "Add group", "Remove group", a card with its own all/any line — because "box" names the data structure and says nothing about what it does; the model, this glossary and every code name keep Rule Box.
+_Avoid_: match set, folder
 
 **Root Box**:
 The one Rule Box in a Custom Smart Playlist that has no parent; every other box and Rule hangs inside it, and the limit on how deep a list may nest is counted from it. A saved list holds at least one Rule somewhere inside it — an empty tree is not storable.

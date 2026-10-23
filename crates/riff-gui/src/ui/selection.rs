@@ -539,6 +539,7 @@ fn editor_section(
                 hint: "",
                 leading_icon: None,
                 clear_label: None,
+                trailing: None,
                 dismiss_on_escape: false,
             },
         );

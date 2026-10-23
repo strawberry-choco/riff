@@ -63,6 +63,7 @@ fn run_text_field(focused: bool) -> image::RgbaImage {
                         hint: "Search or jump to…",
                         leading_icon: Some(Icon::Search),
                         clear_label: Some("Clear search"),
+                        trailing: None,
                         dismiss_on_escape: true,
                     },
                 );
@@ -106,6 +107,7 @@ fn test_text_field_shares_clear_affordance_and_focus_ring() {
                         hint: "Search or jump to…",
                         leading_icon: Some(Icon::Search),
                         clear_label: Some("Clear search"),
+                        trailing: None,
                         dismiss_on_escape: true,
                     },
                 );
@@ -139,6 +141,7 @@ fn test_text_field_shares_clear_affordance_and_focus_ring() {
                         hint: "Search or jump to…",
                         leading_icon: Some(Icon::Search),
                         clear_label: Some("Clear search"),
+                        trailing: None,
                         dismiss_on_escape: true,
                     },
                 );

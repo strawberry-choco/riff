@@ -563,7 +563,7 @@ pub enum SettingsAction {
         /// The Box the new Rule row joins.
         parent: BoxPath,
     },
-    /// The editor's "Add box" control: append one new Box, holding one blank
+    /// The editor's "Add group" control: append one new Box, holding one blank
     /// Rule, to the Box at `parent`. The control is absent at the seventh
     /// level — the cap is displayed, never refused — so no `parent` the paint
     /// can produce lands deeper than the cap.

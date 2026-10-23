@@ -21,12 +21,13 @@
 //! - *Ticket 16 (Rule Box nesting)* owns the representation of a nested Box —
 //!   [`SmartPlaylistsEditor::root`] is the whole tree, one
 //!   [`RuleBoxDraft`] holding Rules and Boxes in each Box's one interleaved
-//!   sibling order, and this module draws it depth-first. The add-box
+//!   sibling order, and this module draws it depth-first. The add-group
 //!   control disappears at the seventh level (the Root Box is level 1) and no
 //!   message is ever shown for the level nobody can reach.
-//! - *Ticket 17 (the live match count)* hangs its count line off this pane's
-//!   header slot; the row identity contract (slot index) is what it keys on —
-//!   widened by ticket 16 to a [`ChildSlot`] (the Box's path plus the index).
+//! - *Ticket 17 (the live match count)* wears its number inside this pane's
+//!   name field, in the well the listener is already looking at; the row
+//!   identity contract (slot index) is what it keys on — widened by ticket 16
+//!   to a [`ChildSlot`] (the Box's path plus the index).
 //! - *Ticket 18 (draft + save/cancel + reasons)* is what this module is now:
 //!   dirtiness derived by comparing the buffers against [`SmartPlaylistOriginal`],
 //!   the one [`SmartPlaylistsEditor::reconcile`] that keeps the draft aligned
@@ -49,7 +50,7 @@
 use crate::ui::browser;
 use crate::ui::rule_box::{BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft};
 use crate::ui::rule_row::{
-    RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, ValueGap, rule_row,
+    self, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, ValueGap, rule_row,
 };
 use crate::ui::settings::{
     LibraryPaneColumns, SettingsAction, SettingsContent, settings_pane_columns,
@@ -64,10 +65,12 @@ use riff_backend::domain::{
 use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
 use riff_gui_components::ghost_icon_button::ghost_icon_button;
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
-use riff_gui_components::text_field::{TextField, text_field};
+use riff_gui_components::text_field::{TextField, TrailingText, TrailingTone, text_field};
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_box;
-use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, HEADER_LABEL_PAD, LIST_TOP_GAP, WELL_H};
+use riff_gui_theme::theme::geometry::rule_row::{
+    HEADER_H, HEADER_LABEL_PAD, LIST_TOP_GAP, PART_GAP, WELL_H,
+};
 use riff_gui_theme::theme::geometry::settings::SECTION_GAP;
 use riff_gui_theme::theme::{self, Palette};
 
@@ -82,7 +85,7 @@ pub enum SmartPlaylistPickerValues {
 }
 
 impl SmartPlaylistPickerValues {
-    /// The same values as the prop [`rule_row`] takes.
+    /// The same values as the prop [`rule_row()`] takes.
     #[must_use]
     pub fn prop(&self) -> RulePickerValues<'_> {
         match self {
@@ -145,13 +148,15 @@ pub enum SmartPlaylistMatchLine {
 }
 
 impl SmartPlaylistMatchLine {
-    /// The words the line shows: the count in a sentence, or the reason
-    /// exactly as it was given.
+    /// The words the line shows: the count bare, or the reason exactly as it
+    /// was given. The count carries no "Matches" prefix because it is worn
+    /// inside the name well, where the field it belongs to is already in the
+    /// listener's eye-line and the prefix would only re-say what the well says.
     #[must_use]
     pub fn text(&self) -> String {
         match self {
-            Self::Matches(1) => "Matches 1 song".to_string(),
-            Self::Matches(count) => format!("Matches {count} songs"),
+            Self::Matches(1) => "1 song".to_string(),
+            Self::Matches(count) => format!("{count} songs"),
             Self::Uncountable(reason) | Self::Failed(reason) => reason.clone(),
         }
     }
@@ -217,7 +222,7 @@ pub struct SmartPlaylistsEditor {
     /// The tree being written: the Root Box, holding Rules and nested Rule
     /// Boxes in one interleaved sibling order each (ticket 16). The Root Box
     /// is level 1, and a path holds at most seven Boxes — a *displayed*
-    /// editor rule the paint answers by hiding the add-box control, never a
+    /// editor rule the paint answers by hiding the add-group control, never a
     /// check the model or the save makes.
     pub root: RuleBoxDraft,
     /// The state this draft was opened from — what [`Self::is_dirty`]
@@ -778,23 +783,26 @@ fn committed_rule(draft: &RuleDraft) -> Result<Rule, DraftBlock> {
     Ok(rule)
 }
 
-/// The live match line: the count, or the reason no number can be shown.
-///
-/// The count is secondary text. A draft the listener has not finished blocks
-/// it in the hint tone — its sentence is the same one a refused Save uses, so
-/// it reads as what is still owed, not as an error — while a tree the engine
-/// cannot compute is a broken answer and wears the error tone.
-fn match_line_label(ui: &mut egui::Ui, palette: &Palette, line: &SmartPlaylistMatchLine) {
-    let color = match line {
-        SmartPlaylistMatchLine::Matches(_) => palette.ink_2,
-        SmartPlaylistMatchLine::Uncountable(_) => palette.ink_3,
-        SmartPlaylistMatchLine::Failed(_) => palette.error,
-    };
-    ui.label(
-        egui::RichText::new(line.text())
-            .color(color)
-            .size(theme::TEXT_XS),
-    );
+/// The words the name well wears: the count, the block, or the engine's own
+/// reason — plus the zero a draft holds before its first count has come back.
+/// `None` is not a failure and is never painted like one: it is the frame before
+/// the read, and the sentence says what is coming rather than what is broken.
+fn match_line_text(line: Option<&SmartPlaylistMatchLine>) -> String {
+    match line {
+        Some(line) => line.text(),
+        None => "0 songs — add a rule to start counting".to_string(),
+    }
+}
+
+/// The ink the count wears. A draft the listener has not finished is the readout
+/// tone — its sentence is the same one a refused Save uses, so it reads as what
+/// is still owed, not as an error — while a tree the engine cannot compute is a
+/// broken answer and says so in the error tone.
+fn match_line_tone(line: Option<&SmartPlaylistMatchLine>) -> TrailingTone {
+    match line {
+        Some(SmartPlaylistMatchLine::Failed(_)) => TrailingTone::Error,
+        _ => TrailingTone::Muted,
+    }
 }
 
 /// Which picker values a row asked for: the catalog's `Number` fields read
@@ -1029,6 +1037,12 @@ fn editor_column(
     ui.label(egui::RichText::new(title).color(palette.ink_2));
     ui.add_space(theme::SPACE_XS);
 
+    // The name being typed, with the live match count worn inside its own well
+    // (ticket 17's line, moved here). The count is the single piece of feedback
+    // that says whether the tree so far matches anything; on a line below the
+    // field a listener building a rule had to look in two places to find out,
+    // and the second place was the smaller one.
+    let count = match_line_text(editor.match_line.as_ref());
     let name_w = ui.available_width();
     let (_, name_response) =
         ui.allocate_exact_size(egui::vec2(name_w, WELL_H), egui::Sense::hover());
@@ -1043,6 +1057,10 @@ fn editor_column(
             hint: "Name this playlist",
             leading_icon: None,
             clear_label: None,
+            trailing: Some(TrailingText {
+                text: count.as_str(),
+                tone: match_line_tone(editor.match_line.as_ref()),
+            }),
             dismiss_on_escape: false,
         },
     );
@@ -1052,26 +1070,17 @@ fn editor_column(
         ui.add_space(theme::SPACE_XS);
         ui.colored_label(palette.error, reason);
     }
-
-    // The live match line (ticket 17): how many Tracks the committed tree
-    // matches, or why no number can be shown. It paints what the app's
-    // refresh last wrote — nothing on this paint path reaches a store — and
-    // it is silent only on a frame before that refresh has run.
-    if let Some(line) = &editor.match_line {
-        ui.add_space(theme::SPACE_XS);
-        match_line_label(ui, palette, line);
-    }
     ui.add_space(theme::SPACE_MD);
 
     sidebar::section_header(ui, palette, "Rules");
     ui.add_space(theme::SPACE_SM);
 
     // The tree (ticket 16): one box model, drawn depth-first from the Root
-    // Box — level 1 — every Box's children and controls one indent step in.
-    // The step is the design system's, not this function's. The refusal
-    // travels beside the tree as an immutable borrow so each row can paint
-    // the reason that belongs to it, exactly where that row is drawn.
-    ui.spacing_mut().indent = rule_box::INDENT;
+    // Box — level 1 — every Box's children and controls inside its card, one
+    // step in from the Box that holds it. The step is the design system's, not
+    // this function's. The refusal travels beside the tree as an immutable
+    // borrow so each row can paint the reason that belongs to it, exactly where
+    // that row is drawn.
     let reduce_motion = content.reduce_motion;
     let mut picker_events = Vec::new();
     {
@@ -1122,6 +1131,46 @@ fn editor_column(
     save_cancel_row(ui, cache, palette, content.reduce_motion, actions);
 }
 
+/// One Rule Box's contents, inside the card that says they are combined by one
+/// rule of their own.
+///
+/// Indent alone was invisible: a flat tree and a nested one measured the same,
+/// so nothing on screen told a listener that the rows inside a Box answer to
+/// that Box and not to the page. A card is the same information drawn — one step
+/// of fill above the plane behind it, and a left edge in the ink the tree's own
+/// lines already use.
+///
+/// `egui::Frame` is what lets the card be one height its children decide while
+/// still sitting behind them: it reserves its background slot before the
+/// contents are laid out and fills it after, so the fill never has to know its
+/// own height in advance.
+fn rule_card<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let frame = egui::Frame::new()
+        .fill(palette.surface)
+        .inner_margin(egui::Margin::from(rule_box::GROUP_PAD));
+    let mut prepared = frame.begin(ui);
+    let result = contents(&mut prepared.content_ui);
+    let card_rect = prepared.content_ui.min_rect() + prepared.frame.inner_margin;
+    prepared.paint(ui);
+    // The edge goes on after the fill, and inside the padding the fill already
+    // reserved: at two pixels wide it touches nothing the Box holds, and it is
+    // the only thing that says "these rows hang together".
+    ui.painter_at(card_rect).rect_filled(
+        egui::Rect::from_min_size(
+            card_rect.min,
+            egui::vec2(rule_box::GROUP_BORDER_W, card_rect.height()),
+        ),
+        0.0,
+        palette.ink_3,
+    );
+    prepared.allocate_space(ui);
+    result
+}
+
 /// One Rule Box, drawn depth-first: its combine control (the line a nested
 /// Box's remove control shares), then every child in the box's one
 /// interleaved sibling order — a Rule row or a recursively drawn Box — and
@@ -1130,7 +1179,7 @@ fn editor_column(
 /// `own_slot` is the Box's slot in its parent's list, `None` for the Root Box,
 /// which has no parent and so nothing to be removed from. The seven-level cap
 /// is drawn exactly here and nowhere else: at the deepest level
-/// [`BoxPath::accepts_a_box`] answers `false` and the add-box control is
+/// [`BoxPath::accepts_a_box`] answers `false` and the add-group control is
 /// simply not painted — no rejection, no message, and nothing for the model
 /// or the save to enforce.
 #[expect(
@@ -1157,9 +1206,16 @@ fn draw_rule_box(
     // sibling list (ticket 19): dragging it moves the whole child — the Box
     // leaves with everything inside it, the same unit its remove control
     // takes. The Root Box has no parent slot, so it neither drags nor
-    // accepts a drop. Same list only, enforced inside the wrapper.
-    let (line, dropped) =
-        draw_box_line(ui, cache, palette, box_id, boxed.combine, listed, own_slot);
+    // accepts a drop, and it is drawn as the sentence its children complete
+    // rather than as a header line. Same list only, enforced inside the wrapper.
+    let (line, dropped) = if path.is_root() {
+        (
+            draw_sentence_prefix(ui, cache, palette, box_id, boxed.combine),
+            None,
+        )
+    } else {
+        draw_box_line(ui, cache, palette, box_id, boxed.combine, listed, own_slot)
+    };
     // A drag released over this Box's line moves the dragged sibling to this
     // Box's position; the floating copy reports nothing. A payload from
     // another sibling list never reaches here (the wrapper refuses it), and
@@ -1197,7 +1253,7 @@ fn draw_rule_box(
     }
 
     ui.add_space(theme::SPACE_XS);
-    ui.indent(box_id.with("contents"), |ui| {
+    rule_card(ui, palette, |ui| {
         let child_count = boxed.children.len();
         for index in 0..child_count {
             match &mut boxed.children[index] {
@@ -1245,12 +1301,12 @@ fn draw_rule_box(
     });
 }
 
-/// A Box's add controls, in one line under its children: "Add rule" always,
-/// "Add box" while [`BoxPath::accepts_a_box`] holds.
+/// A Box's add controls, in one line under the children they append to: "Add
+/// rule" always, "Add group" while [`BoxPath::accepts_a_box`] holds.
 ///
-/// The cap is drawn here and nowhere else: at the seventh level the add-box
-/// control is **absent** rather than refusing — no message is ever shown for
-/// the level nobody can reach, and nothing behind it rejects.
+/// The cap is drawn here and nowhere else: at the seventh level the add-group
+/// control is **absent** rather than refusing — no message is ever shown for the
+/// level nobody can reach, and nothing behind it rejects.
 fn draw_box_add_controls(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -1282,7 +1338,7 @@ fn draw_box_add_controls(
                 cache,
                 palette,
                 reduce_motion,
-                "Add box",
+                "Add group",
                 box_id.with("add_box"),
                 Some(Icon::Plus),
                 Variant::Secondary,
@@ -1560,7 +1616,7 @@ fn draw_box_line(
                     cache,
                     palette,
                     box_id,
-                    combine_label(combine),
+                    combine_phrase(combine),
                     listed,
                     true,
                 );
@@ -1580,7 +1636,7 @@ fn draw_box_line(
                 cache,
                 palette,
                 box_id,
-                combine_label(combine),
+                combine_phrase(combine),
                 listed,
                 false,
             ),
@@ -1605,8 +1661,13 @@ fn box_control_line(
         let pressed = box_header(ui, cache, palette, box_id.with("combine"), label, listed);
         if removable {
             ui.add_space(theme::SPACE_SM);
-            remove_pressed =
-                remove_button(ui, cache, palette, box_id.with("remove_box"), "Remove box");
+            remove_pressed = remove_button(
+                ui,
+                cache,
+                palette,
+                box_id.with("remove_box"),
+                "Remove group",
+            );
         }
         pressed
     });
@@ -1615,6 +1676,52 @@ fn box_control_line(
         remove_pressed,
         response: line.response,
     }
+}
+
+/// The Root Box's line, read as the sentence its children finish: "Match songs
+/// where" + the combine chip + "of the following are true".
+///
+/// "All of the following" alone is a term of art — it names the structure and
+/// says nothing about what it does, and a listener who has never written a Rule
+/// has no way to know what is "following". The sentence says what the tree does
+/// to the Library, and the one word the listener actually picks sits inside it,
+/// wearing the same chip the rows' own parts wear. The nested Box keeps a header
+/// of its own instead: it is one clause *within* a sentence, not the sentence.
+fn draw_sentence_prefix(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    box_id: egui::Id,
+    combine: Combine,
+) -> BoxLineReport {
+    let line = ui.horizontal(|ui| {
+        ui.label(sentence_fragment(palette, "Match songs where"));
+        ui.add_space(PART_GAP);
+        let pressed = rule_row::chip(
+            ui,
+            cache,
+            palette,
+            box_id.with("combine"),
+            combine_word(combine),
+            combine_phrase(combine),
+        );
+        ui.add_space(PART_GAP);
+        ui.label(sentence_fragment(palette, "of the following are true"));
+        pressed
+    });
+    BoxLineReport {
+        combine_pressed: line.inner,
+        // The Root Box has no parent to be removed from.
+        remove_pressed: false,
+        response: line.response,
+    }
+}
+
+/// One half of the sentence a combine chip sits inside, at the row's own scale.
+fn sentence_fragment(palette: &Palette, words: &str) -> egui::RichText {
+    egui::RichText::new(words)
+        .color(palette.ink_2)
+        .size(theme::TEXT_XS)
 }
 
 /// The two combine words, drawn inline under the control while its list is
@@ -1628,7 +1735,7 @@ fn draw_combine_list(
     ui.add_space(LIST_TOP_GAP);
     let options = [Combine::All, Combine::Any].map(|combine| OptionChoice {
         key: combine,
-        label: combine_label(combine),
+        label: combine_word(combine),
     });
     option_list(
         ui,
@@ -1653,12 +1760,24 @@ fn header_width(ui: &egui::Ui, palette: &Palette, label: &str) -> f32 {
     (galley.size().x + HEADER_LABEL_PAD).min(ui.available_width().max(0.0))
 }
 
-/// The words for a Box's combine choice — the listener's own phrase, spelled
-/// once for the control and for the list's two options.
-fn combine_label(combine: Combine) -> &'static str {
+/// The two words a Box's combine choice is made of, as its list offers them and
+/// as the Root Box's sentence wears one of them. The stored [`Combine`]
+/// vocabulary is unchanged; only the clause it is wrapped in is shorter, because
+/// the sentence around the chip already says what the word chooses between.
+fn combine_word(combine: Combine) -> &'static str {
     match combine {
-        Combine::All => "All of the following",
-        Combine::Any => "Any of the following",
+        Combine::All => "all",
+        Combine::Any => "any",
+    }
+}
+
+/// The same choice spelled out as the clause it is — what a nested Box's card
+/// header says, and what the Root Box's one-word chip is named to the a11y tree,
+/// where "all" on its own answers no question.
+fn combine_phrase(combine: Combine) -> &'static str {
+    match combine {
+        Combine::All => "all of the following are true",
+        Combine::Any => "any of the following are true",
     }
 }
 

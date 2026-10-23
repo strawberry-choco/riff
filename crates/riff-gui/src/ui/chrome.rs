@@ -525,6 +525,7 @@ pub fn show_titlebar(
             hint: "Search or jump to…",
             leading_icon: Some(Icon::Search),
             clear_label: Some("Clear search"),
+            trailing: None,
             dismiss_on_escape: true,
         },
     )

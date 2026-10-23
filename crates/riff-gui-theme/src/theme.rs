@@ -1261,9 +1261,9 @@ pub mod geometry {
     pub mod rule_row {
         /// Horizontal gap between the row's parts.
         pub const PART_GAP: f32 = 8.0;
-        /// Height of one disclosure header — the control that names the part
-        /// and opens its list. Rides
-        /// [`option_list::ROW_H`](super::option_list::ROW_H) so a header and
+        /// Height of one control on the row's line — a chip, or a disclosure
+        /// header that still carries its chevron. Rides
+        /// [`option_list::ROW_H`](super::option_list::ROW_H) so a control and
         /// the option row it opens look like one scale.
         pub const HEADER_H: f32 = 28.0;
         /// Height of one typed-value well, the same scale as a header so the
@@ -1307,19 +1307,27 @@ pub mod geometry {
     }
 
     /// The Rule Box tree (`riff_gui::ui::rule_box`, drawn by the Smart
-    /// Playlists pane): how far one nested Box indents its contents, and the
-    /// square a Rule's or a Box's own remove control occupies at its line's
-    /// end. Nesting goes to seven levels, so the indent is deliberately one
-    /// small step — the widest pane at the launch window still lays a
-    /// six-deep indented line out without clipping.
+    /// Playlists pane): the card each Box's contents sit inside, and the square
+    /// a Rule's or a Box's own remove control occupies at its line's end.
+    /// Nesting goes to seven levels, so the card's own padding is deliberately
+    /// one small step — it is the whole horizontal step a deeper Box takes, and
+    /// the widest pane at the launch window still lays a six-deep card out
+    /// without clipping.
     pub mod rule_box {
-        /// One nesting step: the x a Box's children and its own add controls
-        /// start at, one level below the Box's combine control.
-        pub const INDENT: f32 = 16.0;
         /// Side of the square remove control at the end of a Rule's line and
         /// of a nested Box's header line. The same 24px square the sidebar's
         /// row affordances occupy, so a glyph is never squeezed.
         pub const REMOVE_W: f32 = 24.0;
+        /// Width of a group card's left edge — the only mark that says "these
+        /// rows are combined by one rule of their own". Indent alone was
+        /// invisible: a flat tree and a nested one measured the same, so the
+        /// nesting had to be drawn, not just stepped.
+        pub const GROUP_BORDER_W: f32 = 2.0;
+        /// Padding inside a group card, between its edge and the rows it holds.
+        /// Wider than the pane's own `SPACE_SM` rhythm because the card is a
+        /// container: its contents read as *inside* something only if the wall
+        /// they are pressed against is not their own line.
+        pub const GROUP_PAD: f32 = 12.0;
     }
 }
 

@@ -18,13 +18,13 @@ use lofty::prelude::*;
 use lofty::read_from_path;
 use lofty::tag::{ItemKey, Tag};
 use riff_library::app::errors::LibraryError;
-use riff_playback::domain::duration_from_frames;
 use riff_persistence::track::{CoverSource, TrackMetadata};
+use riff_playback::domain::duration_from_frames;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
 use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::meta::StandardTag;
@@ -252,9 +252,8 @@ impl LoftyMetadataReader {
         ),
         LibraryError,
     > {
-        let source = std::fs::File::open(path).map_err(|e| {
-            LibraryError::MetadataRead(format!("Failed to open file: {e}"))
-        })?;
+        let source = std::fs::File::open(path)
+            .map_err(|e| LibraryError::MetadataRead(format!("Failed to open file: {e}")))?;
         let mss = symphonia::core::io::MediaSourceStream::new(
             Box::new(source),
             symphonia::core::io::MediaSourceStreamOptions::default(),
@@ -309,71 +308,52 @@ impl LoftyMetadataReader {
         // extractors, mapped to a String (numbers are stringified for the
         // shared `Option<String>` return). Returning `None` when the file's
         // tags don't set that field matches lofty's own behavior.
-        let first_std =
-            |variants: &[fn(&StandardTag) -> Option<String>]| -> Option<String> {
-                variants.iter().find_map(|variant| {
-                    tags_copy
-                        .iter()
-                        .find_map(|t| t.std.as_ref().and_then(variant))
-                })
-            };
+        let first_std = |variants: &[fn(&StandardTag) -> Option<String>]| -> Option<String> {
+            variants.iter().find_map(|variant| {
+                tags_copy
+                    .iter()
+                    .find_map(|t| t.std.as_ref().and_then(variant))
+            })
+        };
 
         let mut metadata = TrackMetadata::default();
-        metadata.title = first_std(&[
-            |s| match s {
-                StandardTag::TrackTitle(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.artist = first_std(&[
-            |s| match s {
-                StandardTag::Artist(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.album = first_std(&[
-            |s| match s {
-                StandardTag::Album(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.album_artist = first_std(&[
-            |s| match s {
-                StandardTag::AlbumArtist(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.composer = first_std(&[
-            |s| match s {
-                StandardTag::Composer(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.comment = first_std(&[
-            |s| match s {
-                StandardTag::Comment(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.genre = first_std(&[
-            |s| match s {
-                StandardTag::Genre(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ]);
-        metadata.track_number = first_std(&[
-            |s| match s {
-                StandardTag::TrackNumber(v) => Some(v.to_string()),
-                _ => None,
-            },
-        ])
+        metadata.title = first_std(&[|s| match s {
+            StandardTag::TrackTitle(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.artist = first_std(&[|s| match s {
+            StandardTag::Artist(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.album = first_std(&[|s| match s {
+            StandardTag::Album(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.album_artist = first_std(&[|s| match s {
+            StandardTag::AlbumArtist(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.composer = first_std(&[|s| match s {
+            StandardTag::Composer(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.comment = first_std(&[|s| match s {
+            StandardTag::Comment(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.genre = first_std(&[|s| match s {
+            StandardTag::Genre(v) => Some(v.as_str().to_owned()),
+            _ => None,
+        }]);
+        metadata.track_number = first_std(&[|s| match s {
+            StandardTag::TrackNumber(v) => Some(v.to_string()),
+            _ => None,
+        }])
         .and_then(|s| s.parse::<u32>().ok());
-        metadata.disc_number = first_std(&[
-            |s| match s {
-                StandardTag::DiscNumber(v) => Some(v.to_string()),
-                _ => None,
-            },
-        ])
+        metadata.disc_number = first_std(&[|s| match s {
+            StandardTag::DiscNumber(v) => Some(v.to_string()),
+            _ => None,
+        }])
         .and_then(|s| s.parse::<u32>().ok());
         metadata.year = first_std(&[
             |s| match s {

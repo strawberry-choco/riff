@@ -690,21 +690,14 @@ fn save_bar(
     ui.horizontal(|ui| {
         // One button owner: an affirmative Primary save that a disabled state
         // strips of both click and focus, and a neutral Cancel.
-        let (rect, _) = ui.allocate_exact_size(
-            riff_gui_components::button::text_button_size(ui, palette, "Save", false),
-            egui::Sense::hover(),
-        );
-        if riff_gui_components::button::text_button(
+        if riff_gui_components::button::flow_text_button(
             ui,
             cache,
             palette,
             reduce_motion,
-            &riff_gui_components::button::TextButton {
+            &riff_gui_components::button::FlowTextButton {
                 id: egui::Id::new("tag_editor_save"),
-                rect,
                 label: "Save",
-                a11y: "Save",
-                tooltip: None,
                 icon: None,
                 small: false,
                 variant: riff_gui_components::button::Variant::Primary,
@@ -713,21 +706,14 @@ fn save_bar(
         ) {
             actions.push(SelectionAction::SaveTagEdit);
         }
-        let (rect, _) = ui.allocate_exact_size(
-            riff_gui_components::button::text_button_size(ui, palette, "Cancel", false),
-            egui::Sense::hover(),
-        );
-        if riff_gui_components::button::text_button(
+        if riff_gui_components::button::flow_text_button(
             ui,
             cache,
             palette,
             reduce_motion,
-            &riff_gui_components::button::TextButton {
+            &riff_gui_components::button::FlowTextButton {
                 id: egui::Id::new("tag_editor_cancel"),
-                rect,
                 label: "Cancel",
-                a11y: "Cancel",
-                tooltip: None,
                 icon: None,
                 small: false,
                 variant: riff_gui_components::button::Variant::Caption,

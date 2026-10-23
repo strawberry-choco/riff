@@ -22,7 +22,8 @@ use riff_gui::ui::smart_playlists_page::{SmartPlaylistRefusal, SmartPlaylistsEdi
 /// One saved-list row as the D14 enumeration answers it. `PlaylistId::new`
 /// stamps the wall clock, so two calls mint two ids unless they land in the
 /// same millisecond: a test that matches a row against the draft's own id
-/// builds both from ONE call — [`editor_and_list`] is that pairing.
+/// mints the id once, loads the draft from it, and derives any other row of
+/// the same list from that one call.
 fn list(id: &str, name: &str) -> CustomSmartPlaylist {
     CustomSmartPlaylist {
         id: PlaylistId::new(id),
@@ -306,9 +307,12 @@ fn an_unreadable_rule_is_not_a_rule_and_spells_no_tree() {
 #[test]
 fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
     let tree = nested_tree();
+    // ONE `list` call for the draft and the enumeration, per the fixture note:
+    // a second call mints a different id whenever the two miss the same
+    // millisecond, and the read would answer with a list the draft never held.
     let saved = list("spl-late-night-2", "Late night jazz");
-
-    let mut editor = editor_holding(&tree);
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(&tree));
     editor.name = "half-typed".to_string();
     editor.reconcile(true, Ok(vec![saved.clone()]));
     assert_eq!(
@@ -401,11 +405,19 @@ fn a_new_draft_survives_the_reconcile_while_the_page_is_open() {
 #[test]
 fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
     let tree = nested_tree();
-    let renamed = list("spl-late-night-2", "Late night jazz deep");
+    // ONE `list` call for the draft and the renamed row, per the fixture note:
+    // a second call mints a different id whenever the two miss the same
+    // millisecond, and the reconcile would discard the draft as orphaned.
+    let saved = list("spl-late-night-2", "Late night jazz");
+    let renamed = CustomSmartPlaylist {
+        name: "Late night jazz deep".to_string(),
+        ..saved.clone()
+    };
 
     // Untouched: the draft follows the store's name and re-stamps its own
     // baseline with it, and the tree is the one it was opened from.
-    let mut editor = editor_holding(&tree);
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(&tree));
     assert!(!editor.is_dirty());
     editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Late night jazz deep");
@@ -422,14 +434,16 @@ fn the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer() {
 
     // Typed: their own name is left alone — it is what the page shows, and
     // overwriting it here would silently edit the draft under their hands.
-    let mut editor = editor_holding(&tree);
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(&tree));
     editor.name = "Typed by the listener".to_string();
     editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Typed by the listener");
 
     // A rename over an edited tree: the name is adopted and the work in
     // progress stays where it was.
-    let mut editor = editor_holding(&tree);
+    let mut editor = SmartPlaylistsEditor::default();
+    editor.load_saved(&saved, Some(&tree));
     editor.add_rule(&BoxPath::root());
     editor.reconcile(true, Ok(vec![renamed.clone()]));
     assert_eq!(editor.name, "Late night jazz deep");

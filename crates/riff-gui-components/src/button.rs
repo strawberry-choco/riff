@@ -173,6 +173,12 @@ fn wash_tween(
 
 // --- Semantic text buttons -------------------------------------------------------
 
+/// The room a leading glyph charges ahead of the label, as [`paint_text_button`]
+/// lays it out: a 16px icon plus the 8px gap. One spelling for the paint and
+/// the flow sizing, so a button's measured width can never drift from its own
+/// paint.
+const ICON_CHARGE: f32 = 16.0 + 8.0;
+
 /// The five semantic button roles the design system speaks. Each maps to one
 /// idle paint; hover, focus and disabled states are shared mechanics layered
 /// on top, so a `Primary` button and a `Destructive` button behave
@@ -311,6 +317,64 @@ pub fn text_button(
         response.clone().on_hover_text(tooltip);
     }
     btn.enabled && response.clicked()
+}
+
+/// A flow-placed text button's inputs: everything [`TextButton`] carries except
+/// the parts a flow button does not choose. The rect is measured here from the
+/// label and the leading glyph, and the accessibility name is the label. A
+/// control that needs its own a11y name, a tooltip, or a rect of its own is
+/// not a standard flow button, and builds the [`TextButton`] directly.
+pub struct FlowTextButton<'a> {
+    /// Stable widget id (drives focus and the a11y node).
+    pub id: egui::Id,
+    /// The painted label text, and the name the button answers to.
+    pub label: &'a str,
+    /// Optional leading 16px glyph, charged ahead of the label.
+    pub icon: Option<Icon>,
+    /// Use the `text-xs` button scale instead of `text-sm`.
+    pub small: bool,
+    /// The semantic role selecting the paint.
+    pub variant: Variant,
+    /// Whether the button is enabled (a disabled one takes no click and no
+    /// focus).
+    pub enabled: bool,
+}
+
+/// Render one shared semantic text button in the caller's flow: measured from
+/// its own label and glyph ([`ICON_CHARGE`] included), allocated at `ui`'s
+/// cursor, painted by the same authority as [`text_button`], and reporting
+/// whether it was activated this frame (pointer click or keyboard Enter/Space)
+/// AND enabled. For the call site that owns no rect of its own — a Save/Cancel
+/// line under a form, an add-controls line under a tree.
+pub fn flow_text_button(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    btn: &FlowTextButton,
+) -> bool {
+    let mut size = text_button_size(ui, palette, btn.label, btn.small);
+    if btn.icon.is_some() {
+        size.x += ICON_CHARGE;
+    }
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    text_button(
+        ui,
+        cache,
+        palette,
+        reduce_motion,
+        &TextButton {
+            id: btn.id,
+            rect,
+            label: btn.label,
+            a11y: btn.label,
+            tooltip: None,
+            icon: btn.icon,
+            small: btn.small,
+            variant: btn.variant,
+            enabled: btn.enabled,
+        },
+    )
 }
 
 /// The single paint authority for a semantic text button: variant fill/ink,
@@ -464,7 +528,7 @@ pub fn paint_text_button(
         styled_font(ui, egui::TextStyle::Button, size),
         ink,
     );
-    let icon_w: f32 = if icon.is_some() { 16.0 + 8.0 } else { 0.0 };
+    let icon_w: f32 = if icon.is_some() { ICON_CHARGE } else { 0.0 };
     let mut x = rect.center().x - icon_w.midpoint(galley.size().x);
     if let Some(icon) = icon {
         let tex_id = cache.texture(ui.ctx(), icon, 16.0, ink);

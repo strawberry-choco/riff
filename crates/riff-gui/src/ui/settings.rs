@@ -389,6 +389,13 @@ pub const PREF_CLOSE_QUITS: (&str, &str) = (
     "Quit on close",
     "Closing the window quits the app instead of minimizing it to the tray.",
 );
+/// Advanced pane preference copy: OS notifications for finished background
+/// work. Offered only where a notifier exists (macOS/Windows); Linux has no
+/// notifier integration, so the choice would be inert there.
+pub const PREF_SYSTEM_NOTIFICATIONS: (&str, &str) = (
+    "System notifications",
+    "Show an OS notification when a scan or ReplayGain pass finishes, or playback fails.",
+);
 
 /// The Library pane footer's note.
 pub const FOOTER_NOTE: &str = "Changes apply immediately";
@@ -464,6 +471,9 @@ pub struct SettingsContent {
     /// Whether the title-bar close button quits the app instead of minimizing
     /// to the tray (Advanced pane; rendered only where a tray exists).
     pub close_quits_app: bool,
+    /// Whether finished background work raises an OS notification (Advanced
+    /// pane; rendered only where a notifier exists).
+    pub system_notifications: bool,
     /// The library-wide `ReplayGain` Pass's Settings gating: which value kinds
     /// a pass writes (persisted) and whether Force is chosen for this run
     /// (session-local, never persisted — an automatic pass never redoes
@@ -549,6 +559,8 @@ pub enum SettingsAction {
     /// Set whether the title-bar close button quits instead of minimizing to
     /// the tray.
     SetCloseQuitsApp(bool),
+    /// Set whether finished background work raises an OS notification.
+    SetSystemNotifications(bool),
     /// The Smart Playlists page's left column: show the saved list with this
     /// id in the editor. Selection is frontend-local — the draft, not the
     /// store.
@@ -2001,6 +2013,11 @@ enum Preference {
     // under CI's `-D warnings` and is invisible from a macOS or Windows machine.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     CloseQuitsApp,
+    // Same construction gate and for the same reason: the notifier body this
+    // preference toggles is compiled out on Linux, so the row is only built
+    // where a notifier exists.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    SystemNotifications,
 }
 
 impl Preference {
@@ -2015,6 +2032,7 @@ impl Preference {
             Self::SkipHidden => PREF_SKIP_HIDDEN,
             Self::ReadEmbedded => PREF_READ_EMBEDDED,
             Self::CloseQuitsApp => PREF_CLOSE_QUITS,
+            Self::SystemNotifications => PREF_SYSTEM_NOTIFICATIONS,
         }
     }
 
@@ -2029,6 +2047,7 @@ impl Preference {
             Self::SkipHidden => SettingsAction::SetSkipHidden(value),
             Self::ReadEmbedded => SettingsAction::SetReadEmbeddedArtwork(value),
             Self::CloseQuitsApp => SettingsAction::SetCloseQuitsApp(value),
+            Self::SystemNotifications => SettingsAction::SetSystemNotifications(value),
         }
     }
 
@@ -2043,6 +2062,7 @@ impl Preference {
             Self::SkipHidden => "pref_skip_hidden",
             Self::ReadEmbedded => "pref_read_embedded",
             Self::CloseQuitsApp => "pref_close_quits",
+            Self::SystemNotifications => "pref_system_notifications",
         }
     }
 
@@ -2057,6 +2077,7 @@ impl Preference {
             Self::SkipHidden => content.skip_hidden_files,
             Self::ReadEmbedded => content.read_embedded_artwork,
             Self::CloseQuitsApp => content.close_quits_app,
+            Self::SystemNotifications => content.system_notifications,
         }
     }
 }
@@ -2648,9 +2669,14 @@ fn section_pane(
                         // "Quit on close" is offered only where a tray exists:
                         // on Linux there is no tray, so closing always quits
                         // and the choice would be inert (decision 002).
+                        // "System notifications" likewise: the notifier body
+                        // is compiled out on Linux.
                         #[cfg(not(target_os = "linux"))]
-                        const ADVANCED_PREFS: &[Preference] =
-                            &[Preference::Advanced, Preference::CloseQuitsApp];
+                        const ADVANCED_PREFS: &[Preference] = &[
+                            Preference::Advanced,
+                            Preference::CloseQuitsApp,
+                            Preference::SystemNotifications,
+                        ];
                         #[cfg(target_os = "linux")]
                         const ADVANCED_PREFS: &[Preference] = &[Preference::Advanced];
                         preferences_card(ui, palette, content, actions, ADVANCED_PREFS);
@@ -3300,6 +3326,9 @@ impl super::app::RiffApp {
             SettingsAction::SetCloseQuitsApp(value) => {
                 library.ui_flags.close_quits_app = value;
             }
+            SettingsAction::SetSystemNotifications(value) => {
+                library.ui_flags.system_notifications = value;
+            }
         }
     }
 
@@ -3370,6 +3399,7 @@ impl super::app::RiffApp {
             scan_formats: library.scan_prefs.scan_formats.clone(),
             read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
             close_quits_app: library.ui_flags.close_quits_app,
+            system_notifications: library.ui_flags.system_notifications,
             pass_track: library.pass_prefs.track_values,
             pass_album: library.pass_prefs.album_values,
             pass_force: self.pass_force_choice,

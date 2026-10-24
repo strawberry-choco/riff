@@ -13,7 +13,7 @@
 //! is, and whether a selection at that slot is drill bookkeeping are all
 //! answered here.
 
-use riff_backend::app::events::BackendEvent;
+use riff_backend::app::events::{BackendEvent, NoticePayload, NoticeSeverity, NoticeSource};
 use riff_backend::app::state::LibrarySection;
 use riff_gui::ui::scroll_memory::{DrillSlot, ListSlot, ScrollMemory};
 
@@ -164,7 +164,11 @@ fn an_empty_event_batch_leaves_saved_offsets_current() {
     visit_section(&mut memory, LibrarySection::Artists, "", 0, 800.0);
 
     memory.note_backend_events(&[]);
-    memory.note_backend_events(&[BackendEvent::PlaylistsChanged { generation: 1 }]);
+    memory.note_backend_events(&[BackendEvent::TypedNotice(NoticePayload {
+        severity: NoticeSeverity::Info,
+        source: NoticeSource::Settings,
+        message: "unrelated".to_string(),
+    })]);
 
     assert_eq!(
         memory.begin_section(LibrarySection::Artists, "", 0).0.start,

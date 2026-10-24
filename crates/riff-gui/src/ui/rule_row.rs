@@ -599,6 +599,44 @@ impl RuleDraft {
         Some(rule).filter(Rule::is_fully_formed)
     }
 
+    /// The Rule this draft's **committed** answers spell, or the part they
+    /// are still missing — the same questions [`Self::rule`] and [`Self::gap`]
+    /// ask, in the same order (field, then comparison, then the field
+    /// catalog's permit, then the value), read from the committed answers
+    /// ([`Self::committed_value`]) instead of the parse of the live buffers.
+    ///
+    /// The committed value can hold no unparseable answer: a commit only ever
+    /// lands a value the row parsed against the field's own type, so the only
+    /// value gap this spelling can find is a missing one. The live spelling's
+    /// catalog last word ([`Rule::is_fully_formed`]) needs no re-asking here:
+    /// what a commit or a stored read lands is already the catalog's own
+    /// answer.
+    pub fn committed_rule(&self) -> Result<Rule, RuleGap> {
+        let Some(field) = self.field else {
+            return Err(RuleGap::Field);
+        };
+        let Some(comparison) = self.comparison else {
+            return Err(RuleGap::Comparison);
+        };
+        if !spec(field).permits(comparison) {
+            return Err(RuleGap::Comparison);
+        }
+        let value = if self.value_widgets().is_empty() {
+            None
+        } else {
+            Some(
+                self.committed_value()
+                    .cloned()
+                    .ok_or(RuleGap::Value(ValueGap::Missing))?,
+            )
+        };
+        if self.negated {
+            Ok(Rule::new(field, comparison, value).negated())
+        } else {
+            Ok(Rule::new(field, comparison, value))
+        }
+    }
+
     /// Apply one reported intent, landing it on the draft. Idempotent for
     /// every setter, so a host that re-applies an intent it already landed
     /// cannot corrupt a draft.

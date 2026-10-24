@@ -408,6 +408,12 @@ mod tests {
     }
 
     impl PlaylistStoreTrait for NightDrivePlaylistStore {
+        /// A fresh session playlist generation — the wiring read has no
+        /// failure mode, and nothing bumps it: the screenshots never mutate.
+        fn playlist_generation(&self) -> riff_backend::app::store::StoreGeneration {
+            riff_backend::app::store::StoreGeneration::new()
+        }
+
         fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
             Ok(vec![night_drive_playlist()])
         }

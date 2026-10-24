@@ -486,7 +486,7 @@ mod tests {
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
             Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
-            Box::new(StubLibraryMutationStore),
+            Box::new(StubLibraryMutationStore::default()),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),
             make_walk(),
@@ -502,7 +502,7 @@ mod tests {
         let (service, _worker) = ScanService::new(
             Box::new(MockReader),
             Box::new(stub_queries(Arc::new(Mutex::new(HashSet::new())))),
-            Box::new(StubLibraryMutationStore),
+            Box::new(StubLibraryMutationStore::default()),
             Arc::clone(&cancel),
             Arc::new(AtomicBool::new(false)),
             make_walk(),

@@ -135,7 +135,7 @@ impl TrackSort {
 
 /// The Library Session: everything that is not playback — selection, views,
 /// search, the registered [`LibraryPaths`] and their readiness and watch
-/// states, scan status, browse mode, and UI flags. Lives behind its own
+/// states, browse mode, and UI flags. Lives behind its own
 /// `Arc<Mutex<>>`.
 pub struct LibrarySession {
     pub selected_track: Option<TrackId>,
@@ -144,7 +144,6 @@ pub struct LibrarySession {
     /// The registered roots with their Readiness and Watch States — one value,
     /// because one fact-set moves together (see [`crate::app::library_paths`]).
     pub library_paths: LibraryPaths,
-    pub scan_status: Option<String>,
     pub browse_mode: BrowseMode,
     /// Which LIBRARY section the sidebar has selected (see
     /// [`LibrarySection`]) — the browser variant the sidebar rows open.
@@ -248,7 +247,6 @@ impl Default for LibrarySession {
             view_mode: ViewMode::Library,
             search_query: String::new(),
             library_paths: LibraryPaths::default(),
-            scan_status: None,
             browse_mode: BrowseMode::default(),
             library_section: LibrarySection::default(),
             selected_folder: None,

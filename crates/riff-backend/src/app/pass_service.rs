@@ -197,16 +197,6 @@ mod tests {
         }
     }
 
-    /// The analyzer sits behind an `Arc` so the test can arm its hook after
-    /// the service owns the port object.
-    struct SharedAnalyzer(Arc<FakeAnalyzer>);
-
-    impl LoudnessAnalyzer for SharedAnalyzer {
-        fn measure_track(&self, path: &Path) -> Result<TrackLoudness, LibraryError> {
-            self.0.measure_track(path)
-        }
-    }
-
     struct FakeWriter;
 
     impl ReplayGainWriter for FakeWriter {
@@ -241,14 +231,14 @@ mod tests {
     }
 
     /// The wired service over a real worker thread, with the analyzer's
-    /// `Arc` and the shared `cancel`/`progress` cells kept back for hook
-    /// arming.
+    /// shared lock cell and the shared `cancel`/`progress` cells kept back
+    /// for hook arming.
     #[allow(clippy::type_complexity)]
     fn service_with(
         tracks: usize,
     ) -> (
         PassService,
-        Arc<FakeAnalyzer>,
+        Arc<Mutex<FakeAnalyzer>>,
         Arc<AtomicBool>,
         Arc<Mutex<(usize, usize)>>,
         thread::JoinHandle<()>,
@@ -257,12 +247,12 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new((0, 0)));
-        let analyzer = Arc::new(FakeAnalyzer::new());
+        let analyzer = Arc::new(Mutex::new(FakeAnalyzer::new()));
         let (service, worker) = PassService::new(
-            Box::new(SharedAnalyzer(Arc::clone(&analyzer))),
+            Box::new(Arc::clone(&analyzer)),
             Box::new(FakeWriter),
             Box::new(library_of(tracks)),
-            Box::new(StubLibraryMutationStore),
+            Box::new(StubLibraryMutationStore::default()),
             Arc::clone(&cancel),
             Arc::clone(&stop),
             Arc::clone(&progress),
@@ -310,7 +300,7 @@ mod tests {
         // pass writes, so it samples the seam mid-pass without borrowing the
         // front end.
         let probe = Arc::clone(&progress);
-        analyzer.set_hook(Box::new(move || {
+        analyzer.lock().unwrap().set_hook(Box::new(move || {
             // Sampling the cell while the pass is between locks: read and
             // record whatever is current.
             let _ = probe;
@@ -318,7 +308,7 @@ mod tests {
         let sampled: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
         let probe = Arc::clone(&sampled);
         let cell = Arc::clone(&progress);
-        analyzer.set_hook(Box::new(move || {
+        analyzer.lock().unwrap().set_hook(Box::new(move || {
             probe.lock().unwrap().push(*cell.lock().unwrap());
         }));
         service.submit(PassCommand::LibraryWide {
@@ -347,7 +337,7 @@ mod tests {
         // Arm the pass's own cancel flag on the tenth measurement: the pass
         // stops at the next boundary, its first ten-track batch committed.
         let flag = Arc::clone(&cancel);
-        analyzer.set_hook(Box::new(move || {
+        analyzer.lock().unwrap().set_hook(Box::new(move || {
             static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             if CALLS.fetch_add(1, Ordering::Relaxed) + 1 == 10 {
                 flag.store(true, Ordering::Relaxed);

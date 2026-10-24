@@ -35,7 +35,7 @@ use riff_persistence::store::{LibraryMutationStore, PlaylistStore, ScanOptions, 
 use riff_persistence::thumbnail::ThumbnailCache;
 
 use riff_library::app::cover_service::{CoverPolicy, CoverService};
-use riff_library::app::scan_service::ScanService;
+use riff_library::app::scan_service::{ScanService, Scans};
 
 use riff_playback::app::playback_coordinator::PlaybackCoordinator;
 use riff_playback::app::transport::{ChannelTransport, Transport};
@@ -74,9 +74,10 @@ pub struct AppRuntime {
     /// the time `spawn` returns. The frontend diff-commits through this
     /// handle at frame end; it never hydrates.
     pub preferences: Preferences,
-    /// The Library Scan front-end handle (boxed into the UI; cloned by the
-    /// watcher manager, which is already wired inside `spawn`).
-    pub scans: ScanService,
+    /// The Library Scan port (`Box<dyn Scans>`), injected boxed into the UI;
+    /// the watcher manager holds its own clone of the concrete front end,
+    /// already wired inside `spawn`.
+    pub scans: Box<dyn Scans>,
     /// The filesystem-watcher manager handle the UI reconfigures.
     pub watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
     /// Set by the UI/tray to request application shutdown.
@@ -264,8 +265,6 @@ impl AppRuntime {
             playlist_store,
             library_mutation_store,
             library_query_store,
-            generation,
-            playlist_generation,
             changes_rx,
         ) = open_application_store(store_path)?;
 
@@ -284,11 +283,10 @@ impl AppRuntime {
         }
 
         // The UI's single read seam over the Application Store (ADR 0002).
+        // It derives its two session generations itself, from these ports.
         let session_views = SessionViews::new(
             Box::new(library_query_store.clone()),
             Box::new(playlist_store.clone()),
-            generation,
-            playlist_generation,
         );
 
         let playback = Arc::new(Mutex::new(PlaybackSession::default()));
@@ -428,7 +426,7 @@ impl AppRuntime {
             ui_transport,
             tray_transport,
             preferences,
-            scans,
+            scans: Box::new(scans),
             watcher_manager: Arc::clone(&watcher_manager),
             quit_flag,
             settings: Box::new(settings_store),
@@ -460,9 +458,8 @@ impl AppRuntime {
 
 /// Open the Application Store before anything else and wire every store port
 /// over its one shared connection. Returns one clone of the shared store
-/// handle per port in their UI/thread wiring order plus both session
-/// generations the store bumps on committed mutations (ADR 0002): the
-/// Library generation and the dedicated playlist generation.
+/// handle per port in their UI/thread wiring order; the read seam derives
+/// its session generations from the ports it is handed.
 #[allow(clippy::type_complexity)]
 fn open_application_store(
     store_path: &Path,
@@ -472,8 +469,6 @@ fn open_application_store(
         SqliteStore,
         SqliteStore,
         SqliteStore,
-        crate::app::store::StoreGeneration,
-        crate::app::store::StoreGeneration,
         crossbeam_channel::Receiver<crate::app::store::StoreChanged>,
     ),
     StoreError,
@@ -486,8 +481,6 @@ fn open_application_store(
         store.clone(),
         store.clone(),
         store.clone(),
-        store.library_generation(),
-        store.playlist_generation(),
         changes_rx,
     ))
 }

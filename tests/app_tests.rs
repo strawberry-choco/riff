@@ -7,7 +7,6 @@ mod tests {
     use super::*;
     use crate::domain::{Continuation, Trigger};
     use crate::domain::{CoverSource, GenreCount};
-    use riff_backend::app::errors::StoreError;
     use riff_backend::app::playlist_manager;
     use riff_backend::app::traits::{MetadataWriter, TagEdit};
     use riff_library::app::errors::LibraryError;
@@ -817,9 +816,9 @@ mod tests {
     // [`MockLibraryQueryStore`] stands in for the store port and a real
     // `StoreGeneration` handle plays the mutation adapter's bumps.
 
-    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore};
+    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore};
     use riff_backend::app::state::TrackSort;
-    use riff_backend::app::store::{PlaylistStore, StoreGeneration};
+    use riff_backend::app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration};
     use riff_backend::app::views::SessionViews;
 
     /// Deterministic fixture row for a window slot.
@@ -832,57 +831,27 @@ mod tests {
         (0..rows).map(projection_track).collect()
     }
 
-    /// Test-side handle to the shared mock: locks on every access so
-    /// assertions read recordings and configuration tweaks mutate the canned
-    /// data behind the seam's back.
-    struct MockHandle(Arc<Mutex<MockLibraryQueryStore>>);
-
-    impl MockHandle {
-        fn lock(&self) -> std::sync::MutexGuard<'_, MockLibraryQueryStore> {
-            self.0.lock().unwrap()
-        }
-
-        /// Every bounded-window row fetch as `(offset, limit)` pairs.
-        fn window_calls(&self) -> Vec<(usize, usize)> {
-            self.lock().window_calls()
-        }
-
-        /// Every listing count fetch, which asks the port for zero rows.
-        fn count_calls(&self) -> Vec<(usize, usize)> {
-            self.lock().count_calls()
-        }
-
-        /// Every `get_track` id, in call order.
-        fn get_track_calls(&self) -> Vec<TrackId> {
-            self.lock().get_track_calls()
-        }
-
-        /// How often one exact query shape fired.
-        fn count_of(&self, call: &LibraryQueryCall) -> usize {
-            self.lock().count_of(call)
-        }
-
-        /// Snapshot of every recorded query, in call order.
-        fn calls(&self) -> Vec<LibraryQueryCall> {
-            self.lock().calls()
-        }
-    }
-
-    /// Wire a seam to `mock`; returns the seam, the shared mock handle
-    /// for assertions and configuration, and the generation handle that
-    /// stands in for the mutation adapter's bumps.
-    fn wire(mock: MockLibraryQueryStore) -> (SessionViews, MockHandle, StoreGeneration) {
+    /// Wire a seam to `mock`; returns the seam, the shared mock cell for
+    /// assertions and configuration (lock it to reach the mock's accessors),
+    /// and the generation handle read through the widened port from the
+    /// double the seam was wired to — the very counter the projections
+    /// observe, which stands in for the mutation adapter's bumps.
+    fn wire(
+        mock: MockLibraryQueryStore,
+    ) -> (
+        SessionViews,
+        Arc<Mutex<MockLibraryQueryStore>>,
+        StoreGeneration,
+    ) {
         let mock = Arc::new(Mutex::new(mock));
-        let generation = StoreGeneration::new();
         // The playlist ports are wired but unused by these Library-view
         // tests; an empty stub stands in for the Playlists section.
         let views = SessionViews::new(
-            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
+            Box::new(Arc::clone(&mock)),
             Box::new(crate::mocks::MockPlaylistStore::default()),
-            generation.clone(),
-            StoreGeneration::new(),
         );
-        (views, MockHandle(mock), generation)
+        let generation = mock.library_generation();
+        (views, mock, generation)
     }
 
     /// The flat track list, by row index, against the mock query port.
@@ -902,12 +871,12 @@ mod tests {
         // no rows at all, so nothing is fetched and thrown away.
         assert_eq!(views.track_count("", TrackSort::default()), 120);
         assert_eq!(
-            mock.count_calls(),
+            mock.lock().unwrap().count_calls(),
             vec![(0, 0)],
             "the count read asks the listing for its total alone — zero rows"
         );
         assert!(
-            mock.window_calls().is_empty(),
+            mock.lock().unwrap().window_calls().is_empty(),
             "and a count read is never a window read"
         );
 
@@ -930,19 +899,19 @@ mod tests {
             "119"
         );
         assert_eq!(
-            mock.window_calls(),
+            mock.lock().unwrap().window_calls(),
             vec![(0, 50), (50, 50), (100, 50)],
             "three windows, each read exactly once, at the projection's own window size"
         );
 
         // A repeat read of a row the seam already holds costs nothing.
-        let before = mock.window_calls().len();
+        let before = mock.lock().unwrap().window_calls().len();
         assert_eq!(
             views.track_row("", TrackSort::default(), 7).unwrap().id.0,
             "7"
         );
         assert_eq!(
-            mock.window_calls().len(),
+            mock.lock().unwrap().window_calls().len(),
             before,
             "a row inside the window in hand is served from cache"
         );
@@ -993,22 +962,26 @@ mod tests {
             let _ = views.track_row("", TrackSort::default(), index);
         }
 
-        assert_eq!(mock.window_calls().len(), 9, "all requested windows load");
+        assert_eq!(
+            mock.lock().unwrap().window_calls().len(),
+            9,
+            "all requested windows load"
+        );
 
         // Asking for the oldest window again must fetch it anew: it was
         // evicted once the bound was exceeded.
         let _ = views.track_row("", TrackSort::default(), 0);
         assert_eq!(
-            mock.window_calls().last(),
+            mock.lock().unwrap().window_calls().last(),
             Some(&(0, 50)),
             "the oldest window was evicted once the bound was exceeded"
         );
 
         // The newest window remains cached.
-        let calls_before = mock.window_calls().len();
+        let calls_before = mock.lock().unwrap().window_calls().len();
         let _ = views.track_row("", TrackSort::default(), 400);
         assert_eq!(
-            mock.window_calls().len(),
+            mock.lock().unwrap().window_calls().len(),
             calls_before,
             "the newest window remains cached"
         );
@@ -1021,13 +994,13 @@ mod tests {
             ..Default::default()
         });
         let _ = views.track_row("", TrackSort::default(), 0);
-        let calls_after_load = mock.window_calls().len();
+        let calls_after_load = mock.lock().unwrap().window_calls().len();
 
         // Scrolling brings one new window into view while staying fresh.
         let _ = views.track_row("", TrackSort::default(), 100);
 
         assert_eq!(
-            &mock.window_calls()[calls_after_load..],
+            &mock.lock().unwrap().window_calls()[calls_after_load..],
             &[(100, 50)],
             "only the missing window is fetched when fresh"
         );
@@ -1046,7 +1019,7 @@ mod tests {
         // than trusting the stale count, and the row read alongside it
         // serves the new collection.
         {
-            let mut mock = mock.lock();
+            let mut mock = mock.lock().unwrap();
             for n in 120..130 {
                 mock.flat.push(projection_track(n));
             }
@@ -1064,7 +1037,7 @@ mod tests {
             "and the rows come back refreshed alongside the recounted total"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TracksPage(
+            mock.lock().unwrap().count_of(&LibraryQueryCall::TracksPage(
                 riff_persistence::store::TrackListOrder::default(),
                 0,
                 0
@@ -1090,7 +1063,7 @@ mod tests {
         // time. The header must not blank over rows still on screen, so the
         // last good total survives — which is the reason the count has a
         // last-good fallback at all.
-        mock.lock().failing.push(FailingQuery::TracksCount);
+        mock.lock().unwrap().failing.push(FailingQuery::TracksCount);
         generation.bump();
 
         assert_eq!(
@@ -1119,7 +1092,10 @@ mod tests {
         // A committed mutation whose window read fails: the seam warns and
         // answers the last good row — stale-but-present beats blank, and the
         // retry on the next frame heals it.
-        mock.lock().failing.push(FailingQuery::TracksWindow);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::TracksWindow);
         generation.bump();
         assert_eq!(
             views.track_row("", TrackSort::default(), 0).unwrap().id.0,
@@ -1127,7 +1103,7 @@ mod tests {
             "stale rows survive the failed refresh"
         );
 
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.track_count("", TrackSort::default()), 120);
         assert_eq!(
             views.track_row("", TrackSort::default(), 0).unwrap().id.0,
@@ -1180,15 +1156,19 @@ mod tests {
         assert_eq!(views.album_tracks("Alpha", "One").len(), 1);
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
             1,
             "one artist's albums fetch once per generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumTracks(
-                "Alpha".to_string(),
-                "One".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::AlbumTracks(
+                    "Alpha".to_string(),
+                    "One".to_string()
+                )),
             1,
             "one album's tracks fetch once per generation"
         );
@@ -1218,7 +1198,9 @@ mod tests {
         assert_eq!(views.genres()[1].tracks, 2);
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::GenreCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::GenreCounts),
             1,
             "genre counts fetch once per generation"
         );
@@ -1241,7 +1223,9 @@ mod tests {
         let _ = views.genres();
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::GenreCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::GenreCounts),
             2,
             "a generation bump drops the cached genre rows"
         );
@@ -1284,24 +1268,30 @@ mod tests {
         assert_eq!(views.album_tracks_in_genre("Alpha", "One", "Rock").len(), 1);
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistsInGenre("Rock".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistsInGenre("Rock".to_string())),
             1,
             "genre-filtered artists fetch once per generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbumsInGenre(
-                "Alpha".to_string(),
-                "Rock".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistAlbumsInGenre(
+                    "Alpha".to_string(),
+                    "Rock".to_string()
+                )),
             1,
             "one artist's genre-filtered albums fetch once per generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumTracksInGenre(
-                "Alpha".to_string(),
-                "One".to_string(),
-                "Rock".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::AlbumTracksInGenre(
+                    "Alpha".to_string(),
+                    "One".to_string(),
+                    "Rock".to_string()
+                )),
             1,
             "one album's genre-filtered tracks fetch once per generation"
         );
@@ -1353,7 +1343,7 @@ mod tests {
 
         assert_eq!(views.hit_album_count("q"), 120);
         assert_eq!(
-            mock.count_calls(),
+            mock.lock().unwrap().count_calls(),
             vec![(0, 0)],
             "the count is its own read"
         );
@@ -1369,12 +1359,16 @@ mod tests {
         );
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
             "each window is read by one row read at the projection's window size"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 50, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 50, 50)),
             1
         );
     }
@@ -1395,14 +1389,18 @@ mod tests {
         // retarget — a fresh fetch, not a cache hit.
         let _ = views.hit_album_row("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
             "returning to a dropped query is a fresh read, not a cache hit: \
              a keystroke retarget clears the stale query's rows even at an \
              unchanged generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("qu".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("qu".to_string(), 0, 50)),
             1,
             "the intervening query is its own listing, read once"
         );
@@ -1419,7 +1417,9 @@ mod tests {
             let _ = views.hit_album_row("q", index);
         }
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
             "all requested windows load"
         );
@@ -1428,16 +1428,23 @@ mod tests {
         // evicted once the bound was exceeded.
         let _ = views.hit_album_row("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             2,
             "the oldest window was evicted once the bound was exceeded"
         );
 
         // The newest window remains cached.
-        let before = mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50));
+        let before = mock
+            .lock()
+            .unwrap()
+            .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50));
         let _ = views.hit_album_row("q", 400);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 400, 50)),
             before,
             "the newest window remains cached"
         );
@@ -1453,7 +1460,7 @@ mod tests {
 
         // A committed mutation bumps the generation: the stale rows and the
         // stale total drop, and the next frame refetches both.
-        mock.lock().hit_albums = hit_album_fixture(12);
+        mock.lock().unwrap().hit_albums = hit_album_fixture(12);
         generation.bump();
         assert_eq!(
             views.hit_album_count("q"),
@@ -1467,7 +1474,9 @@ mod tests {
         );
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitAlbumsPage("q".to_string(), 0, 50)),
             1,
             "a generation bump drops the cached hit windows, so one read per frame"
         );
@@ -1545,7 +1554,7 @@ mod tests {
         // The store starts failing mid-session: the next read cannot refresh,
         // but the previously served rows and total stay readable
         // (stale-but-present) rather than blanking the column under a header.
-        mock.lock().failing = vec![FailingQuery::HitAlbums, FailingQuery::HitAlbumsCount];
+        mock.lock().unwrap().failing = vec![FailingQuery::HitAlbums, FailingQuery::HitAlbumsCount];
         generation.bump();
         assert_eq!(views.hit_album_count("q"), 10);
         assert_eq!(
@@ -1564,7 +1573,7 @@ mod tests {
 
         assert_eq!(views.hit_artist_count("q"), 120);
         assert_eq!(
-            mock.count_calls(),
+            mock.lock().unwrap().count_calls(),
             vec![(0, 0)],
             "the count is its own read"
         );
@@ -1575,12 +1584,16 @@ mod tests {
         assert!(views.hit_artist_row("q", 120).is_none());
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
             1,
             "each window is read by one row read at the projection's window size"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 50, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 50, 50)),
             1
         );
     }
@@ -1598,14 +1611,18 @@ mod tests {
         let _ = views.hit_artist_row("qu", 0);
         let _ = views.hit_artist_row("q", 0);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitArtistsPage("q".to_string(), 0, 50)),
             2,
             "returning to a dropped query is a fresh read, not a cache hit: \
              a keystroke retarget clears the stale query's rows even at an \
              unchanged generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::HitArtistsPage("qu".to_string(), 0, 50)),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::HitArtistsPage("qu".to_string(), 0, 50)),
             1,
             "the intervening query is its own listing, read once"
         );
@@ -1648,10 +1665,12 @@ mod tests {
             "a new query refetches at the unchanged generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumHitTracks(
-                "Alpha".to_string(),
-                "One".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::AlbumHitTracks(
+                    "Alpha".to_string(),
+                    "One".to_string()
+                )),
             2,
             "one fetch per (album, query)"
         );
@@ -1680,10 +1699,12 @@ mod tests {
             "an unknown album yields false"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumIsNameHit(
-                "Alpha".to_string(),
-                "One".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::AlbumIsNameHit(
+                    "Alpha".to_string(),
+                    "One".to_string()
+                )),
             1,
             "the boolean fetches once per (album, query)"
         );
@@ -1712,12 +1733,16 @@ mod tests {
             "an unknown artist yields false"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
             1,
             "the boolean fetches once per (artist, query)"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Beta".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistIsNameHit("Beta".to_string())),
             1,
             "a different artist re-asks the store"
         );
@@ -1727,7 +1752,9 @@ mod tests {
         generation.bump();
         assert!(views.artist_is_name_hit("Alpha", "q"));
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistIsNameHit("Alpha".to_string())),
             2,
             "a generation bump drops the cached answer"
         );
@@ -1770,11 +1797,13 @@ mod tests {
             "a new query refetches at the unchanged generation"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::AlbumHitTracksInGenre(
-                "Alpha".to_string(),
-                "One".to_string(),
-                "Rock".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::AlbumHitTracksInGenre(
+                    "Alpha".to_string(),
+                    "One".to_string(),
+                    "Rock".to_string()
+                )),
             2,
             "one fetch per (album, genre, query)"
         );
@@ -1818,28 +1847,38 @@ mod tests {
         }
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::FolderHasAudio(folder.to_path_buf())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::FolderHasAudio(folder.to_path_buf())),
             1
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::FolderHasSearchMatch(
-                folder.to_path_buf(),
-                "q".to_string()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::FolderHasSearchMatch(
+                    folder.to_path_buf(),
+                    "q".to_string()
+                )),
             1
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
-                folder.to_path_buf()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                    folder.to_path_buf()
+                )),
             1
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TracksInFolder(folder.to_path_buf())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::TracksInFolder(folder.to_path_buf())),
             1
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::SubdirsWithAudio(folder.to_path_buf())),
             1
         );
     }
@@ -1865,7 +1904,7 @@ mod tests {
         let _ = views.smart_list(SmartPlaylistKind::MostPlayed, 100);
 
         assert_eq!(
-            mock.calls(),
+            mock.lock().unwrap().calls(),
             vec![
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 50),
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::MostPlayed, 50),
@@ -1904,7 +1943,7 @@ mod tests {
         let _ = views.smart_list(SmartPlaylistKind::RecentlyPlayed, 100);
 
         assert_eq!(
-            mock.calls(),
+            mock.lock().unwrap().calls(),
             vec![
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::RecentlyPlayed, 50),
                 LibraryQueryCall::SmartPlaylist(SmartPlaylistKind::RecentlyPlayed, 50),
@@ -1921,86 +1960,29 @@ mod tests {
     // cache per Library generation; playlist counts ride the playlist
     // generation; folder roots arrive from the caller (the UI holds them).
 
-    /// Shared [`PlaylistStore`] fake over a mutex-guarded playlist list, so
-    /// a test can mutate the Playlists section behind the seam's back and
-    /// invalidate via the playlist generation.
-    struct SharedPlaylists(Arc<Mutex<Vec<Playlist>>>);
-
-    impl PlaylistStore for SharedPlaylists {
-        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        fn load_playlist_entries(
-            &self,
-            _id: &PlaylistId,
-        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn create_playlist(
-            &mut self,
-            _name: &str,
-            _initial_tracks: &[TrackId],
-        ) -> Result<PlaylistId, StoreError> {
-            Ok(PlaylistId("mock".to_string()))
-        }
-
-        fn rename_playlist(
-            &mut self,
-            _id: &PlaylistId,
-            _new_name: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn add_playlist_entry(
-            &mut self,
-            _id: &PlaylistId,
-            _track: &TrackId,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn remove_playlist_entries(
-            &mut self,
-            _id: &PlaylistId,
-            _track: &TrackId,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn reorder_playlist_entries(
-            &mut self,
-            _id: &PlaylistId,
-            _ordered: &[TrackId],
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-    }
-
     /// Wire a `SessionViews` seam over the given Library mock and an
-    /// explicit Playlists section (a shared, mutex-guarded playlist list so
-    /// a test can mutate it behind the seam's back), returning both
-    /// session generations so a test can bump either independently.
+    /// explicit Playlists section (the playlist mock behind its own shared
+    /// cell, so a test can mutate its rows behind the seam's back), returning
+    /// both session generations read through the widened ports from the
+    /// doubles the seam was wired to — so a test can bump either
+    /// independently and always move the counters the projections observe.
     fn wire_with_playlists(
         mock: MockLibraryQueryStore,
-        playlists: Arc<Mutex<Vec<Playlist>>>,
-    ) -> (SessionViews, MockHandle, StoreGeneration, StoreGeneration) {
+        playlists: Arc<Mutex<crate::mocks::MockPlaylistStore>>,
+    ) -> (
+        SessionViews,
+        Arc<Mutex<MockLibraryQueryStore>>,
+        StoreGeneration,
+        StoreGeneration,
+    ) {
         let mock = Arc::new(Mutex::new(mock));
-        let generation = StoreGeneration::new();
-        let playlist_generation = StoreGeneration::new();
         let views = SessionViews::new(
-            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
-            Box::new(SharedPlaylists(playlists)),
-            generation.clone(),
-            playlist_generation.clone(),
+            Box::new(Arc::clone(&mock)),
+            Box::new(Arc::clone(&playlists)),
         );
-        (views, MockHandle(mock), generation, playlist_generation)
+        let generation = mock.library_generation();
+        let playlist_generation = playlists.playlist_generation();
+        (views, mock, generation, playlist_generation)
     }
 
     #[test]
@@ -2049,7 +2031,9 @@ mod tests {
             "no playlists are registered in this fixture"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
             1,
             "the whole library side costs ONE counts query"
         );
@@ -2068,7 +2052,7 @@ mod tests {
         assert_eq!(views.sidebar_counts(0).tracks, 42);
         generation.bump();
         {
-            let mut mock = mock.lock();
+            let mut mock = mock.lock().unwrap();
             mock.library_counts.tracks = 50;
         }
         assert_eq!(
@@ -2077,7 +2061,9 @@ mod tests {
             "a committed mutation drops the cached counts"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
             2,
             "the invalidated frame refetched the counts"
         );
@@ -2098,12 +2084,16 @@ mod tests {
         views.sidebar_counts(1);
 
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
             1,
             "fresh frames serve the cached counts"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartListCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::SmartListCounts),
             1,
             "smart-list counts fetch once per generation"
         );
@@ -2126,7 +2116,10 @@ mod tests {
             tracks: vec![TrackId("f:\\b\\1.mp3".to_string())],
             created: None,
         };
-        let playlists = Arc::new(Mutex::new(vec![playlist_a, playlist_b]));
+        let playlists = Arc::new(Mutex::new(crate::mocks::MockPlaylistStore {
+            playlists: Arc::new(Mutex::new(vec![playlist_a, playlist_b])),
+            ..Default::default()
+        }));
         let (mut views, mock, _library_gen, playlist_generation) =
             wire_with_playlists(MockLibraryQueryStore::default(), Arc::clone(&playlists));
 
@@ -2146,7 +2139,7 @@ mod tests {
 
         // Adding a track to a playlist bumps the PLAYLIST generation: the
         // sizes refresh without a library-side refetch.
-        playlists.lock().unwrap()[0]
+        playlists.lock().unwrap().playlists.lock().unwrap()[0]
             .tracks
             .push(TrackId("f:\\a\\3.mp3".to_string()));
         playlist_generation.bump();
@@ -2156,7 +2149,9 @@ mod tests {
             "the playlist count followed the edit"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::LibraryCounts),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
             1,
             "a playlist edit does not refetch the library counts"
         );
@@ -2176,9 +2171,11 @@ mod tests {
             "a fresh frame serves the cached count"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
-                "f:\\music"
-            ))),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
+                    "f:\\music"
+                ))),
             1,
             "the per-folder count costs one query per generation"
         );
@@ -2190,9 +2187,11 @@ mod tests {
             "the invalidated frame refetches"
         );
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
-                "f:\\music"
-            ))),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::FolderTrackCount(PathBuf::from(
+                    "f:\\music"
+                ))),
             2
         );
     }
@@ -2218,7 +2217,9 @@ mod tests {
         assert_eq!(views.last_scan(), Some(first));
         assert_eq!(views.last_scan(), Some(first), "fresh frames stay cached");
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::LastFullScan),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LastFullScan),
             1,
             "one store read per generation"
         );
@@ -2226,7 +2227,7 @@ mod tests {
         // A recorded scan bumps the generation and stamps a later time.
         let second = first + Duration::from_secs(60);
         {
-            let mut mock = mock.lock();
+            let mut mock = mock.lock().unwrap();
             mock.last_full_scan = Some(second);
         }
         generation.bump();
@@ -2307,7 +2308,7 @@ mod tests {
             "Up Next lists the tracks after the current one, in queue order"
         );
         assert_eq!(
-            mock.get_track_calls().len(),
+            mock.lock().unwrap().get_track_calls().len(),
             4,
             "one load per distinct id (current + window); the fresh frame refetches nothing"
         );
@@ -2321,7 +2322,7 @@ mod tests {
         });
         let mut queue = playback_queue();
         views.sync_playback(&queue, 5);
-        let calls_after_load = mock.get_track_calls().len();
+        let calls_after_load = mock.lock().unwrap().get_track_calls().len();
 
         // A queue change moves the stamp while the generation stays put, so
         // the slots reload: the same forward answer the arbiter gives a
@@ -2330,7 +2331,7 @@ mod tests {
         views.sync_playback(&queue, 5);
 
         assert!(
-            mock.get_track_calls().len() > calls_after_load,
+            mock.lock().unwrap().get_track_calls().len() > calls_after_load,
             "a queue change invalidates the playback slots even at the same generation"
         );
         assert_eq!(
@@ -2398,7 +2399,7 @@ mod tests {
         assert!(views.playback_current().is_none());
         assert!(views.playback_up_next().is_empty());
         assert!(
-            mock.get_track_calls().is_empty(),
+            mock.lock().unwrap().get_track_calls().is_empty(),
             "nothing to resolve, nothing asked"
         );
     }
@@ -2415,7 +2416,7 @@ mod tests {
             assert!(views.selected_track(&t1).is_some(), "selection resolves");
         }
         assert_eq!(
-            mock.get_track_calls().len(),
+            mock.lock().unwrap().get_track_calls().len(),
             1,
             "an unchanged selection at an unchanged generation never requeries"
         );
@@ -2423,12 +2424,12 @@ mod tests {
         // A different selection refetches…
         let other = TrackId("t2.mp3".to_string());
         let _ = views.selected_track(&other);
-        assert_eq!(mock.get_track_calls().len(), 2);
+        assert_eq!(mock.lock().unwrap().get_track_calls().len(), 2);
 
         // …and so does the same selection after a committed mutation.
         generation.bump();
         let _ = views.selected_track(&other);
-        assert_eq!(mock.get_track_calls().len(), 3);
+        assert_eq!(mock.lock().unwrap().get_track_calls().len(), 3);
 
         // An absent track caches its negative result too.
         let missing = TrackId("gone.mp3".to_string());
@@ -2436,7 +2437,7 @@ mod tests {
             assert!(views.selected_track(&missing).is_none(), "absence resolves");
         }
         assert_eq!(
-            mock.get_track_calls().len(),
+            mock.lock().unwrap().get_track_calls().len(),
             4,
             "a dangling selection is asked once"
         );
@@ -2522,23 +2523,27 @@ mod tests {
             views.track_row("", TrackSort::default(), 0).unwrap().id.0,
             "0"
         );
-        assert_eq!(mock.window_calls(), vec![(0, 50)]);
-        assert_eq!(mock.count_calls(), vec![(0, 0)]);
+        assert_eq!(mock.lock().unwrap().window_calls(), vec![(0, 50)]);
+        assert_eq!(mock.lock().unwrap().count_calls(), vec![(0, 0)]);
 
         // Unchanged generation: both are served from cache.
         assert_eq!(views.track_count("", TrackSort::default()), 120);
         let _ = views.track_row("", TrackSort::default(), 0);
         assert_eq!(
-            mock.window_calls(),
+            mock.lock().unwrap().window_calls(),
             vec![(0, 50)],
             "a fresh frame refetches no window"
         );
-        assert_eq!(mock.count_calls(), vec![(0, 0)], "and re-counts nothing");
+        assert_eq!(
+            mock.lock().unwrap().count_calls(),
+            vec![(0, 0)],
+            "and re-counts nothing"
+        );
 
         // A committed mutation bumps the generation: the next call refetches
         // the window and recounts, so the view shows committed state.
         {
-            let mut mock = mock.lock();
+            let mut mock = mock.lock().unwrap();
             for n in 120..125 {
                 mock.flat.push(projection_track(n));
             }
@@ -2555,7 +2560,7 @@ mod tests {
             "and the window refetches"
         );
         assert_eq!(
-            mock.window_calls(),
+            mock.lock().unwrap().window_calls(),
             vec![(0, 50), (0, 50)],
             "the window refetches"
         );
@@ -2572,7 +2577,10 @@ mod tests {
         // A committed mutation whose window load fails: the refresh errors
         // (the seam warns and moves on) but the stale-but-present window
         // stays readable — the UI keeps rendering last good rows.
-        mock.lock().failing.push(FailingQuery::TracksWindow);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::TracksWindow);
         generation.bump();
         assert_eq!(
             views.track_row("", TrackSort::default(), 0).unwrap().id.0,
@@ -2581,13 +2589,17 @@ mod tests {
         );
 
         // The retry heals: the next call refetches and the view is fresh.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.track_count("", TrackSort::default()), 120);
         assert_eq!(
             views.track_row("", TrackSort::default(), 0).unwrap().id.0,
             "0"
         );
-        assert_eq!(mock.window_calls().len(), 3, "load, failed load, retry");
+        assert_eq!(
+            mock.lock().unwrap().window_calls().len(),
+            3,
+            "load, failed load, retry"
+        );
     }
 
     #[test]
@@ -2608,13 +2620,15 @@ mod tests {
         assert_eq!(views.artist_albums("Alpha").len(), 1);
         assert_eq!(views.artist_albums("Alpha").len(), 1);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
             1
         );
 
         // A committed mutation bumps the generation: the list refetches and
         // shows the committed rows.
-        mock.lock().albums.push(Album {
+        mock.lock().unwrap().albums.push(Album {
             title: "Two".to_string(),
             artist: "Alpha".to_string(),
             tracks: Vec::new(),
@@ -2624,7 +2638,9 @@ mod tests {
         generation.bump();
         assert_eq!(views.artist_albums("Alpha").len(), 2);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
             2
         );
     }
@@ -2646,7 +2662,10 @@ mod tests {
         // A committed mutation whose albums load fails: the seam answers
         // its default (an empty list) — the projection keeps its rows
         // internally, the UI never sees the error.
-        mock.lock().failing.push(FailingQuery::ArtistAlbums);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::ArtistAlbums);
         generation.bump();
         assert!(
             views.artist_albums("Alpha").is_empty(),
@@ -2654,10 +2673,12 @@ mod tests {
         );
 
         // The retry heals: the next call refetches the artist's albums.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.artist_albums("Alpha").len(), 1);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::ArtistAlbums("Alpha".to_string())),
             3
         );
     }
@@ -2674,22 +2695,27 @@ mod tests {
         assert_eq!(views.folder_subtree_ids(folder).len(), 1);
         assert_eq!(views.folder_subtree_ids(folder).len(), 1);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
-                folder.to_path_buf()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                    folder.to_path_buf()
+                )),
             1
         );
 
         // A committed mutation bumps the generation: the listing refetches.
         mock.lock()
+            .unwrap()
             .folder_tree_ids
             .push(TrackId("f:\\lib\\b\\2.mp3".to_string()));
         generation.bump();
         assert_eq!(views.folder_subtree_ids(folder).len(), 2);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::TrackIdsInFolderTree(
-                folder.to_path_buf()
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::TrackIdsInFolderTree(
+                    folder.to_path_buf()
+                )),
             2
         );
     }
@@ -2705,12 +2731,15 @@ mod tests {
 
         // A committed mutation whose listing fails: the seam's default (an
         // empty list) renders.
-        mock.lock().failing.push(FailingQuery::TrackIdsInFolderTree);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::TrackIdsInFolderTree);
         generation.bump();
         assert!(views.folder_subtree_ids(folder).is_empty());
 
         // The retry heals.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.folder_subtree_ids(folder).len(), 1);
     }
 
@@ -2728,26 +2757,33 @@ mod tests {
         assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
         assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartPlaylist(
-                SmartPlaylistKind::MostPlayed,
-                50
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::SmartPlaylist(
+                    SmartPlaylistKind::MostPlayed,
+                    50
+                )),
             1
         );
 
         // A committed mutation bumps the generation: the list recomputes and
         // shows the committed rows.
-        mock.lock().smart.push(crate::test_utils::create_test_track(
-            "f:\\sm\\2.mp3",
-            "f:\\sm\\2.mp3",
-        ));
+        mock.lock()
+            .unwrap()
+            .smart
+            .push(crate::test_utils::create_test_track(
+                "f:\\sm\\2.mp3",
+                "f:\\sm\\2.mp3",
+            ));
         generation.bump();
         assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 2);
         assert_eq!(
-            mock.count_of(&LibraryQueryCall::SmartPlaylist(
-                SmartPlaylistKind::MostPlayed,
-                50
-            )),
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::SmartPlaylist(
+                    SmartPlaylistKind::MostPlayed,
+                    50
+                )),
             2
         );
     }
@@ -2765,7 +2801,10 @@ mod tests {
 
         // A committed mutation whose computation fails: the seam's default
         // (an empty list) renders.
-        mock.lock().failing.push(FailingQuery::SmartPlaylist);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::SmartPlaylist);
         generation.bump();
         assert!(
             views
@@ -2774,7 +2813,7 @@ mod tests {
         );
 
         // The retry heals.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.smart_list(SmartPlaylistKind::MostPlayed, 50).len(), 1);
     }
 
@@ -2791,16 +2830,26 @@ mod tests {
         // Fresh then cached: one aggregation per generation.
         assert_eq!(views.genres()[0].genre, "Jazz");
         assert_eq!(views.genres().len(), 1);
-        assert_eq!(mock.count_of(&LibraryQueryCall::GenreCounts), 1);
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::GenreCounts),
+            1
+        );
 
         // A committed mutation bumps the generation: the aggregation refetches.
-        mock.lock().genre_counts.push(GenreCount {
+        mock.lock().unwrap().genre_counts.push(GenreCount {
             genre: "Soul".to_string(),
             tracks: 4,
         });
         generation.bump();
         assert_eq!(views.genres().len(), 2);
-        assert_eq!(mock.count_of(&LibraryQueryCall::GenreCounts), 2);
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::GenreCounts),
+            2
+        );
     }
 
     #[test]
@@ -2816,12 +2865,12 @@ mod tests {
 
         // A committed mutation whose aggregation fails: the seam's default
         // (an empty list) renders.
-        mock.lock().failing.push(FailingQuery::GenreCounts);
+        mock.lock().unwrap().failing.push(FailingQuery::GenreCounts);
         generation.bump();
         assert!(views.genres().is_empty());
 
         // The retry heals.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.genres().len(), 1);
     }
 
@@ -2841,14 +2890,29 @@ mod tests {
         // Fresh then cached: one totals query per generation.
         assert_eq!(views.sidebar_counts(0).tracks, 42);
         assert_eq!(views.sidebar_counts(0).tracks, 42);
-        assert_eq!(mock.count_of(&LibraryQueryCall::LibraryCounts), 1);
-        assert_eq!(mock.count_of(&LibraryQueryCall::SmartListCounts), 1);
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
+            1
+        );
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::SmartListCounts),
+            1
+        );
 
         // A committed mutation bumps the generation: the totals refetch.
-        mock.lock().library_counts.tracks = 50;
+        mock.lock().unwrap().library_counts.tracks = 50;
         generation.bump();
         assert_eq!(views.sidebar_counts(0).tracks, 50);
-        assert_eq!(mock.count_of(&LibraryQueryCall::LibraryCounts), 2);
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .count_of(&LibraryQueryCall::LibraryCounts),
+            2
+        );
     }
 
     #[test]
@@ -2865,7 +2929,10 @@ mod tests {
 
         // A committed mutation whose totals query fails: the affected count
         // answers its default (0) while the rest of the sidebar still renders.
-        mock.lock().failing.push(FailingQuery::LibraryCounts);
+        mock.lock()
+            .unwrap()
+            .failing
+            .push(FailingQuery::LibraryCounts);
         generation.bump();
         let counts = views.sidebar_counts(0);
         assert_eq!(counts.tracks, 0, "the failed totals query defaults to zero");
@@ -2876,168 +2943,76 @@ mod tests {
         );
 
         // The retry heals.
-        mock.lock().failing.clear();
+        mock.lock().unwrap().failing.clear();
         assert_eq!(views.sidebar_counts(0).tracks, 42);
-    }
-
-    /// A [`PlaylistStore`] fake whose `load_playlists` can be switched to
-    /// fail behind a shared flag — the playlists staleness section flips it
-    /// after wiring to script a failed load against a warmed seam.
-    struct FlakyPlaylists {
-        state: Arc<Mutex<FlakyPlaylistState>>,
-    }
-
-    struct FlakyPlaylistState {
-        fail_loads: bool,
-        playlists: Vec<Playlist>,
-        load_calls: usize,
-    }
-
-    impl PlaylistStore for FlakyPlaylists {
-        fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
-            let mut state = self.state.lock().unwrap();
-            state.load_calls += 1;
-            if state.fail_loads {
-                return Err(StoreError::InvalidOperation("playlists boom".to_string()));
-            }
-            Ok(state.playlists.clone())
-        }
-
-        fn load_playlist_entries(
-            &self,
-            _id: &PlaylistId,
-        ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn create_playlist(
-            &mut self,
-            _name: &str,
-            _initial_tracks: &[TrackId],
-        ) -> Result<PlaylistId, StoreError> {
-            Ok(PlaylistId("mock".to_string()))
-        }
-
-        fn rename_playlist(
-            &mut self,
-            _id: &PlaylistId,
-            _new_name: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn delete_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn add_playlist_entry(
-            &mut self,
-            _id: &PlaylistId,
-            _track: &TrackId,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn remove_playlist_entries(
-            &mut self,
-            _id: &PlaylistId,
-            _track: &TrackId,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn reorder_playlist_entries(
-            &mut self,
-            _id: &PlaylistId,
-            _ordered: &[TrackId],
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
     }
 
     #[test]
     fn staleness_playlists_fresh_serves_then_caches_then_refetches_after_a_bump() {
-        let state = Arc::new(Mutex::new(FlakyPlaylistState {
-            fail_loads: false,
-            playlists: vec![Playlist::new(
-                PlaylistId("mix".to_string()),
-                "Mix".to_string(),
-            )],
-            load_calls: 0,
-        }));
-        let generation = StoreGeneration::new();
-        let playlist_generation = StoreGeneration::new();
+        let state = MockPlaylistStore::with_playlists(vec![(
+            PlaylistId("mix".to_string()),
+            "Mix".to_string(),
+            Vec::new(),
+        )]);
+        let playlist_queries = Box::new(state.clone());
+        // The bump handle is the counter read through the widened port from
+        // the double being wired — the very counter the projections observe.
+        let playlist_generation = state.playlist_generation();
         let mut views = SessionViews::new(
-            Box::new(crate::mocks::SharedQueryStore(Arc::new(Mutex::new(
-                MockLibraryQueryStore::default(),
-            )))),
-            Box::new(FlakyPlaylists {
-                state: Arc::clone(&state),
-            }),
-            generation,
-            playlist_generation.clone(),
+            Box::new(Arc::new(Mutex::new(MockLibraryQueryStore::default()))),
+            playlist_queries,
         );
 
         // Fresh then cached: one listing per playlist generation.
         assert_eq!(views.playlists()[0].name, "Mix");
         assert_eq!(views.playlists()[0].name, "Mix");
-        assert_eq!(state.lock().unwrap().load_calls, 1);
+        assert_eq!(state.load_calls(), 1);
 
         // A committed playlist mutation bumps the playlist generation: the
         // listing refetches and shows the committed rows.
-        state.lock().unwrap().playlists.push(Playlist::new(
+        state.playlists.lock().unwrap().push(Playlist::new(
             PlaylistId("gym".to_string()),
             "Gym".to_string(),
         ));
         playlist_generation.bump();
         assert_eq!(views.playlists().len(), 2);
-        assert_eq!(state.lock().unwrap().load_calls, 2);
+        assert_eq!(state.load_calls(), 2);
     }
 
     #[test]
     fn staleness_playlists_failed_load_keeps_the_stale_list_readable_for_the_retry() {
-        let state = Arc::new(Mutex::new(FlakyPlaylistState {
-            fail_loads: false,
-            playlists: vec![Playlist::new(
-                PlaylistId("mix".to_string()),
-                "Mix".to_string(),
-            )],
-            load_calls: 0,
-        }));
-        let generation = StoreGeneration::new();
-        let playlist_generation = StoreGeneration::new();
+        let state = MockPlaylistStore::with_playlists(vec![(
+            PlaylistId("mix".to_string()),
+            "Mix".to_string(),
+            Vec::new(),
+        )]);
+        let playlist_queries = Box::new(state.clone());
+        // The bump handle is the counter read through the widened port from
+        // the double being wired — the very counter the projections observe.
+        let playlist_generation = state.playlist_generation();
         let mut views = SessionViews::new(
-            Box::new(crate::mocks::SharedQueryStore(Arc::new(Mutex::new(
-                MockLibraryQueryStore::default(),
-            )))),
-            Box::new(FlakyPlaylists {
-                state: Arc::clone(&state),
-            }),
-            generation,
-            playlist_generation.clone(),
+            Box::new(Arc::new(Mutex::new(MockLibraryQueryStore::default()))),
+            playlist_queries,
         );
         assert_eq!(views.playlists().len(), 1);
 
         // A committed playlist mutation whose listing fails: the seam keeps
         // the last good list — stale-but-present beats blanking the sidebar.
-        state.lock().unwrap().fail_loads = true;
+        *state.fail_loads.lock().unwrap() = true;
         playlist_generation.bump();
         let playlists = views.playlists();
         assert_eq!(playlists.len(), 1, "the stale-but-present list renders");
         assert_eq!(playlists[0].name, "Mix");
 
         // The retry heals: the next call refetches the committed rows.
-        {
-            let mut flaky = state.lock().unwrap();
-            flaky.fail_loads = false;
-            flaky.playlists.push(Playlist::new(
-                PlaylistId("gym".to_string()),
-                "Gym".to_string(),
-            ));
-        }
+        *state.fail_loads.lock().unwrap() = false;
+        state.playlists.lock().unwrap().push(Playlist::new(
+            PlaylistId("gym".to_string()),
+            "Gym".to_string(),
+        ));
         let playlists = views.playlists();
         assert_eq!(playlists.len(), 2);
-        assert_eq!(state.lock().unwrap().load_calls, 3);
+        assert_eq!(state.load_calls(), 3);
     }
 }
 
@@ -3052,14 +3027,13 @@ mod tests {
 // fails an assertion instead of hanging CI.
 mod scan_service_tests {
     use super::*;
-    use riff_backend::app::errors::StoreError;
     use riff_backend::app::scan_service::{ScanOutcome, ScanService, Scans};
     use riff_backend::app::store::{LibraryMutationStore, LibraryQueryStore};
     use riff_backend::domain::CoverSource;
-    use riff_backend::domain::GenreCount;
     use riff_infra::store::SqliteStore;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{AudioFormatInfo, MetadataReader};
+    use riff_persistence::test_support::{StubLibraryMutationStore, StubLibraryQueryStore};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -3247,376 +3221,6 @@ mod scan_service_tests {
         })
     }
 
-    // --- Failure-injection stubs -------------------------------------------------
-
-    /// [`LibraryQueryStore`] whose `get_track` ALWAYS fails — the fail-open
-    /// trigger. Every other query answers empty: the scan flow issues only
-    /// `get_track`.
-    struct FailingFreshnessQueries;
-
-    impl LibraryQueryStore for FailingFreshnessQueries {
-        fn get_track(&self, _id: &TrackId) -> Result<Option<Track>, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "freshness probe boom".to_string(),
-            ))
-        }
-
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            Ok(riff_backend::app::store::LibraryCounts::default())
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn search_page(
-            &self,
-            _query: &str,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn custom_smart_playlist_page(
-            &self,
-            _tree: &riff_persistence::store::RuleTree,
-            _order: riff_persistence::store::TrackListOrder,
-            _needle: Option<&str>,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn all_artists(&self) -> Result<Vec<crate::domain::Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<crate::domain::Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn folder_has_search_match(
-            &self,
-            _folder: &Path,
-            _query: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            Ok(None)
-        }
-
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_playlist(
-            &self,
-            _kind: crate::domain::SmartPlaylistKind,
-            _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_list_counts(
-            &self,
-        ) -> Result<Vec<(crate::domain::SmartPlaylistKind, usize)>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn picker_texts(&self, _field_id: &str, _limit: usize) -> Result<Vec<String>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Result<Vec<i64>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_albums_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn hit_artists_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn artist_is_name_hit(&self, _artist: &str, _query: &str) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            _a: &str,
-            _t: &str,
-            _g: &str,
-            _q: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn albums_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn genres_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            _artist: &str,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn smart_playlist_tree(
-            &self,
-            _id: &PlaylistId,
-        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "rule tree read boom".to_string(),
-            ))
-        }
-
-        fn custom_smart_playlists(
-            &self,
-        ) -> Result<Vec<riff_persistence::store::CustomSmartPlaylist>, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "custom list enumeration read boom".to_string(),
-            ))
-        }
-    }
-
-    /// [`LibraryMutationStore`] whose scan batches always fail to commit —
-    /// simulates a broken store so the `Failed` outcome path is exercised.
-    struct FailingCommitMutations;
-
-    impl LibraryMutationStore for FailingCommitMutations {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "scan batch commit boom".to_string(),
-            ))
-        }
-
-        fn stamp_metadata_version(&mut self, _version: u32) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn record_track_played(
-            &mut self,
-            _id: &TrackId,
-            _played_at: SystemTime,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn set_track_favorite(
-            &mut self,
-            _id: &TrackId,
-            _favorite: bool,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn apply_tag_refresh(&mut self, _track: &Track) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn remove_library_path(&mut self, _root: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn record_full_scan_completed(
-            &mut self,
-            _summary: riff_backend::app::store::FullScanSummary,
-        ) -> Result<(), StoreError> {
-            Ok(())
-        }
-
-        fn save_smart_playlist(
-            &mut self,
-            _id: Option<&PlaylistId>,
-            _name: &str,
-            _tree: &SmartPlaylistTree,
-        ) -> Result<PlaylistId, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "smart playlist save boom".to_string(),
-            ))
-        }
-
-        fn rename_smart_playlist(
-            &mut self,
-            _id: &PlaylistId,
-            _new_name: &str,
-        ) -> Result<bool, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "smart playlist rename boom".to_string(),
-            ))
-        }
-
-        fn delete_smart_playlist(&mut self, _id: &PlaylistId) -> Result<bool, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "smart playlist delete boom".to_string(),
-            ))
-        }
-
-        fn duplicate_smart_playlist(
-            &mut self,
-            _id: &PlaylistId,
-        ) -> Result<Option<PlaylistId>, StoreError> {
-            Err(StoreError::InvalidOperation(
-                "smart playlist duplicate boom".to_string(),
-            ))
-        }
-    }
-
     // --- Tests -------------------------------------------------------------------
 
     #[test]
@@ -3695,7 +3299,7 @@ mod scan_service_tests {
         let scanner = AudioFileScanner::new(cancel_flag.clone());
         let (scans, worker) = ScanService::new(
             Box::new(FixtureReader::open()),
-            Box::new(FailingFreshnessQueries),
+            Box::new(StubLibraryQueryStore::empty().with_failing_get_track("freshness probe boom")),
             Box::new(scratch.mutations.clone()),
             cancel_flag,
             inert_stop_flag(),
@@ -3798,8 +3402,11 @@ mod scan_service_tests {
         let scanner = AudioFileScanner::new(cancel_flag.clone());
         let (scans, worker) = ScanService::new(
             Box::new(FixtureReader::open()),
-            Box::new(FailingFreshnessQueries),
-            Box::new(FailingCommitMutations),
+            Box::new(StubLibraryQueryStore::empty().with_failing_get_track("freshness probe boom")),
+            Box::new(
+                StubLibraryMutationStore::default()
+                    .with_failing_scan_batches("scan batch commit boom"),
+            ),
             cancel_flag,
             inert_stop_flag(),
             move |path| scanner.scan(path, &ScanOptions::default()),
@@ -5109,326 +4716,28 @@ mod audio_engine_tests {
 // exactly how the composition root will spawn it (ADR 0006); every wait uses
 // a deadline so a wedged worker fails an assertion instead of hanging CI.
 //
-// The shared-handle adapters below exist because the worker takes ownership
-// of its ports: they delegate every call to the real mocks behind a mutex so
-// the mocks' recordings remain inspectable after the worker has run — the
-// recordings are what prove the substitutes were driven.
+// The worker takes ownership of its ports, so the tests hand it the shared
+// lock cell over each mock — the shared-ownership forwarding implementations
+// (in `riff_persistence::test_support` and `riff_library::test_support`)
+// carry the ports across — and keep the other handle, so the mocks'
+// recordings remain inspectable after the worker has run: the recordings are
+// what prove the substitutes were driven.
 mod tag_edit_service_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
-    use riff_backend::app::errors::StoreError;
-    use riff_library::app::traits::{ReplayGainTags, ReplayGainWriter};
-    // The tag-edit save flow consumes the library slice's `MetadataWriter`
-    // port, whose errors are the library slice's `LibraryError`.
-    use riff_backend::app::store::LibraryQueryStore;
     use riff_backend::app::tag_edit_service::{
         TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
     };
-    use riff_backend::app::traits::{MetadataWriter, TagEdit};
-    use riff_library::app::errors::LibraryError;
+    use riff_backend::app::traits::TagEdit;
+    use riff_library::app::traits::ReplayGainTags;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     /// How long any single wait on the worker may take before the test
     /// declares it wedged.
     const TIMEOUT: Duration = Duration::from_secs(10);
-
-    // --- Shared-handle port adapters -----------------------------------------
-
-    /// [`MetadataWriter`] view over one recording [`MockMetadataWriter`]
-    /// owned by the worker; the test keeps the other handle.
-    struct SharedWriter(Arc<Mutex<MockMetadataWriter>>);
-
-    impl MetadataWriter for SharedWriter {
-        fn write_tags(&self, path: &Path, edit: &TagEdit) -> Result<(), LibraryError> {
-            self.0.lock().unwrap().write_tags(path, edit)
-        }
-    }
-
-    impl ReplayGainWriter for SharedWriter {
-        fn write_replaygain(&self, path: &Path, tags: &ReplayGainTags) -> Result<(), LibraryError> {
-            self.0.lock().unwrap().write_replaygain(path, tags)
-        }
-    }
-
-    /// [`LibraryQueryStore`] view over one canned
-    /// [`MockLibraryQueryStore`] owned by the worker; the test keeps the
-    /// other handle. Only `get_track` is delegated with its real behavior —
-    /// it is the only query the save flow issues; every other query answers
-    /// empty without touching the mock.
-    struct SharedQueries(Arc<Mutex<MockLibraryQueryStore>>);
-
-    impl LibraryQueryStore for SharedQueries {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            self.0.lock().unwrap().get_track(id)
-        }
-
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            Ok(riff_backend::app::store::LibraryCounts::default())
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn search_page(
-            &self,
-            _query: &str,
-            _order: riff_persistence::store::TrackListOrder,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn custom_smart_playlist_page(
-            &self,
-            _tree: &riff_persistence::store::RuleTree,
-            _order: riff_persistence::store::TrackListOrder,
-            _needle: Option<&str>,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums(&self, _artist: &str) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_has_audio(&self, _folder: &Path) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn folder_has_search_match(
-            &self,
-            _folder: &Path,
-            _query: &str,
-        ) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn track_ids_in_folder_tree(&self, _folder: &Path) -> Result<Vec<TrackId>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn tracks_in_folder(&self, _folder: &Path) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn folder_track_count(&self, _folder: &Path) -> Result<usize, StoreError> {
-            Ok(0)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            Ok(None)
-        }
-
-        fn subdirs_with_audio(&self, _folder: &Path) -> Result<Vec<PathBuf>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_playlist(
-            &self,
-            _kind: SmartPlaylistKind,
-            _limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn genre_counts(&self) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn picker_texts(&self, _field_id: &str, _limit: usize) -> Result<Vec<String>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn picker_numbers(&self, _field_id: &str, _limit: usize) -> Result<Vec<i64>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_in_genre(&self, _genre: &str) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            _artist: &str,
-            _genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            _album_artist: &str,
-            _album_title: &str,
-            _genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_albums_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn hit_artists_page(
-            &self,
-            _query: &str,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn album_hit_tracks(&self, _a: &str, _t: &str, _q: &str) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_is_name_hit(&self, _a: &str, _t: &str, _q: &str) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn artist_is_name_hit(&self, _artist: &str, _query: &str) -> Result<bool, StoreError> {
-            Ok(false)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            _g: &str,
-            _q: &str,
-            _o: usize,
-            _l: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            _a: &str,
-            _t: &str,
-            _g: &str,
-            _q: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn hit_genre_counts(&self, _q: &str) -> Result<Vec<crate::domain::GenreCount>, StoreError> {
-            Ok(Vec::new())
-        }
-
-        fn artists_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn albums_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn genres_page(
-            &self,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<crate::domain::GenreCount>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            _artist: &str,
-            _genre: &str,
-            _direction: SortDirection,
-            _offset: usize,
-            _limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            Ok(riff_persistence::store::Page::new(0, Vec::new()))
-        }
-
-        fn smart_playlist_tree(
-            &self,
-            _id: &PlaylistId,
-        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
-            Ok(None)
-        }
-
-        fn custom_smart_playlists(
-            &self,
-        ) -> Result<Vec<riff_persistence::store::CustomSmartPlaylist>, StoreError> {
-            Ok(Vec::new())
-        }
-    }
-
-    // --- Harness ---------------------------------------------------------------
 
     /// Ports under test plus the front-end handle to drive them with.
     struct Harness {
@@ -5452,8 +4761,8 @@ mod tag_edit_service_tests {
             ..Default::default()
         }));
         let (service, worker) = TagEditService::new(
-            Box::new(SharedWriter(Arc::clone(&writer))),
-            Box::new(SharedQueries(Arc::clone(&queries))),
+            Box::new(Arc::clone(&writer)),
+            Box::new(Arc::clone(&queries)),
             Box::new(mutations.clone()),
             inert_stop_flag(),
         );
@@ -6927,6 +6236,13 @@ mod playlist_projection_tests {
     }
 
     impl PlaylistStore for CountingPlaylistStore {
+        /// The wrapped store's own session playlist generation — the same
+        /// counter the store bumps when a mutation commits through the
+        /// counting wrapper or any of its clones.
+        fn playlist_generation(&self) -> riff_backend::app::store::StoreGeneration {
+            self.inner.playlist_generation()
+        }
+
         fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
             self.list_loads.fetch_add(1, Ordering::SeqCst);
             self.inner.load_playlists()
@@ -7006,8 +6322,6 @@ mod playlist_projection_tests {
             let views = riff_backend::app::views::SessionViews::new(
                 Box::new(store.clone()),
                 Box::new(playlist_queries),
-                store.library_generation(),
-                store.playlist_generation(),
             );
             Self {
                 dir,
@@ -7282,13 +6596,11 @@ mod playback_coordinator_tests {
     use riff_backend::app::playback_coordinator::PlaybackCoordinator;
 
     /// One wired coordinator plus every handle a test inspects: the shared
-    /// playback and library sessions (held in two separate `Arc<Mutex<>>`s so
-    /// the test never holds both locks at once), the command receiver (what
-    /// the engine would receive), the playback-error notice receiver (what
-    /// the seam would receive), and the mutation recordings.
+    /// playback session, the command receiver (what the engine would receive),
+    /// the playback-error notice receiver (what the seam would receive), and
+    /// the mutation recordings.
     struct Harness {
         state: Arc<Mutex<PlaybackSession>>,
-        library: Arc<Mutex<LibrarySession>>,
         cmd_rx: Receiver<PlaybackCommand>,
         notice_rx: Receiver<String>,
         mutations: MockLibraryMutationStore,
@@ -7308,7 +6620,6 @@ mod playback_coordinator_tests {
             locked.queue.current_index = current_index;
             locked.queue.repeat = repeat;
         }
-        let library = Arc::new(Mutex::new(LibrarySession::default()));
         let (cmd_tx, cmd_rx) = unbounded();
         let (notice_tx, notice_rx) = unbounded();
         let mutations = MockLibraryMutationStore::new();
@@ -7321,7 +6632,6 @@ mod playback_coordinator_tests {
         );
         Harness {
             state,
-            library,
             cmd_rx,
             notice_rx,
             mutations,
@@ -7416,16 +6726,6 @@ mod playback_coordinator_tests {
         {
             let locked = h.state.lock_or_recover();
             assert_eq!(locked.playback_state, PlaybackState::Stopped);
-        }
-        // The cross-slice state write is gone: the coordinator no longer
-        // touches the library session's scan-status slot. Lock and drop the
-        // library session on its own — never both session guards at once.
-        {
-            let locked = h.library.lock_or_recover();
-            assert_eq!(
-                locked.scan_status, None,
-                "playback errors must not write the library session's scan-status slot"
-            );
         }
         // Instead the error surfaces as a notice over the event inbox's channel,
         // preserving the exact user-facing string format.
@@ -8352,7 +7652,7 @@ mod browse_row_seam_tests {
     use super::*;
     use crate::domain::GenreCount;
     use crate::mocks::{FailingQuery, MockLibraryQueryStore};
-    use app::store::{SortDirection, StoreGeneration};
+    use app::store::{LibraryQueryStore, SortDirection, StoreGeneration};
     use app::views::SessionViews;
 
     /// An artist fixture with a deterministic name and album key count.
@@ -8371,7 +7671,8 @@ mod browse_row_seam_tests {
     }
 
     /// Wire a seam to `mock`, returning the seam, the shared mock handle for
-    /// assertions, and the generation handle (the mirror of the app tests'
+    /// assertions, and the generation handle read through the widened port
+    /// from the double the seam was wired to (the mirror of the app tests'
     /// `wire` helper, local to this module).
     fn wire(
         mock: MockLibraryQueryStore,
@@ -8381,13 +7682,11 @@ mod browse_row_seam_tests {
         StoreGeneration,
     ) {
         let mock = Arc::new(Mutex::new(mock));
-        let generation = StoreGeneration::new();
         let views = SessionViews::new(
-            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&mock))),
+            Box::new(Arc::clone(&mock)),
             Box::new(crate::mocks::MockPlaylistStore::default()),
-            generation.clone(),
-            StoreGeneration::new(),
         );
+        let generation = mock.library_generation();
         (views, mock, generation)
     }
 
@@ -9083,12 +8382,7 @@ mod paged_listing_real_store_tests {
             let store = SqliteStore::open_and_migrate(&db_path, changes_tx)
                 .expect("scratch store opens and migrates");
             let mutations = store.clone();
-            let views = SessionViews::new(
-                Box::new(store.clone()),
-                Box::new(store.clone()),
-                store.library_generation(),
-                store.playlist_generation(),
-            );
+            let views = SessionViews::new(Box::new(store.clone()), Box::new(store.clone()));
             Self {
                 _dir: dir,
                 mutations,
@@ -9899,9 +9193,7 @@ mod cover_thumbnail_cache_tests {
 mod replaygain_mirror_tests {
     use super::*;
     use crate::mocks::{MockLibraryMutationStore, MockLibraryQueryStore, MockMetadataWriter};
-    use riff_backend::app::errors::StoreError;
     use riff_backend::app::replaygain_pass::{PassCommand, ReplayGainPass};
-    use riff_backend::app::store::LibraryMutationStore;
     use riff_backend::app::tag_edit_service::{
         TagEditOutcome, TagEditRequest, TagEditService, TagEdits,
     };
@@ -9909,9 +9201,9 @@ mod replaygain_mirror_tests {
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{LoudnessAnalyzer, ReplayGainTags, TrackLoudness};
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant};
 
     /// The measurement the analyzer always returns: −6.54 dB / 0.98 linear.
     const MEASURED_GAIN_DB: f32 = -6.54;
@@ -9968,105 +9260,6 @@ mod replaygain_mirror_tests {
         }
     }
 
-    /// A mutation store that records the Pass's batch commits beside
-    /// everything [`MockLibraryMutationStore`] already records. Cloning hands
-    /// out another view of the same records, so both write paths can hold one
-    /// while the test reads it back.
-    #[derive(Clone)]
-    struct RecordingMutations {
-        store: MockLibraryMutationStore,
-        batches: Arc<Mutex<Vec<Track>>>,
-    }
-
-    impl RecordingMutations {
-        fn new() -> Self {
-            Self {
-                store: MockLibraryMutationStore::new(),
-                batches: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        /// Every Track handed to `apply_scan_batch`, flat, in order.
-        fn batched(&self) -> Vec<Track> {
-            self.batches.lock().unwrap().clone()
-        }
-
-        /// Every Track handed to `apply_tag_refresh`, in call order.
-        fn refreshed(&self) -> Vec<Track> {
-            self.store.refreshed()
-        }
-    }
-
-    impl LibraryMutationStore for RecordingMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-            self.batches.lock().unwrap().extend(tracks.iter().cloned());
-            self.store.apply_scan_batch(tracks)
-        }
-
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
-            self.store.apply_tag_refresh(track)
-        }
-
-        fn record_track_played(
-            &mut self,
-            id: &TrackId,
-            played_at: SystemTime,
-        ) -> Result<bool, StoreError> {
-            self.store.record_track_played(id, played_at)
-        }
-
-        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
-            self.store.set_track_favorite(id, favorite)
-        }
-
-        fn remove_library_path(&mut self, root: &Path) -> Result<usize, StoreError> {
-            self.store.remove_library_path(root)
-        }
-
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            self.store.clear_library()
-        }
-
-        fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
-            self.store.stamp_metadata_version(version)
-        }
-
-        fn record_full_scan_completed(
-            &mut self,
-            summary: riff_backend::app::store::FullScanSummary,
-        ) -> Result<(), StoreError> {
-            self.store.record_full_scan_completed(summary)
-        }
-
-        fn save_smart_playlist(
-            &mut self,
-            id: Option<&PlaylistId>,
-            name: &str,
-            tree: &SmartPlaylistTree,
-        ) -> Result<PlaylistId, StoreError> {
-            self.store.save_smart_playlist(id, name, tree)
-        }
-
-        fn rename_smart_playlist(
-            &mut self,
-            id: &PlaylistId,
-            new_name: &str,
-        ) -> Result<bool, StoreError> {
-            self.store.rename_smart_playlist(id, new_name)
-        }
-
-        fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
-            self.store.delete_smart_playlist(id)
-        }
-
-        fn duplicate_smart_playlist(
-            &mut self,
-            id: &PlaylistId,
-        ) -> Result<Option<PlaylistId>, StoreError> {
-            self.store.duplicate_smart_playlist(id)
-        }
-    }
-
     /// The Pass path: measure one Track and let the pass commit its batch.
     fn pass_path_metadata() -> TrackMetadata {
         let track = manually_edited_track();
@@ -10074,7 +9267,7 @@ mod replaygain_mirror_tests {
             library: std::collections::HashMap::from([(track.id.clone(), track.clone())]),
             ..Default::default()
         };
-        let mutations = RecordingMutations::new();
+        let mutations = MockLibraryMutationStore::new();
         let mut pass = ReplayGainPass::new(
             Box::new(CannedAnalyzer),
             Box::new(MockMetadataWriter::recording()),
@@ -10105,7 +9298,7 @@ mod replaygain_mirror_tests {
             library: std::collections::HashMap::from([(track_id.clone(), track)]),
             ..Default::default()
         };
-        let mutations = RecordingMutations::new();
+        let mutations = MockLibraryMutationStore::new();
         let (service, worker) = TagEditService::new(
             Box::new(MockMetadataWriter::recording()),
             Box::new(queries),
@@ -10178,20 +9371,20 @@ mod replaygain_mirror_tests {
 #[cfg(test)]
 mod custom_list_projection_tests {
     use super::*;
-    use crate::mocks::{
-        FailingQuery, LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore,
-    };
+    use crate::mocks::{FailingQuery, LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore};
     use app::projection::{CustomListDegraded, CustomListKey};
     use app::state::TrackSort;
-    use app::store::{StoreGeneration, TrackListOrder};
+    use app::store::{LibraryQueryStore, PlaylistStore, StoreGeneration, TrackListOrder};
     use app::views::SessionViews;
     use domain::{
         Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
     };
 
     /// Wire a seam to `mock`; returns the seam, the shared mock handle, and
-    /// BOTH generation handles — the Custom projection watches the library
-    /// counter for rows and the playlist counter for the tree.
+    /// BOTH generation handles read through the widened ports from the
+    /// doubles the seam was wired to — the Custom projection watches the
+    /// library counter for rows and the playlist counter for the tree, and a
+    /// test's bump lands on the very counter the projections observe.
     fn wire_custom(
         mock: MockLibraryQueryStore,
     ) -> (
@@ -10201,14 +9394,10 @@ mod custom_list_projection_tests {
         StoreGeneration,
     ) {
         let mock = Arc::new(Mutex::new(mock));
-        let library_generation = StoreGeneration::new();
-        let playlist_generation = StoreGeneration::new();
-        let views = SessionViews::new(
-            Box::new(SharedQueryStore(Arc::clone(&mock))),
-            Box::new(MockPlaylistStore::default()),
-            library_generation.clone(),
-            playlist_generation.clone(),
-        );
+        let playlist_queries = Box::new(MockPlaylistStore::default());
+        let playlist_generation = playlist_queries.playlist_generation();
+        let views = SessionViews::new(Box::new(Arc::clone(&mock)), playlist_queries);
+        let library_generation = mock.library_generation();
         (views, mock, library_generation, playlist_generation)
     }
 

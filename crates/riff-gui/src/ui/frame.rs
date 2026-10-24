@@ -24,15 +24,19 @@
 //! 3. drain the Backend Events inbox — typed notices to the feedback board,
 //!    and any Library generation move into the Scroll Memory;
 //! 4. drain the three background services (scan, Tag Edit, Thumbnail-cache
-//!    clear) into the feedback board;
-//! 5. compose the titlebar status line from the board — **after** the
-//!    drains, because *a slot filled after the compose is a frame late*;
-//! 6. settle the Cover Cache and hand the arrivals to the View half — after
-//!    the compose, because a clear that lands in step 4 must reach the line
-//!    this frame paints;
-//! 7. poll the watcher;
-//! 8. read the keyboard (Ctrl+K, Space);
-//! 9. push the window title / tray tooltip.
+//!    clear) into the feedback board — **before** anything draws, because the
+//!    titlebar reads the board at the top of the panel order and *a slot
+//!    filled after that read is a frame late*;
+//! 5. settle the Cover Cache and hand the arrivals to the View half — after
+//!    the drains, so a clear settled in step 4 has already dropped its
+//!    in-flight markers before any arrival is handed on;
+//! 6. poll the watcher;
+//! 7. read the keyboard (Ctrl+K, Space);
+//! 8. push the window title / tray tooltip;
+//! 9. reconcile the Smart Playlists draft's right to exist — derive whether
+//!    the page is on screen (the Settings view, on its Smart Playlists
+//!    section) and hand the editor the one enumeration read that decides,
+//!    **before** any panel draws so a discarded draft is never painted.
 //!
 //! Then the driver draws and reports, one slot per panel, and the Frame
 //! answers each report at its own slot — the titlebar's before the sidebar
@@ -45,8 +49,8 @@
 //!
 //! # Why the seam is here, and the two alternatives that were rejected
 //!
-//! *Cutting **below** the services* — around the three drains and the compose
-//! only — is smaller and would have left the two hard parts untestable: the
+//! *Cutting **below** the services* — around the three drains only — is
+//! smaller and would have left the two hard parts untestable: the
 //! panel closures' mutation (a titlebar click changing `view_mode` between the
 //! sidebar's highlight and the stage's branch) and the drain order relative to
 //! it. Nothing above that cut can assert an order.
@@ -108,7 +112,6 @@ use super::settings::SettingsSection;
 use super::sidebar::PlaylistRowAction;
 use super::smart_playlists_page::SmartPlaylistsEditor;
 use riff_backend::app::pass_service::Passes;
-use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::replaygain_pass::PassReport;
 use riff_gui_components::prompts::PromptOutcome;
@@ -185,7 +188,7 @@ pub enum FrameViewport {
 
 /// What a native close request resolved to.
 ///
-/// The signal carries no provenance (see [`CloseIntent`]): the tray's Quit
+/// The signal carries no provenance (see [`crate::ui::app::CloseIntent`]): the tray's Quit
 /// enqueues bit-for-bit the same `Close` the red light produces, and only the
 /// app-wide quit flag separates them. The Frame owns that decision now, in
 /// this vocabulary; the draw half just enacts it.
@@ -427,16 +430,12 @@ impl<'a> Frame<'a> {
         self.apply_theme(&mut out);
         self.drain_backend_events();
         self.drain_background_outcomes(&mut out);
-        // Compose the titlebar status line from the independent source slots,
-        // so a Library Scan update cannot erase a live playback error or a Tag
-        // Edit outcome. **After** the drains: a slot filled after the compose
-        // is a frame late, which is what `tests/frame_tests.rs` pins.
-        self.library.scan_status = self.parts.feedback.display_message();
         out.cover_arrivals = self.settle_covers();
         self.poll_watchers();
         self.read_keyboard(input);
         self.decide_drop(input, &mut out);
         self.update_window_title(&mut out);
+        self.reconcile_smart_playlist_draft();
 
         out
     }
@@ -623,10 +622,10 @@ impl<'a> Frame<'a> {
     // --- Step 4: the three background services -----------------------------
 
     /// Drain every background service's outstanding results into the feedback
-    /// board, in the order the status line is later composed from it. The three
-    /// drains are one step because their sequence relative to
-    /// `feedback.display_message()` is load-bearing: a slot filled after the
-    /// compose is a frame late.
+    /// board, in the order the titlebar later reads it back. The three
+    /// drains are one step because their sequence relative to the titlebar's
+    /// board read is load-bearing: a slot filled after that read is a frame
+    /// late.
     fn drain_background_outcomes(&mut self, out: &mut FrameOutput) {
         self.poll_library_updates();
         self.parts.tag_edits.poll_outcomes(self.parts.feedback);
@@ -740,7 +739,7 @@ impl<'a> Frame<'a> {
     ///
     /// The View half's texture-map flush travels in the output rather than
     /// happening here, because the map is egui state. Its ORDER does not: the
-    /// draw half enacts the flush before the step-6 uploads, which is the order
+    /// draw half enacts the flush before the step-5 uploads, which is the order
     /// the pre-split frame ran — at confirm time every visible row would
     /// re-request while the wipe was still queued behind those very requests,
     /// rebuilding the entries the user had just asked to delete. Settled is the
@@ -780,7 +779,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    // --- Step 6: covers ----------------------------------------------------
+    // --- Step 5: covers ----------------------------------------------------
 
     /// Settle the Cover Cache: which Covers arrived, which markers drop, and
     /// which textures the View half must upload.
@@ -792,7 +791,7 @@ impl<'a> Frame<'a> {
         self.parts.cover_cache.settle(self.parts.covers)
     }
 
-    // --- Step 7: the watcher -----------------------------------------------
+    // --- Step 6: the watcher -----------------------------------------------
 
     /// Let the watcher observe what the frame's drains settled.
     fn poll_watchers(&mut self) {
@@ -801,7 +800,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    // --- Step 8: the keyboard ----------------------------------------------
+    // --- Step 7: the keyboard ----------------------------------------------
 
     /// Apply the frame's keyboard facts. Ctrl+K raises the one-shot search
     /// focus request; Space toggles playback. The draw half read both off
@@ -834,7 +833,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    // --- Step 9: the OS title and tray tooltip -----------------------------
+    // --- Step 8: the OS title and tray tooltip -----------------------------
 
     /// Push the window title and tray tooltip for the current track
     /// (REQ-SI-001). Both derive from one identity — the current `TrackId` —
@@ -873,6 +872,46 @@ impl<'a> Frame<'a> {
         out.viewport.push(FrameViewport::Title(title));
         out.tray_tooltip = Some(tooltip);
         *self.parts.title_key = TitleKey::Set(current_id.cloned());
+    }
+
+    // --- Step 9: the Smart Playlists draft's right to exist -----------------
+
+    /// Decide the Smart Playlists draft's right to exist, once per frame and
+    /// before any panel draws: it belongs to the Smart Playlists page and to
+    /// a saved list that still exists, so leaving the page — another Settings
+    /// section, or the Settings view itself — or losing the list it was
+    /// written against discards it, while a rename of that list is followed
+    /// by the draft. [`SmartPlaylistsEditor::reconcile`] is the ONE place
+    /// that rule lives; this step is its one caller, so a stale draft cannot
+    /// survive through a path nobody remembered to wire. A discarded draft is
+    /// never painted, because the step precedes every draw.
+    ///
+    /// The page-open fact is derived here — the Settings view is active and
+    /// the Settings section is the Smart Playlists page — from the library
+    /// session's view mode and the parts' Settings section slot. The
+    /// enumeration is the same bounded read the page's own content fill
+    /// makes, asked only while the page is on screen and through the
+    /// Session Views seam's fallible accessor: a store that *could not
+    /// answer* must not reach the reconcile as a store that answered "no
+    /// lists", because the draft is the only holder of the listener's work
+    /// and a transient read error would otherwise destroy it. A closed page
+    /// hands the reconcile the not-on-page fact without touching the store.
+    ///
+    /// The pane's other per-frame duties are pane-draw duties and stay in the
+    /// Settings pane's content fill, in their documented order: the gestures
+    /// land first, then the picker answer, then the match-line refresh reads
+    /// this frame's committed shape.
+    fn reconcile_smart_playlist_draft(&mut self) {
+        let smart_page_open = matches!(self.library.view_mode, ViewMode::Settings)
+            && *self.parts.settings_section == SettingsSection::SmartPlaylists;
+        let stored = if smart_page_open {
+            self.parts.views.try_custom_smart_playlists()
+        } else {
+            Ok(Vec::new())
+        };
+        self.parts
+            .smart_playlists_editor
+            .reconcile(smart_page_open, stored);
     }
 
     // --- Step 10: the titlebar's actions -----------------------------------
@@ -1064,7 +1103,7 @@ impl<'a> Frame<'a> {
     // the store (ADR 0018), so the refusal reason — which is the outcome of the
     // write, not of the click — travels with the decision that made it.
 
-    /// Commit the create prompt's name, or report the store's refusal under the
+    /// Commit the create prompt's name, or report the refusal under the
     /// prompt that asked.
     fn apply_playlist_create(&mut self, outcome: PromptOutcome) {
         if outcome == PromptOutcome::Cancel {
@@ -1075,41 +1114,33 @@ impl<'a> Frame<'a> {
         let Some(typed) = self.parts.playlist_create_name.take() else {
             return;
         };
-        let name = typed.trim().to_string();
-        if name.is_empty() {
-            return;
-        }
-        // The application layer's half of the sidebar name rule, before the
-        // store is asked: the six Built-in Smart Playlists exist only as code,
-        // so no query can refuse a Playlist named after one — and the sidebar
-        // must never show two rows reading "Most Played" (story 8).
-        if let Some(reason) = builtin_smart_list_name_conflict(&name) {
-            *self.parts.playlist_create_name = Some(typed);
-            *self.parts.playlist_create_error = Some(reason);
-            return;
-        }
-        match self.parts.playlist_store.create_playlist(&name, &[]) {
-            Ok(id) => {
+        match super::app::commit_playlist_create(self.parts.playlist_store, &typed) {
+            Ok(Some(id)) => {
                 // The committed create bumps the playlist generation;
                 // the seam's next read lists the new playlist.
                 *self.parts.playlist_create_error = None;
                 *self.parts.playlist_view = Some(id);
             }
-            // The store refused. The prompt stays up, the name the listener
-            // typed stays in it, and the reason the store gave is written under
-            // it — the refusal is reported to the listener, not to the log.
+            // The empty draft is ignored (pre-restyle behavior): the name
+            // slot was taken above, so the prompt closes, and the reason
+            // slot is left exactly as the inline flow left it.
+            Ok(None) => {}
+            // The create was refused — a Built-in Smart Playlist's name or
+            // a store fault. The prompt stays up, the name the listener
+            // typed stays in it, and the reason is written under it — the
+            // refusal is reported to the listener, not to the log.
             //
-            // The draft put back is `typed`, NOT `name`: a listener who typed
-            // `"Road Trip "` and was refused must find the field exactly as they
-            // left it, not a silently edited version of it.
-            Err(e) => {
+            // The draft put back is `typed`, NOT the trimmed name: a listener
+            // who typed `"Road Trip "` and was refused must find the field
+            // exactly as they left it, not a silently edited version of it.
+            Err(reason) => {
                 *self.parts.playlist_create_name = Some(typed);
-                *self.parts.playlist_create_error = Some(e.to_string());
+                *self.parts.playlist_create_error = Some(reason);
             }
         }
     }
 
-    /// Commit the rename prompt's draft, or report the store's refusal under the
+    /// Commit the rename prompt's draft, or report the refusal under the
     /// prompt that asked.
     fn apply_playlist_rename(&mut self, outcome: PromptOutcome) {
         if outcome == PromptOutcome::Cancel {
@@ -1120,19 +1151,6 @@ impl<'a> Frame<'a> {
         let Some((rid, typed)) = self.parts.playlist_rename.take() else {
             return;
         };
-        // The application layer's half of the sidebar name rule, the same one
-        // the create prompt asks: a rename must not take a Built-in Smart
-        // Playlist's name either, and the store deliberately cannot say so.
-        // The check trims and folds exactly as [`commit_playlist_rename`]
-        // does on its way to the store, so the two cannot disagree about what
-        // "the name" is.
-        //
-        // [`commit_playlist_rename`]: super::app::commit_playlist_rename
-        if let Some(reason) = builtin_smart_list_name_conflict(&typed) {
-            *self.parts.playlist_rename = Some((rid, typed));
-            *self.parts.playlist_rename_error = Some(reason);
-            return;
-        }
         // Same Store flow as before the restyle: trim, rename as one durable
         // transaction. The seam's next read reflects the new name on its own
         // (ADR 0002). The prompt slot is keyed by id, so the slot the row
@@ -1140,7 +1158,7 @@ impl<'a> Frame<'a> {
         match super::app::commit_playlist_rename(self.parts.playlist_store, &rid, &typed) {
             Ok(()) => *self.parts.playlist_rename_error = None,
             // As with the create: the draft and the prompt both stay, un-trimmed
-            // as typed, and the reason is the store's own words.
+            // as typed, and the reason is the refusal's own words.
             Err(reason) => {
                 *self.parts.playlist_rename = Some((rid, typed));
                 *self.parts.playlist_rename_error = Some(reason);
@@ -1226,7 +1244,7 @@ impl<'a> Frame<'a> {
         }
     }
 
-    // --- Steps 12 and 13: the bar's and the stage's appliers ----------------
+    // --- Steps 12 and 13: the bar's and the stage's appliers ---------------
     //
     // The two appliers below are free functions rather than methods because
     // the Frame reaches them through its ordered slots and the test suite has
@@ -1443,7 +1461,7 @@ pub struct StageReport {
 }
 
 /// Global keyboard shortcuts: Ctrl+K focuses the global search (issue 06),
-/// and Space toggles playback. The one applier the Frame's step 8 calls, so
+/// and Space toggles playback. The one applier the Frame's step 7 calls, so
 /// the shortcut contract has exactly one behaviour.
 pub fn apply_keyboard(
     search_focus_requested: bool,

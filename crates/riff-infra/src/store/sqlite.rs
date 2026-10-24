@@ -788,31 +788,14 @@ impl SqliteStore {
         f(&conn).map_err(|e| op_error("store query failed", e))
     }
 
-    /// The session Library generation this handle bumps after each committed
-    /// Library mutation (ADR 0002). Clones share it.
-    #[must_use]
-    pub fn library_generation(&self) -> StoreGeneration {
-        self.library_generation.clone()
-    }
-
-    /// The session playlist generation this handle bumps after each
-    /// committed playlist mutation (ADR 0002), independent of the Library
-    /// generation so entry edits never invalidate Library projections.
-    /// Clones share it.
-    #[must_use]
-    pub fn playlist_generation(&self) -> StoreGeneration {
-        self.playlist_generation.clone()
-    }
-
     /// Record whether a playlist mutation committed by bumping the session
-    /// playlist generation exactly on commit (ADR 0002), then push a
-    /// [`StoreChanged::Playlists`] beside the bump. The emit happens inside
-    /// this method so callers cannot forget it; best-effort (`send()`),
-    /// dropped receivers are fine.
+    /// playlist generation exactly on commit (ADR 0002). The bump itself is
+    /// the mutation's whole observable — the session projections read the
+    /// counter, and nothing downstream consumes a notice about it, so no
+    /// change event is pushed here.
     fn bump_playlist_generation_on_commit(&self, committed: bool) {
         if committed {
-            let generation = self.playlist_generation.bump();
-            let _ = self.changes.send(StoreChanged::Playlists(generation));
+            self.playlist_generation.bump();
         }
     }
 
@@ -984,6 +967,13 @@ pub(crate) fn now_nanos() -> i64 {
 }
 
 impl PlaylistStore for SqliteStore {
+    /// The session playlist generation this handle bumps after each
+    /// committed playlist mutation (ADR 0002). Clones share it — the port
+    /// read answers the store's own counter.
+    fn playlist_generation(&self) -> StoreGeneration {
+        self.playlist_generation.clone()
+    }
+
     /// Load every Playlist in creation order with its entries in playlist
     /// order. Dangling Track references load unchanged — validity is decided
     /// at read time by the app layer, never by the schema.
@@ -1473,12 +1463,12 @@ fn op_error(context: &str, e: impl std::fmt::Display) -> StoreError {
 #[derive(Clone, Copy)]
 pub(crate) enum SessionGeneration {
     /// The session Library generation
-    /// ([`SqliteStore::library_generation`]), whose notice is
+    /// ([`LibraryQueryStore::library_generation`]), whose notice is
     /// [`StoreChanged::Library`].
     Library,
     /// The session playlist generation
-    /// ([`SqliteStore::playlist_generation`]), whose notice is
-    /// [`StoreChanged::Playlists`].
+    /// ([`PlaylistStore::playlist_generation`]) — the counter the session
+    /// projections read directly; no change notice carries it.
     Playlists,
     /// Neither counter: the write commits durably and nothing refetches for
     /// it — the Settings block and the metadata version stamp.
@@ -1971,6 +1961,13 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
 }
 
 impl LibraryQueryStore for SqliteStore {
+    /// The session Library generation this handle bumps after each committed
+    /// Library mutation (ADR 0002). Clones share it — the port read answers
+    /// the store's own counter.
+    fn library_generation(&self) -> StoreGeneration {
+        self.library_generation.clone()
+    }
+
     /// Resolve one `Track` by its `TrackId` (its full file path).
     fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
         self.with_connection(|conn| {

@@ -54,3 +54,11 @@ pub use riff_playback::app::{
 /// this historical path (`riff_backend::app::MutexExt`) for the frontend and
 /// the integration suite, which import the trait from here.
 pub use riff_persistence::sync::MutexExt;
+
+/// The Thumbnail cache stub from `riff-persistence`'s test-support module,
+/// re-exported for the test crate's shell composer, which builds the App
+/// Runtime bundle over mock ports and must fill the one bundle member the app
+/// never holds. Hidden from the documented application API like the test
+/// twin that consumes the bundle.
+#[doc(hidden)]
+pub use riff_persistence::test_support::StubThumbnailCache;

@@ -104,6 +104,11 @@ pub trait Transport: Send {
 /// sends over the UI's command channel. All methods are infallible — a send
 /// only fails when the engine channel is closed, which is logged and then
 /// dropped (the former `let _ = send(..)` semantics).
+///
+/// `Clone` because a transport is only its channel's sender: a clone
+/// dispatches onto the same command channel, which is how the tray holds its
+/// own handle beside the UI's without a second channel.
+#[derive(Clone)]
 pub struct ChannelTransport {
     cmd_tx: Sender<PlaybackCommand>,
 }

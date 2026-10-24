@@ -717,10 +717,13 @@ mod tests {
     }
 
     /// The fake store mutations: every scan-batch commit is recorded; an
-    /// armed failure fails every commit.
+    /// armed failure fails every commit. The writes this pass never makes
+    /// delegate to the shared no-op stub, so their no-op bodies are spelled
+    /// once, in `riff-persistence`, instead of once per suite.
     struct FakeMutations {
         batches: Mutex<Vec<Vec<Track>>>,
         fail: AtomicBool,
+        noop: StubLibraryMutationStore,
     }
 
     impl FakeMutations {
@@ -728,6 +731,7 @@ mod tests {
             Self {
                 batches: Mutex::new(Vec::new()),
                 fail: AtomicBool::new(false),
+                noop: StubLibraryMutationStore::default(),
             }
         }
 
@@ -737,6 +741,79 @@ mod tests {
 
         fn committed_flat(&self) -> Vec<Track> {
             self.committed().into_iter().flatten().collect()
+        }
+    }
+
+    impl LibraryMutationStore for FakeMutations {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
+            self.batches.lock().unwrap().push(tracks.to_vec());
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(StoreError::InvalidOperation("store is dead".to_string()));
+            }
+            Ok(tracks.len())
+        }
+
+        fn record_track_played(
+            &mut self,
+            id: &TrackId,
+            played_at: std::time::SystemTime,
+        ) -> Result<bool, StoreError> {
+            self.noop.record_track_played(id, played_at)
+        }
+
+        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
+            self.noop.set_track_favorite(id, favorite)
+        }
+
+        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
+            self.noop.apply_tag_refresh(track)
+        }
+
+        fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, StoreError> {
+            self.noop.remove_library_path(root)
+        }
+
+        fn clear_library(&mut self) -> Result<usize, StoreError> {
+            self.noop.clear_library()
+        }
+
+        fn record_full_scan_completed(
+            &mut self,
+            summary: FullScanSummary,
+        ) -> Result<(), StoreError> {
+            self.noop.record_full_scan_completed(summary)
+        }
+
+        fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
+            self.noop.stamp_metadata_version(version)
+        }
+
+        fn save_smart_playlist(
+            &mut self,
+            id: Option<&PlaylistId>,
+            name: &str,
+            tree: &SmartPlaylistTree,
+        ) -> Result<PlaylistId, StoreError> {
+            self.noop.save_smart_playlist(id, name, tree)
+        }
+
+        fn rename_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+            new_name: &str,
+        ) -> Result<bool, StoreError> {
+            self.noop.rename_smart_playlist(id, new_name)
+        }
+
+        fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
+            self.noop.delete_smart_playlist(id)
+        }
+
+        fn duplicate_smart_playlist(
+            &mut self,
+            id: &PlaylistId,
+        ) -> Result<Option<PlaylistId>, StoreError> {
+            self.noop.duplicate_smart_playlist(id)
         }
     }
 
@@ -797,134 +874,31 @@ mod tests {
         (library, HashMap::new())
     }
 
-    /// The wired pass with handles back to the fakes for assertions.
+    /// The wired pass with handles back to the fakes for assertions. Each
+    /// fake sits behind the shared lock cell the forwarding family forwards,
+    /// so the seam owns one handle and the test keeps the other.
     struct Wired {
         pass: ReplayGainPass,
-        analyzer: Arc<FakeAnalyzer>,
-        writer: Arc<FakeWriter>,
-        mutations: Arc<FakeMutations>,
+        analyzer: Arc<Mutex<FakeAnalyzer>>,
+        writer: Arc<Mutex<FakeWriter>>,
+        mutations: Arc<Mutex<FakeMutations>>,
     }
 
     fn wire(library: FakeLibrary, analyzer: FakeAnalyzer) -> Wired {
-        let analyzer = Arc::new(analyzer);
-        let writer = Arc::new(FakeWriter::new());
-        let mutations = Arc::new(FakeMutations::new());
+        let analyzer = Arc::new(Mutex::new(analyzer));
+        let writer = Arc::new(Mutex::new(FakeWriter::new()));
+        let mutations = Arc::new(Mutex::new(FakeMutations::new()));
         let pass = ReplayGainPass::new(
-            Box::new(SharedAnalyzer(analyzer.clone())),
-            Box::new(SharedWriter(writer.clone())),
+            Box::new(analyzer.clone()),
+            Box::new(writer.clone()),
             Box::new(library.stub()),
-            Box::new(SharedMutations::new(mutations.clone())),
+            Box::new(mutations.clone()),
         );
         Wired {
             pass,
             analyzer,
             writer,
             mutations,
-        }
-    }
-
-    // The ports are object-safe but the fakes are shared with the test for
-    // assertions; these wrappers forward through the `Arc`s. (A fake behind
-    // an `Arc` cannot be its own `Box<dyn Port>` because the ports take
-    // `&self` while the store mutations take `&mut self` — only the
-    // mutations need the mutex they already carry.)
-    //
-    // `SharedMutations` composes the shared no-op
-    // [`StubLibraryMutationStore`]: the recording/failing `apply_scan_batch`
-    // is the one write this suite exercises, and the seven writes it never
-    // makes delegate to the stub, so those no-op bodies are spelled once, in
-    // `riff-persistence`, instead of once per suite.
-    struct SharedAnalyzer(Arc<FakeAnalyzer>);
-    impl LoudnessAnalyzer for SharedAnalyzer {
-        fn measure_track(&self, path: &std::path::Path) -> Result<TrackLoudness, LibraryError> {
-            self.0.measure_track(path)
-        }
-    }
-    struct SharedWriter(Arc<FakeWriter>);
-    impl ReplayGainWriter for SharedWriter {
-        fn write_replaygain(
-            &self,
-            path: &std::path::Path,
-            tags: &ReplayGainTags,
-        ) -> Result<(), LibraryError> {
-            self.0.write_replaygain(path, tags)
-        }
-    }
-    /// The recording mutations shared with the test, over the shared no-op
-    /// stub for every write this pass does not exercise.
-    struct SharedMutations {
-        recorded: Arc<FakeMutations>,
-        noop: StubLibraryMutationStore,
-    }
-
-    impl SharedMutations {
-        fn new(recorded: Arc<FakeMutations>) -> Self {
-            Self {
-                recorded,
-                noop: StubLibraryMutationStore,
-            }
-        }
-    }
-
-    impl LibraryMutationStore for SharedMutations {
-        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
-            self.recorded.batches.lock().unwrap().push(tracks.to_vec());
-            if self.recorded.fail.load(Ordering::Relaxed) {
-                return Err(StoreError::InvalidOperation("store is dead".to_string()));
-            }
-            Ok(tracks.len())
-        }
-        fn record_track_played(
-            &mut self,
-            id: &TrackId,
-            played_at: std::time::SystemTime,
-        ) -> Result<bool, StoreError> {
-            self.noop.record_track_played(id, played_at)
-        }
-        fn set_track_favorite(&mut self, id: &TrackId, favorite: bool) -> Result<bool, StoreError> {
-            self.noop.set_track_favorite(id, favorite)
-        }
-        fn apply_tag_refresh(&mut self, track: &Track) -> Result<(), StoreError> {
-            self.noop.apply_tag_refresh(track)
-        }
-        fn remove_library_path(&mut self, root: &std::path::Path) -> Result<usize, StoreError> {
-            self.noop.remove_library_path(root)
-        }
-        fn clear_library(&mut self) -> Result<usize, StoreError> {
-            self.noop.clear_library()
-        }
-        fn record_full_scan_completed(
-            &mut self,
-            summary: FullScanSummary,
-        ) -> Result<(), StoreError> {
-            self.noop.record_full_scan_completed(summary)
-        }
-        fn stamp_metadata_version(&mut self, version: u32) -> Result<(), StoreError> {
-            self.noop.stamp_metadata_version(version)
-        }
-        fn save_smart_playlist(
-            &mut self,
-            id: Option<&PlaylistId>,
-            name: &str,
-            tree: &SmartPlaylistTree,
-        ) -> Result<PlaylistId, StoreError> {
-            self.noop.save_smart_playlist(id, name, tree)
-        }
-        fn rename_smart_playlist(
-            &mut self,
-            id: &PlaylistId,
-            new_name: &str,
-        ) -> Result<bool, StoreError> {
-            self.noop.rename_smart_playlist(id, new_name)
-        }
-        fn delete_smart_playlist(&mut self, id: &PlaylistId) -> Result<bool, StoreError> {
-            self.noop.delete_smart_playlist(id)
-        }
-        fn duplicate_smart_playlist(
-            &mut self,
-            id: &PlaylistId,
-        ) -> Result<Option<PlaylistId>, StoreError> {
-            self.noop.duplicate_smart_playlist(id)
         }
     }
 
@@ -961,9 +935,12 @@ mod tests {
 
         assert_eq!(report.measured, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(wired.analyzer.calls(), vec!["music/a1.flac".to_string()]);
+        assert_eq!(
+            wired.analyzer.lock().unwrap().calls(),
+            vec!["music/a1.flac".to_string()]
+        );
 
-        let writes = wired.writer.writes();
+        let writes = wired.writer.lock().unwrap().writes();
         assert_eq!(writes.len(), 1, "exactly one file write");
         let (path, tags) = &writes[0];
         assert_eq!(path, "music/a1.flac");
@@ -975,7 +952,7 @@ mod tests {
         );
         assert_eq!(tags.album_peak, None);
 
-        let committed = wired.mutations.committed_flat();
+        let committed = wired.mutations.lock().unwrap().committed_flat();
         assert_eq!(committed.len(), 1);
         assert_eq!(committed[0].metadata.replaygain_track_gain, Some(-6.0));
         assert_eq!(
@@ -1003,7 +980,10 @@ mod tests {
             report.first_failure.as_deref(),
             Some("Track is no longer in the library")
         );
-        assert_eq!(wired.writer.writes(), [] as [(String, ReplayGainTags); 0]);
+        assert_eq!(
+            wired.writer.lock().unwrap().writes(),
+            [] as [(String, ReplayGainTags); 0]
+        );
     }
 
     // --- Targeted Album commands ----------------------------------------------------
@@ -1035,7 +1015,7 @@ mod tests {
         assert_eq!(report.measured, 3, "every member lands the album pair");
         assert_eq!(report.failed, 0);
 
-        let writes = wired.writer.writes();
+        let writes = wired.writer.lock().unwrap().writes();
         assert_eq!(
             writes.len(),
             3,
@@ -1052,7 +1032,11 @@ mod tests {
             );
             assert!((tags.album_peak.unwrap() - 0.5).abs() < 1e-6, "on {path}");
         }
-        assert_eq!(wired.analyzer.calls().len(), 3, "one decode per member");
+        assert_eq!(
+            wired.analyzer.lock().unwrap().calls().len(),
+            3,
+            "one decode per member"
+        );
     }
 
     /// A writer that records its writes and arms a cancel flag once `after`
@@ -1095,39 +1079,31 @@ mod tests {
         }
     }
 
-    struct SharedCancellingWriter(Arc<CancellingWriter>);
-
-    impl ReplayGainWriter for SharedCancellingWriter {
-        fn write_replaygain(
-            &self,
-            path: &std::path::Path,
-            tags: &ReplayGainTags,
-        ) -> Result<(), LibraryError> {
-            self.0.write_replaygain(path, tags)
-        }
-    }
-
     /// The wired pass with a cancelling writer: the album-pair write loops
     /// can be interrupted from inside the file write, the only place a
     /// cancellation mid-loop can come from.
+    #[allow(clippy::type_complexity)]
     fn wire_cancelling(
         library: FakeLibrary,
         cancel: Arc<AtomicBool>,
         after: usize,
     ) -> (
         ReplayGainPass,
-        Arc<FakeAnalyzer>,
-        Arc<CancellingWriter>,
-        Arc<FakeMutations>,
+        Arc<Mutex<FakeAnalyzer>>,
+        Arc<Mutex<CancellingWriter>>,
+        Arc<Mutex<FakeMutations>>,
     ) {
-        let analyzer = Arc::new(FakeAnalyzer::new(HashMap::new()));
-        let writer = Arc::new(CancellingWriter::new(Arc::clone(&cancel), after));
-        let mutations = Arc::new(FakeMutations::new());
+        let analyzer = Arc::new(Mutex::new(FakeAnalyzer::new(HashMap::new())));
+        let writer = Arc::new(Mutex::new(CancellingWriter::new(
+            Arc::clone(&cancel),
+            after,
+        )));
+        let mutations = Arc::new(Mutex::new(FakeMutations::new()));
         let pass = ReplayGainPass::new(
-            Box::new(SharedAnalyzer(analyzer.clone())),
-            Box::new(SharedCancellingWriter(writer.clone())),
+            Box::new(analyzer.clone()),
+            Box::new(writer.clone()),
             Box::new(library.stub()),
-            Box::new(SharedMutations::new(mutations.clone())),
+            Box::new(mutations.clone()),
         );
         (pass, analyzer, writer, mutations)
     }
@@ -1156,6 +1132,8 @@ mod tests {
         assert_eq!(report.measured, 2, "the other two members land");
         let written: Vec<String> = wired
             .writer
+            .lock()
+            .unwrap()
             .writes()
             .into_iter()
             .map(|(path, _)| path)
@@ -1167,6 +1145,8 @@ mod tests {
         );
         let committed: Vec<String> = wired
             .mutations
+            .lock()
+            .unwrap()
             .committed_flat()
             .into_iter()
             .map(|track| track.id.0)
@@ -1200,16 +1180,16 @@ mod tests {
 
         assert!(report.cancelled, "the pass reports its interruption");
         assert_eq!(
-            analyzer.calls().len(),
+            analyzer.lock().unwrap().calls().len(),
             3,
             "every member is still measured — the cut lands in the write loop"
         );
         assert_eq!(
-            writer.paths(),
+            writer.lock().unwrap().paths(),
             vec!["music/a1.flac".to_string()],
             "exactly the member then in flight is written; the next is not"
         );
-        let committed = mutations.committed_flat();
+        let committed = mutations.lock().unwrap().committed_flat();
         assert_eq!(committed.len(), 1, "only the member then in flight commits");
         assert_eq!(committed[0].id.0, "music/a1.flac");
         assert_eq!(report.measured, 1, "and only it is counted");
@@ -1237,11 +1217,11 @@ mod tests {
 
         assert!(report.cancelled, "the pass reports its interruption");
         assert_eq!(
-            writer.paths(),
+            writer.lock().unwrap().paths(),
             vec!["music/a1.flac".to_string()],
             "exactly the member then in flight is written"
         );
-        let committed = mutations.committed_flat();
+        let committed = mutations.lock().unwrap().committed_flat();
         assert_eq!(committed.len(), 1, "and only it is committed");
         assert_eq!(committed[0].id.0, "music/a1.flac");
         assert_eq!(report.measured, 1, "and only it is counted");
@@ -1273,11 +1253,11 @@ mod tests {
         assert_eq!(report.measured, 0, "nothing lands");
         assert_eq!(report.failed, 3, "each failed measurement is reported");
         assert!(
-            wired.writer.writes().is_empty(),
+            wired.writer.lock().unwrap().writes().is_empty(),
             "no file write runs on nothing"
         );
         assert!(
-            wired.mutations.committed().is_empty(),
+            wired.mutations.lock().unwrap().committed().is_empty(),
             "and no Store commit happens"
         );
     }
@@ -1329,6 +1309,8 @@ mod tests {
         assert_eq!(report.failed, 0);
         let written: Vec<String> = wired
             .writer
+            .lock()
+            .unwrap()
             .writes()
             .into_iter()
             .map(|(path, _)| path)
@@ -1351,6 +1333,8 @@ mod tests {
         );
         let batches: Vec<usize> = wired
             .mutations
+            .lock()
+            .unwrap()
             .committed()
             .into_iter()
             .map(|batch| batch.len())
@@ -1379,7 +1363,7 @@ mod tests {
         );
 
         assert_eq!(report.measured, 3);
-        for (path, tags) in wired.writer.writes() {
+        for (path, tags) in wired.writer.lock().unwrap().writes() {
             assert_eq!(tags.track_gain, Some(-6.0), "on {path}");
             assert_eq!(tags.track_peak, Some(0.5), "on {path}");
             assert_eq!(
@@ -1410,7 +1394,7 @@ mod tests {
         );
         assert_eq!(report.measured, 3, "the three unmeasured tracks");
         assert_eq!(report.skipped, 1, "a1 is already measured");
-        let measured_paths: Vec<String> = wired.analyzer.calls();
+        let measured_paths: Vec<String> = wired.analyzer.lock().unwrap().calls();
         assert!(!measured_paths.contains(&"music/a1.flac".to_string()));
 
         // The same pass under Force re-measures everything.
@@ -1462,6 +1446,8 @@ mod tests {
         assert!(
             wired
                 .analyzer
+                .lock()
+                .unwrap()
                 .calls()
                 .contains(&"music/a1.flac".to_string())
         );
@@ -1500,7 +1486,7 @@ mod tests {
         );
         assert_eq!(report.skipped, 1);
 
-        let writes = wired.writer.writes();
+        let writes = wired.writer.lock().unwrap().writes();
         // a2 and a3 carry both kinds; a1 — measured in an earlier pass — is
         // rewritten with the album pair only.
         let a1 = album_tags_of(&writes, "music/a1.flac").expect("a1's aggregate is rewritten");
@@ -1529,7 +1515,7 @@ mod tests {
         assert!(album_tags_of(&writes, "music/a3.flac").is_some());
 
         // The store carries the same aggregate on all three members.
-        let committed = wired.mutations.committed_flat();
+        let committed = wired.mutations.lock().unwrap().committed_flat();
         for row in &committed {
             eprintln!(
                 "DEBUG row {} track_gain {:?} album_gain {:?}",
@@ -1584,8 +1570,14 @@ mod tests {
 
         assert_eq!(report.measured, 2, "b1's track pair + Album B's aggregate");
         assert_eq!(report.skipped, 3);
-        let written_paths: Vec<String> =
-            wired.writer.writes().into_iter().map(|(p, _)| p).collect();
+        let written_paths: Vec<String> = wired
+            .writer
+            .lock()
+            .unwrap()
+            .writes()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         assert!(
             !written_paths.iter().any(|p| p.starts_with("music/a")),
             "Album A was not measured, so it is not rewritten"
@@ -1629,7 +1621,7 @@ mod tests {
         assert_eq!(report.skipped, 2, "a1 and b1 already carry a value");
         assert_eq!(report.failed, 0);
 
-        let a1 = album_tags_of(&wired.writer.writes(), "music/a1.flac")
+        let a1 = album_tags_of(&wired.writer.lock().unwrap().writes(), "music/a1.flac")
             .expect("a1 carries the Album's pair like every other member");
         let album_gain = a1.album_gain.expect("the album pair is written");
         assert!(
@@ -1669,7 +1661,7 @@ mod tests {
             report.measured, 8,
             "four track pairs + Album A's and Album B's aggregates"
         );
-        let committed = wired.mutations.committed_flat();
+        let committed = wired.mutations.lock().unwrap().committed_flat();
         let a2_rows: Vec<&Track> = committed
             .iter()
             .filter(|t| t.id.0 == "music/a2.flac")
@@ -1723,7 +1715,7 @@ mod tests {
             Some("music/a1.flac: IO error: permission denied"),
             "the reason reaches the outcome report"
         );
-        let committed = wired.mutations.committed_flat();
+        let committed = wired.mutations.lock().unwrap().committed_flat();
         assert_eq!(committed.len(), 2);
         assert!(
             committed.iter().any(|t| t.id.0 == "music/a3.flac")
@@ -1759,6 +1751,8 @@ mod tests {
         assert!(
             !wired
                 .writer
+                .lock()
+                .unwrap()
                 .writes()
                 .iter()
                 .any(|(p, _)| p == "music/a2.flac")
@@ -1771,7 +1765,12 @@ mod tests {
     fn a_store_commit_failure_is_reported() {
         let (library, canned) = fixture();
         let mut wired = wire(library, FakeAnalyzer::new(canned));
-        wired.mutations.fail.store(true, Ordering::Relaxed);
+        wired
+            .mutations
+            .lock()
+            .unwrap()
+            .fail
+            .store(true, Ordering::Relaxed);
 
         let report = wired.pass.run(
             &PassCommand::Track(TrackId("music/a1.flac".to_string())),
@@ -1783,7 +1782,7 @@ mod tests {
         assert_eq!(report.failed, 1);
         assert!(report.first_failure.unwrap().contains("store is dead"));
         assert_eq!(
-            wired.writer.writes().len(),
+            wired.writer.lock().unwrap().writes().len(),
             1,
             "the file write happened first"
         );
@@ -1813,7 +1812,7 @@ mod tests {
         );
 
         assert_eq!(report.measured, 25);
-        let batches = wired.mutations.committed();
+        let batches = wired.mutations.lock().unwrap().committed();
         let sizes: Vec<usize> = batches.iter().map(std::vec::Vec::len).collect();
         assert_eq!(sizes, vec![10, 10, 5], "the scan's batch shape");
     }
@@ -1846,11 +1845,11 @@ mod tests {
 
         assert!(report.cancelled, "the pass reports its interruption");
         assert_eq!(report.measured, 10, "exactly the first committed batch");
-        let batches = wired.mutations.committed();
+        let batches = wired.mutations.lock().unwrap().committed();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 10);
         assert_eq!(
-            wired.writer.writes().len(),
+            wired.writer.lock().unwrap().writes().len(),
             10,
             "no file writes after the interruption"
         );
@@ -1874,8 +1873,11 @@ mod tests {
         );
 
         assert_eq!(report.measured, 0);
-        assert_eq!(wired.analyzer.calls(), [] as [String; 0]);
-        assert_eq!(wired.writer.writes(), [] as [(String, ReplayGainTags); 0]);
+        assert_eq!(wired.analyzer.lock().unwrap().calls(), [] as [String; 0]);
+        assert_eq!(
+            wired.writer.lock().unwrap().writes(),
+            [] as [(String, ReplayGainTags); 0]
+        );
     }
 
     // --- progress -------------------------------------------------------------------
@@ -1902,14 +1904,14 @@ mod tests {
 
     /// Wire with pre-configured fakes (failures set before the pass runs).
     fn wire_with(library: FakeLibrary, analyzer: FakeAnalyzer, writer: FakeWriter) -> Wired {
-        let analyzer = Arc::new(analyzer);
-        let writer = Arc::new(writer);
-        let mutations = Arc::new(FakeMutations::new());
+        let analyzer = Arc::new(Mutex::new(analyzer));
+        let writer = Arc::new(Mutex::new(writer));
+        let mutations = Arc::new(Mutex::new(FakeMutations::new()));
         let pass = ReplayGainPass::new(
-            Box::new(SharedAnalyzer(analyzer.clone())),
-            Box::new(SharedWriter(writer.clone())),
+            Box::new(analyzer.clone()),
+            Box::new(writer.clone()),
             Box::new(library.stub()),
-            Box::new(SharedMutations::new(mutations.clone())),
+            Box::new(mutations.clone()),
         );
         Wired {
             pass,

@@ -14,7 +14,9 @@
 //!   read from the session, not from this inbox.
 //! - The inbox holds no session handles; both sessions stay backend-side.
 //! - Draining never loses a store change: Library generations coalesce to
-//!   the latest, playlist generations forward one event per bump.
+//!   the latest. The change stream carries Library generations only — the
+//!   playlist generation's readers are the session projections, which read
+//!   the counter itself.
 
 use crossbeam_channel::Receiver;
 use std::collections::VecDeque;
@@ -66,8 +68,6 @@ pub enum BackendEvent {
     TypedNotice(NoticePayload),
     /// Library generation moved (coalesced to about four emissions/sec).
     LibraryChanged { generation: u64 },
-    /// Playlist generation moved (forwarded one event per bump).
-    PlaylistsChanged { generation: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +83,6 @@ pub struct BackendEvents {
     backend_changes: Receiver<StoreChanged>,
     last_library_change_time: Option<Instant>,
     last_library_generation: u64,
-    last_playlist_generation: u64,
 
     // --- Playback notices (issue 01 seam fix) ----------------------------
     /// Pre-formatted playback error messages from the Playback Coordinator.
@@ -100,7 +99,6 @@ impl Default for BackendEvents {
             backend_changes: crossbeam_channel::unbounded().1,
             last_library_change_time: None,
             last_library_generation: 0,
-            last_playlist_generation: 0,
             playback_notices: crossbeam_channel::unbounded().1,
         }
     }
@@ -123,12 +121,6 @@ impl BackendEvents {
                     }
                     self.last_library_generation = generation;
                     latest_library_gen = Some(generation);
-                }
-                StoreChanged::Playlists(generation) => {
-                    if generation > self.last_playlist_generation {
-                        self.last_playlist_generation = generation;
-                        out.push(BackendEvent::PlaylistsChanged { generation });
-                    }
                 }
             }
         }
@@ -222,22 +214,6 @@ mod issue04_events {
             Some(&BackendEvent::LibraryChanged { generation: 100 })
         );
     }
-
-    #[test]
-    fn playlists_change_events_forward_without_coalescing() {
-        let (tx, rx) = unbounded::<StoreChanged>();
-        let mut f = BackendEvents::default();
-        f.subscribe_to_backend_changes(rx);
-        for i in 1..=5 {
-            let _ = tx.send(StoreChanged::Playlists(i));
-        }
-        let evs = f.events();
-        let playlist_events: Vec<_> = evs
-            .iter()
-            .filter(|e| matches!(e, BackendEvent::PlaylistsChanged { .. }))
-            .collect();
-        assert_eq!(playlist_events.len(), 5);
-    }
 }
 
 #[cfg(test)]
@@ -260,7 +236,9 @@ mod issue01_playback_notices {
                 assert_eq!(payload.source, NoticeSource::Playback);
                 assert_eq!(payload.message, "Playback error: boom");
             }
-            other => panic!("expected TypedNotice, got {other:?}"),
+            other @ BackendEvent::LibraryChanged { .. } => {
+                panic!("expected TypedNotice, got {other:?}")
+            }
         }
     }
 }

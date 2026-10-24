@@ -32,7 +32,9 @@
 //!   dirtiness derived by comparing the buffers against [`SmartPlaylistOriginal`],
 //!   the one [`SmartPlaylistsEditor::reconcile`] that keeps the draft aligned
 //!   with its saved row — dropped when it no longer belongs, the row's stored
-//!   name adopted when it was renamed —, the third [`RuleChildDraft`]
+//!   name adopted when it was renamed; the Frame's advance calls that
+//!   reconcile once per frame, before anything draws, so the rule lives where
+//!   the frame's order lives —, the third [`RuleChildDraft`]
 //!   variant that carries an Unreadable Rule at its stored position, and
 //!   every refusal ([`SmartPlaylistRefusal`]) with the reason rendered under
 //!   the row that caused it. The tag editor's single-slot, self-naming copy is
@@ -48,7 +50,9 @@
 //! [`RulePickerValues`] prop.
 
 use crate::ui::browser;
-use crate::ui::rule_box::{BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft};
+use crate::ui::rule_box::{
+    BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft, SpellBlock, SpellSource,
+};
 use crate::ui::rule_row::{
     self, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, ValueGap, rule_row,
 };
@@ -59,9 +63,7 @@ use crate::ui::sidebar::{self, TreeRow};
 use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
 use riff_backend::domain::field_catalog::{ValueType, spec};
-use riff_backend::domain::{
-    Combine, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
-};
+use riff_backend::domain::{Combine, MatchableField, PlaylistId, RootBox};
 use riff_gui_components::button::{FlowTextButton, Variant, flow_text_button};
 use riff_gui_components::ghost_icon_button::ghost_icon_button;
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
@@ -158,16 +160,6 @@ impl SmartPlaylistMatchLine {
             Self::Uncountable(reason) | Self::Failed(reason) => reason.clone(),
         }
     }
-}
-
-/// Why the committed walk cannot spell a tree.
-enum DraftBlock {
-    /// The draft holds a stored Rule this build cannot read — for which no
-    /// tree can be written, and none is invented.
-    Unreadable,
-    /// The first Rule row whose committed answers are not whole, and what it
-    /// is still missing.
-    Gap(RuleGap),
 }
 
 /// The state a draft was opened from: the name and the tree as the store last
@@ -325,7 +317,8 @@ impl SmartPlaylistsEditor {
     /// row could not be looked up at all. A draft belongs to the Smart
     /// Playlists page and, when it has one, to a saved list that still exists;
     /// anything else is a draft outliving the thing it was written for, and it
-    /// goes. Enforced here, not by call-site discipline — `RiffApp::ui` calls
+    /// goes. Enforced here, not by call-site discipline — the Frame's step 9
+    /// ([`crate::ui::frame::Frame::reconcile_smart_playlist_draft`]) calls
     /// this once per frame, before anything draws, and no gesture clears or
     /// re-stamps a draft itself.
     ///
@@ -512,14 +505,16 @@ impl SmartPlaylistsEditor {
     /// state), so a shape derived from buffers would move per keystroke and
     /// re-query with it — the one thing the live line must not do. What a
     /// value accepted on Enter or blur, a selection, or a picker choice
-    /// lands is [`RuleDraft::committed_value`], and that is what this walk
-    /// spells. A value typed but not yet committed is therefore not part of
-    /// the counted tree: the line keeps the previous answer (or block) until
-    /// the commit, which is the cadence rule, not an omission.
+    /// lands is [`RuleDraft::committed_value`], and that is the source this
+    /// ask names: the spelling walk ([`RuleBoxDraft::spell`]) is asked once
+    /// with [`SpellSource::Committed`]. A value typed but not yet committed
+    /// is therefore not part of the counted tree: the line keeps the previous
+    /// answer (or block) until the commit, which is the cadence rule, not an
+    /// omission.
     ///
-    /// The block, when there is one, is ticket 18's own ladder in its own
-    /// order: an Unreadable Rule first — the one row a listener cannot
-    /// resolve by completing it — then the first half-filled row, named by
+    /// The block, when there is one, is the walk's own answer in its own
+    /// order — an Unreadable Rule first (the one row a listener cannot
+    /// resolve by completing it), then the first half-filled row, named by
     /// what it is missing ([`RuleGap`]). The sentences are [`gap_reason`]'s
     /// and `UNREADABLE_BLOCK_REASON`'s, the same words a refused Save
     /// paints, so the line and Save teach one vocabulary.
@@ -527,18 +522,12 @@ impl SmartPlaylistsEditor {
     /// `Err` is the sentence to paint **instead of a number** — never a zero
     /// standing in for a count, and never a tree riff cannot spell.
     pub fn committed_tree(&self) -> Result<SmartPlaylistTree, String> {
-        if first_unreadable(&self.root, &BoxPath::root()).is_some() {
-            return Err(UNREADABLE_BLOCK_REASON.to_string());
-        }
-        // The walk's own Unreadable arm is unreachable through the check
-        // above, exactly as `prepare_save`'s spelling arm is — but a draft
-        // that cannot spell a tree must never be counted, so it reports the
-        // block rather than falling through.
-        committed_rule_box(&self.root)
+        self.root
+            .spell(SpellSource::Committed)
             .map(|root| SmartPlaylistTree::new(RootBox::new(root)))
             .map_err(|block| match block {
-                DraftBlock::Unreadable => UNREADABLE_BLOCK_REASON.to_string(),
-                DraftBlock::Gap(gap) => gap_reason(gap).to_string(),
+                SpellBlock::Unreadable { .. } => UNREADABLE_BLOCK_REASON.to_string(),
+                SpellBlock::Gap { gap, .. } => gap_reason(gap).to_string(),
             })
     }
 
@@ -574,28 +563,31 @@ impl SmartPlaylistsEditor {
     /// written, and hand back what to write — or record why not, in
     /// [`Self::refusal`], and hand back nothing.
     ///
-    /// Pure with respect to the store: it consults the draft, the catalog
-    /// (through ticket 14's row) and the application layer's built-in-name
-    /// check, and writes nothing. The caller performs the one store call the
-    /// plan answers.
+    /// Pure with respect to the store: it consults the draft through the
+    /// spelling walk ([`RuleBoxDraft::spell`], asked once with
+    /// [`SpellSource::Live`] — Save refuses exactly the tree the listener is
+    /// looking at), the catalog (through ticket 14's row) and the application
+    /// layer's built-in-name check, and writes nothing. The caller performs
+    /// the one store call the plan answers.
     ///
     /// The refusals, in the order they are asked — an earlier one hides a
     /// later one, which is why the order is fixed here rather than left to
     /// whichever check a caller ran first:
     ///
-    /// 1. **an Unreadable Rule**, whoever else is also wrong: it is the one
-    ///    row a listener cannot resolve by completing it — it must be deleted
-    ///    — and re-inserting it would fail inside the store's `CHECK` list
-    ///    with no explanation. Pointed at, preserved, never dropped;
-    /// 2. **a half-filled Rule**, the first in draw order, named by what it
-    ///    is missing ([`RuleGap`]);
-    /// 3. **the name**: missing, or one of the six Built-in Smart Playlists'
+    /// 1. **a row the walk blocks on**, its answer *is* the row refusal. An
+    ///    **Unreadable Rule** first, whoever else is also wrong: it is the
+    ///    one row a listener cannot resolve by completing it — it must be
+    ///    deleted — and re-inserting it would fail inside the store's `CHECK`
+    ///    list with no explanation. Pointed at, preserved, never dropped.
+    ///    Then the **first half-filled Rule in draw order**, named by what it
+    ///    is missing ([`RuleGap`]) — the walk's own order, stated once in it;
+    /// 2. **the name**: missing, or one of the six Built-in Smart Playlists'
     ///    display names. The cross-table half of the name rule (a name
     ///    already held by a sidebar row) lives in the store's mutation path
     ///    and comes back as its refusal, below;
-    /// 4. the store, which can still refuse what the frontend cannot see: a
+    /// 3. the store, which can still refuse what the frontend cannot see: a
     ///    name another row holds, or an empty Box (a box with no children at
-    ///    all — the tree checks above refuse a *row*, not an empty *box*).
+    ///    all — the walk refuses a *row*, not an empty *box*).
     ///
     /// A clean plan clears the refusal **before** the write, the tag editor's
     /// own shape: a stale reason from an earlier refusal never outlives the
@@ -603,20 +595,17 @@ impl SmartPlaylistsEditor {
     /// refusal) is what the listener is left with.
     #[must_use]
     pub fn prepare_save(&mut self) -> Option<SmartPlaylistSavePlan> {
-        if let Some(slot) = first_unreadable(&self.root, &BoxPath::root()) {
-            self.refusal = Some(SmartPlaylistRefusal::Row {
-                slot,
-                reason: UNREADABLE_BLOCK_REASON.to_string(),
-            });
-            return None;
-        }
-        if let Some((slot, gap)) = first_incomplete(&self.root, &BoxPath::root()) {
-            self.refusal = Some(SmartPlaylistRefusal::Row {
-                slot,
-                reason: gap_reason(gap).to_string(),
-            });
-            return None;
-        }
+        let root = match self.root.spell(SpellSource::Live) {
+            Ok(root) => root,
+            Err(block) => {
+                let (slot, reason) = match block {
+                    SpellBlock::Unreadable { slot } => (slot, UNREADABLE_BLOCK_REASON.to_string()),
+                    SpellBlock::Gap { slot, gap } => (slot, gap_reason(gap).to_string()),
+                };
+                self.refusal = Some(SmartPlaylistRefusal::Row { slot, reason });
+                return None;
+            }
+        };
         let name = self.name.trim().to_string();
         if name.is_empty() {
             self.refusal = Some(SmartPlaylistRefusal::Name(
@@ -628,20 +617,11 @@ impl SmartPlaylistsEditor {
             self.refusal = Some(SmartPlaylistRefusal::Name(reason));
             return None;
         }
-        let Some(root) = self.root.to_root_box() else {
-            // Unreachable through the checks above — every half-filled row
-            // and every Unreadable Rule was caught first — but a draft that
-            // cannot spell a tree must never be reported as savable.
-            self.refusal = Some(SmartPlaylistRefusal::Save(
-                "this rule set cannot be saved as it stands".to_string(),
-            ));
-            return None;
-        };
         self.refusal = None;
         Some(SmartPlaylistSavePlan {
             id: self.selected.clone(),
             name,
-            tree: SmartPlaylistTree::new(root),
+            tree: SmartPlaylistTree::new(RootBox::new(root)),
         })
     }
 
@@ -677,44 +657,6 @@ pub const UNREADABLE_ROW_WORDS: &str = "riff can't understand this rule";
 const UNREADABLE_BLOCK_REASON: &str =
     "riff can't understand this rule — delete the row to save the list";
 
-/// The slot of the first Unreadable Rule in draw order, or `None` when the
-/// tree holds none.
-fn first_unreadable(boxed: &RuleBoxDraft, path: &BoxPath) -> Option<ChildSlot> {
-    for (index, child) in boxed.children.iter().enumerate() {
-        match child {
-            RuleChildDraft::Unreadable(_) => return Some(ChildSlot::new(path.clone(), index)),
-            RuleChildDraft::Box(nested) => {
-                if let Some(slot) = first_unreadable(nested, &path.child(index)) {
-                    return Some(slot);
-                }
-            }
-            RuleChildDraft::Rule(_) => {}
-        }
-    }
-    None
-}
-
-/// The first half-filled Rule in draw order and what it is missing, or `None`
-/// when every row is a whole Rule.
-fn first_incomplete(boxed: &RuleBoxDraft, path: &BoxPath) -> Option<(ChildSlot, RuleGap)> {
-    for (index, child) in boxed.children.iter().enumerate() {
-        match child {
-            RuleChildDraft::Rule(draft) => {
-                if let Some(gap) = draft.gap() {
-                    return Some((ChildSlot::new(path.clone(), index), gap));
-                }
-            }
-            RuleChildDraft::Box(nested) => {
-                if let Some(found) = first_incomplete(nested, &path.child(index)) {
-                    return Some(found);
-                }
-            }
-            RuleChildDraft::Unreadable(_) => {}
-        }
-    }
-    None
-}
-
 /// What a half-filled row is missing, in the listener's own terms — one
 /// sentence per [`RuleGap`], so the reason names the missing part rather than
 /// reporting that "a rule is incomplete".
@@ -727,58 +669,6 @@ fn gap_reason(gap: RuleGap) -> &'static str {
             "this rule's value can't be read as this field's kind"
         }
     }
-}
-
-/// The committed walk's spelling of one Box: its combine, and its children —
-/// Rules from their committed answers, Boxes recursively — or the first block
-/// in draw order.
-fn committed_rule_box(boxed: &RuleBoxDraft) -> Result<RuleBox, DraftBlock> {
-    let mut children = Vec::with_capacity(boxed.children.len());
-    for child in &boxed.children {
-        children.push(match child {
-            RuleChildDraft::Rule(draft) => RuleChild::Rule(committed_rule(draft)?),
-            RuleChildDraft::Box(nested) => RuleChild::Box(committed_rule_box(nested)?),
-            RuleChildDraft::Unreadable(_) => return Err(DraftBlock::Unreadable),
-        });
-    }
-    Ok(RuleBox::new(boxed.combine).with_children(children))
-}
-
-/// The Rule one row's **committed** answers spell, or the part they are
-/// still missing — the same questions [`RuleDraft::gap`] and
-/// [`RuleDraft::rule`] ask, taken over the committed value
-/// ([`RuleDraft::committed_value`]) instead of the parse of the live
-/// buffers.
-///
-/// The committed value can hold no unparseable answer: a commit only ever
-/// lands a value the row parsed against the field's own type, so the only
-/// value gap this walk can find is a missing one.
-fn committed_rule(draft: &RuleDraft) -> Result<Rule, DraftBlock> {
-    let Some(field) = draft.field else {
-        return Err(DraftBlock::Gap(RuleGap::Field));
-    };
-    let Some(comparison) = draft.comparison else {
-        return Err(DraftBlock::Gap(RuleGap::Comparison));
-    };
-    if !spec(field).permits(comparison) {
-        return Err(DraftBlock::Gap(RuleGap::Comparison));
-    }
-    let value = if draft.value_widgets().is_empty() {
-        None
-    } else {
-        Some(
-            draft
-                .committed_value()
-                .cloned()
-                .ok_or(DraftBlock::Gap(RuleGap::Value(ValueGap::Missing)))?,
-        )
-    };
-    let rule = if draft.negated {
-        Rule::new(field, comparison, value).negated()
-    } else {
-        Rule::new(field, comparison, value)
-    };
-    Ok(rule)
 }
 
 /// The words the name well wears: the count, the block, or the engine's own
@@ -914,9 +804,9 @@ fn lists_column(
         // failed enumeration read cannot make it: the store said nothing, the
         // draft was kept for the same reason, and the reason is what the
         // column paints instead (the error treatment the Custom listing gives
-        // its own failed read). `settings.rs`'s fill and this pane's reconcile
-        // read the same enumeration in the same frame, so an empty column and
-        // a reason arrive together.
+        // its own failed read). The Frame's reconcile step and
+        // `settings.rs`'s fill read the same enumeration in the same frame,
+        // so an empty column and a reason arrive together.
         if let Some(reason) = &editor.lists_reason {
             ui.colored_label(palette.error, reason);
         } else {

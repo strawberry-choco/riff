@@ -313,6 +313,25 @@ pub trait PlaylistStore {
         id: &PlaylistId,
         ordered: &[TrackId],
     ) -> Result<bool, StoreError>;
+
+    /// The session playlist generation this handle bumps after each
+    /// committed playlist mutation (ADR 0002), independent of the Library
+    /// generation so entry edits never invalidate Library projections. A
+    /// handle shares the implementor's own counter: clones answer the same
+    /// counter, so a mutation committed through any clone of the handle is
+    /// seen by every holder of the answer.
+    ///
+    /// This is the read the UI's single read seam wires with: it derives the
+    /// counter its Session Projections observe from the ports it keeps, so
+    /// the same-store-same-instant rule is enforced by the constructor's
+    /// shape rather than re-derived by every wiring site. Widening the port
+    /// by this one read is recorded as an ADR 0012 consideration, not a
+    /// conflict: it formalizes a read the Composition Root and every test
+    /// suite already make through the concrete store type, rather than
+    /// growing the contract's vocabulary. It takes no fallible shape — a
+    /// wiring read has no failure mode to degrade to.
+    #[must_use]
+    fn playlist_generation(&self) -> StoreGeneration;
 }
 
 /// Session-local monotonically increasing counter bumped after each committed
@@ -1521,17 +1540,37 @@ pub trait LibraryQueryStore {
     /// Settings page's list column — shows. The six Built-in Smart Playlists
     /// are code, not rows, and never appear here.
     fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError>;
+
+    /// The session Library generation this handle bumps after each committed
+    /// Library mutation (ADR 0002). A handle shares the implementor's own
+    /// counter: clones answer the same counter, so a mutation committed
+    /// through any clone of the handle is seen by every holder of the
+    /// answer.
+    ///
+    /// This is the read the UI's single read seam wires with: it derives the
+    /// counter its Session Projections observe from the ports it keeps, so
+    /// the same-store-same-instant rule is enforced by the constructor's
+    /// shape rather than re-derived by every wiring site. Widening the port
+    /// by this one read is recorded as an ADR 0012 consideration, not a
+    /// conflict: it formalizes a read the Composition Root and every test
+    /// suite already make through the concrete store type, rather than
+    /// growing the contract's vocabulary. It takes no fallible shape — a
+    /// wiring read has no failure mode to degrade to.
+    #[must_use]
+    fn library_generation(&self) -> StoreGeneration;
 }
 
 /// Notification the `Application Store` emits (best-effort) over a
-/// crossbeam channel sender whenever a committed mutation bumps one of
-/// its two session generations (ADR 0002). `BackendEvents` drains
-/// this channel on the frontend frame path, coalesces rapid Library bumps,
-/// and surfaces them as `BackendEvents`.
+/// crossbeam channel sender whenever a committed mutation bumps its Library
+/// session generation (ADR 0002). `BackendEvents` drains this channel on the
+/// frontend frame path, coalesces rapid Library bumps, and surfaces them as
+/// `BackendEvents`. The playlist generation has no variant here: its readers
+/// are the session projections, which observe the counter directly — the
+/// bump itself, not a notice about it, is the mutation's observable.
 ///
-/// Invariant (emit-beside-bump): every committed mutation in
+/// Invariant (emit-beside-bump): every committed Library mutation in
 /// the `SqliteStore` adapter sends exactly one of these over the
-/// sender, immediately after bumping the corresponding generation. A
+/// sender, immediately after bumping the Library generation. A
 /// mutation that fails to commit sends nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreChanged {
@@ -1542,17 +1581,4 @@ pub enum StoreChanged {
     /// Tracks — the Rule tree's own writes are below, and move this counter
     /// never. `BackendEvents` coalesces these to roughly four per second.
     Library(u64),
-
-    /// The session playlist generation moved to `gen` on a committed
-    /// playlist mutation (create, rename, delete, add, remove, reorder) —
-    /// and on every committed **Custom Smart Playlist** write, since a list's
-    /// identity and its Rule tree are list identity:
-    /// [`LibraryMutationStore::save_smart_playlist`],
-    /// [`LibraryMutationStore::rename_smart_playlist`],
-    /// [`LibraryMutationStore::delete_smart_playlist`] and
-    /// [`LibraryMutationStore::duplicate_smart_playlist`] all move this counter
-    /// and none of them moves the Library one.
-    /// These are infrequent user actions and are forwarded without
-    /// coalescing.
-    Playlists(u64),
 }

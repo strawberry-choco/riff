@@ -2,7 +2,9 @@
 //! Store (ADR 0002).
 //!
 //! [`SessionViews`] owns the bounded Session Projections, the Library query
-//! port, and the session-local [`StoreGeneration`] counter. Every view
+//! port, and the Playlists query port, from whose handles it derives the two
+//! session-local generation counters
+//! ([`crate::app::store::StoreGeneration`]) at construction. Every view
 //! shape the UI renders has one method here; callers pass only intent (a
 //! folder path, a search query, a queue) and receive ready-to-render data.
 //! Staleness handling and store-error fallbacks all live inside this
@@ -54,7 +56,7 @@ pub use crate::app::projection::{PlaylistEntryRow, PlaylistView};
 use crate::app::state::TrackSort;
 use crate::app::store::{
     CustomSmartPlaylist, LibraryCounts, LibraryQueryStore, PlaylistStore, SmartPlaylistTree,
-    SortDirection, StoreGeneration, TrackListOrder,
+    SortDirection, TrackListOrder,
 };
 use crate::domain::{
     Album, Artist, GenreCount, MatchableField, Playlist, PlaylistId, SmartPlaylistKind, Track,
@@ -232,20 +234,29 @@ macro_rules! paged_listing {
 }
 
 impl SessionViews {
-    /// Wire the seam to the Library query port and the Playlists query
-    /// port plus both session counters — the Library generation and the
-    /// dedicated playlist generation the store bumps after each committed
-    /// mutation. The handles are consumed here: every projection observes
-    /// its counter internally, and no epoch value ever leaves this module.
+    /// Wire the seam to the Library query port and the Playlists query port —
+    /// and to nothing else. The seam derives both session counters itself,
+    /// at one instant, from the handles it is about to keep: the Library
+    /// generation read once from the Library query port and the dedicated
+    /// playlist generation (the one the store bumps after each committed
+    /// playlist mutation) read once from the Playlists query port. The
+    /// same-store-same-instant rule — both counters belong to the same store
+    /// the seam reads through, taken together — is enforced by this shape: a
+    /// stale counter, or one from a different store handle, is
+    /// unrepresentable. The handles are consumed here: every projection
+    /// observes its counter internally, and no epoch value ever leaves this
+    /// module.
     #[must_use]
     pub fn new(
         queries: Box<dyn LibraryQueryStore>,
         playlist_queries: Box<dyn PlaylistStore>,
-        generation: StoreGeneration,
-        playlist_generation: StoreGeneration,
     ) -> Self {
-        // The projections observe the session counters internally from here
-        // on: no per-call epoch crosses the seam again.
+        // The wiring read, one per port, both at this instant: the counters
+        // the projections are about to observe come from the ports this
+        // constructor keeps, and from here on the projections observe the
+        // session counters internally — no per-call epoch crosses the seam.
+        let generation = queries.library_generation();
+        let playlist_generation = playlist_queries.playlist_generation();
         let tracks = TrackListProjection::new(
             generation.clone(),
             ProjectionKey::Flat(TrackListOrder::default()),

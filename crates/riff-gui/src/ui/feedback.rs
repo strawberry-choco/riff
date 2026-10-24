@@ -8,10 +8,11 @@
 //! persistent slot on the [`FeedbackBoard`], and the titlebar paints the
 //! highest-severity active notice, so the streams coexist.
 //!
-//! The frontend owns this model (it is paint state, not a session fact): the
+//! The frontend owns this model (it is paint state, not a session fact — no
+//! session carries a copy of the board's display string): the
 //! [`RiffApp`](super::RiffApp) holds one board, the scan / playback / Tag Edit
-//! producers write their slot, and the board's display feeds the existing
-//! `scan_status` line unchanged — same placement, same copy, no new surface.
+//! producers write their slot, and the titlebar reads the board's display
+//! directly — same placement, same copy, no new surface.
 
 use riff_backend::app::events::{NoticePayload, NoticeSeverity, NoticeSource};
 
@@ -146,8 +147,8 @@ impl FeedbackBoard {
         .max_by_key(|f| rank(f))
     }
 
-    /// The display notice's message — the string fed to the existing
-    /// `scan_status` line, so the titlebar's copy and placement are unchanged.
+    /// The display notice's message — the string the titlebar reads for its
+    /// status line, so the titlebar's copy and placement are unchanged.
     #[must_use]
     pub fn display_message(&self) -> Option<String> {
         self.display().map(|f| f.message.clone())

@@ -147,22 +147,26 @@ pub(crate) mod determinism {
 // closure, the same settled-time pin — and differed only in the ports they hand
 // in and the display facts. Their copies could drift: `readme_screenshots`'s own
 // doc even said it was "the same mechanism as `golden_tests.rs`'s". One composer
-// now owns that fixed remainder, so a new port argument or a reordered
-// constructor is edited once and cannot drift between suites — the same fix
-// `determinism` already applied to the render knobs.
+// now owns that fixed remainder, so a new App Runtime member is wired once and
+// cannot drift between suites — the same fix `determinism` already applied to
+// the render knobs.
 pub(crate) mod composed_shell {
     use crate::mocks::{FakeTagEdits, MockScans, RecordingPasses, SettingsCall};
+    use riff_backend::app::StubThumbnailCache;
     use riff_backend::app::events::BackendEvents;
+    use riff_backend::app::preferences::Preferences;
     use riff_backend::app::state::{LibrarySession, PlaybackSession};
     use riff_backend::app::store::{
-        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore, StoreGeneration,
+        LibraryMutationStore, LibraryQueryStore, PlaylistStore, SettingsStore,
     };
-    use riff_backend::app::transport::Transport;
+    use riff_backend::app::transport::{ChannelTransport, Transport};
     use riff_backend::app::views::SessionViews;
+    use riff_backend::composition::AppRuntime;
     use riff_backend::domain::TrackId;
     use riff_gui::ui::RiffApp;
     use riff_library::app::cover_service::Covers;
     use riff_library::app::traits::RequestedSize;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
@@ -245,8 +249,8 @@ pub(crate) mod composed_shell {
     /// Build the real `RiffApp` over `shell`'s ports — the ONE composed-shell
     /// construction every composed consumer crosses.
     ///
-    /// This owns the fixed remainder: the app's test-constructor argument list
-    /// and its order, the tag-edit and passes fakes, the event inbox, the
+    /// This owns the fixed remainder: the App Runtime bundle literal the test
+    /// twin is handed, the tag-edit and passes fakes, the event inbox, the
     /// fonts-before-building closure, the clock pin, and — for the
     /// deterministic-render (`InterOnly`) consumers — the settled-time guard
     /// re-asserted (and asserted) after construction.
@@ -289,20 +293,35 @@ pub(crate) mod composed_shell {
                             riff_gui_theme::fonts::configure_fonts(&cc.egui_ctx);
                         }
                     }
-                    let (mut app, _visibility_tx) = RiffApp::new_for_test(
+                    let (mut app, _visibility_tx) = RiffApp::new_for_test(AppRuntime {
                         playback,
                         library,
-                        transport,
-                        Box::new(scans),
-                        settings_store,
-                        playlist_store,
-                        library_mutations,
-                        views,
-                        Box::new(FakeTagEdits::new()),
-                        Box::new(RecordingPasses::default()),
-                        covers,
                         backend_events,
-                    );
+                        ui_transport: transport,
+                        // The three formalities the twin replaces: the tray's
+                        // Transport (dispatched into by a tray no test has),
+                        // the watcher cell (the twin hydrates over the empty
+                        // one it creates), and the Preferences round-trip
+                        // (hydration is composition-root work the twin
+                        // performs over the bundle's own store and transport).
+                        tray_transport: ChannelTransport::new(crossbeam_channel::unbounded().0),
+                        preferences: Preferences::default(),
+                        scans: Box::new(scans),
+                        watcher_manager: Arc::new(Mutex::new(None)),
+                        // Passes through as handed in: no test tray exists to
+                        // set it, so it starts cleared and stays that way.
+                        quit_flag: Arc::new(AtomicBool::new(false)),
+                        settings: settings_store,
+                        playlists: playlist_store,
+                        library_mutations,
+                        session_views: views,
+                        tag_edits: Box::new(FakeTagEdits::new()),
+                        passes: Box::new(RecordingPasses::default()),
+                        covers,
+                        // The one member the app never holds: the literal must
+                        // be complete, so the caller names the empty stub.
+                        thumbnail_cache: Arc::new(StubThumbnailCache),
+                    });
                     if let Some(now) = now {
                         app.set_now_for_test(now);
                     }
@@ -343,9 +362,10 @@ pub(crate) mod composed_shell {
     }
 
     /// Production's playlist wiring: ONE store cloned into both the mutation
-    /// port the app writes through and the read side the sidebar and stage list
-    /// from, with two freshly-made session generations — the shape every
-    /// mock-port entry point wants.
+    /// port the app writes through and the read side the sidebar and stage
+    /// list from — the shape every mock-port entry point wants. The seam
+    /// derives its two session generations from the ports themselves, so the
+    /// doubles' own counters are what the projections observe.
     #[must_use]
     pub(crate) fn playlist_ports<P>(
         query: Box<dyn LibraryQueryStore>,
@@ -354,34 +374,9 @@ pub(crate) mod composed_shell {
     where
         P: PlaylistStore + Clone + 'static,
     {
-        playlist_ports_at(
-            query,
-            playlist,
-            StoreGeneration::new(),
-            StoreGeneration::new(),
-        )
-    }
-
-    /// [`playlist_ports`] at generations the caller supplies — the real-store
-    /// suites pass the store's own, which their mutation tests depend on.
-    #[must_use]
-    pub(crate) fn playlist_ports_at<P>(
-        query: Box<dyn LibraryQueryStore>,
-        playlist: P,
-        library_generation: StoreGeneration,
-        playlist_generation: StoreGeneration,
-    ) -> (Box<dyn PlaylistStore>, SessionViews)
-    where
-        P: PlaylistStore + Clone + 'static,
-    {
         (
             Box::new(playlist.clone()),
-            SessionViews::new(
-                query,
-                Box::new(playlist),
-                library_generation,
-                playlist_generation,
-            ),
+            SessionViews::new(query, Box::new(playlist)),
         )
     }
 }
@@ -574,7 +569,7 @@ pub mod mocks {
     use riff_backend::app::state::PlaybackSession;
     use riff_backend::app::store::{
         CustomSmartPlaylist, LibraryMutationStore, LibraryQueryStore, PlaylistStore, Settings,
-        SettingsStore, SmartPlaylistTree, SortDirection,
+        SettingsStore, SmartPlaylistTree, SortDirection, StoreGeneration,
     };
     use riff_backend::app::tag_edit_service::{TagEditOutcome, TagEditRequest, TagEdits};
     use riff_backend::app::traits::{
@@ -1188,7 +1183,9 @@ pub mod mocks {
     /// the untouched play history) and can be switched to fail, simulating a
     /// failed store commit. `record_track_played` snapshots every
     /// `(id, played_at)` pair (so playback-continuation tests can pin the
-    /// committed plays); the remaining mutations are no-ops returning benign
+    /// committed plays) and `apply_scan_batch` records every Track it was
+    /// handed, flat, in call order (so a pass-flow test reads one mock's
+    /// vocabulary); the remaining mutations are no-ops returning benign
     /// defaults.
     ///
     /// `Clone` hands out another handle on the SAME recordings: the mock is
@@ -1204,6 +1201,8 @@ pub mod mocks {
         /// error and records nothing.
         pub fail_tag_refresh: bool,
         refreshed: Arc<Mutex<Vec<Track>>>,
+        /// Every Track handed to `apply_scan_batch`, flat, in call order.
+        batches: Arc<Mutex<Vec<Track>>>,
         played: Arc<Mutex<Vec<(TrackId, std::time::SystemTime)>>>,
         favorites: Arc<Mutex<Vec<(TrackId, bool)>>>,
         /// Every root passed to `remove_library_path`, in call order.
@@ -1225,6 +1224,7 @@ pub mod mocks {
             Self {
                 fail_tag_refresh: false,
                 refreshed: Arc::new(Mutex::new(Vec::new())),
+                batches: Arc::new(Mutex::new(Vec::new())),
                 played: Arc::new(Mutex::new(Vec::new())),
                 favorites: Arc::new(Mutex::new(Vec::new())),
                 removed: Arc::new(Mutex::new(Vec::new())),
@@ -1240,11 +1240,18 @@ pub mod mocks {
             Self {
                 fail_tag_refresh: true,
                 refreshed: Arc::new(Mutex::new(Vec::new())),
+                batches: Arc::new(Mutex::new(Vec::new())),
                 played: Arc::new(Mutex::new(Vec::new())),
                 favorites: Arc::new(Mutex::new(Vec::new())),
                 removed: Arc::new(Mutex::new(Vec::new())),
                 clears: Arc::new(Mutex::new(0)),
             }
+        }
+
+        /// Every Track handed to `apply_scan_batch`, flat, in call order.
+        #[must_use]
+        pub fn batched(&self) -> Vec<Track> {
+            self.batches.lock().unwrap().clone()
         }
 
         /// Snapshot of every Track passed to `apply_tag_refresh`, in call
@@ -1283,7 +1290,8 @@ pub mod mocks {
     }
 
     impl LibraryMutationStore for MockLibraryMutationStore {
-        fn apply_scan_batch(&mut self, _tracks: &[Track]) -> Result<usize, StoreError> {
+        fn apply_scan_batch(&mut self, tracks: &[Track]) -> Result<usize, StoreError> {
+            self.batches.lock().unwrap().extend(tracks.iter().cloned());
             Ok(0)
         }
 
@@ -1373,15 +1381,27 @@ pub mod mocks {
     /// (see `refuse_next_write`). The playlist projection's own behavior is
     /// pinned against real `SQLite` scratch stores in the app tests, not
     /// against this stub.
+    ///
+    /// The seeded rows, the load-failure flag and the load counter are
+    /// clone-shared cells: a suite that hands a clone to the seam under test
+    /// seeds and flips the mock through its own handle, the house rule the
+    /// other shared mocks follow.
     #[derive(Clone, Default)]
     pub struct MockPlaylistStore {
         /// When set, every read fails with an `InvalidOperation` error.
-        pub fail_loads: bool,
-        /// Rows `load_playlists` serves, in the order given.
-        pub playlists: Vec<Playlist>,
-        /// Rows `load_playlist_entries` serves, keyed by playlist id.
-        pub entries:
-            std::collections::HashMap<PlaylistId, Vec<riff_backend::app::store::PlaylistEntry>>,
+        /// Cloned handles share the cell, so a suite flips it through its own
+        /// handle after wiring.
+        pub fail_loads: Arc<Mutex<bool>>,
+        /// Rows `load_playlists` serves, in the order given. Cloned handles
+        /// share the cell.
+        pub playlists: Arc<Mutex<Vec<Playlist>>>,
+        /// Rows `load_playlist_entries` serves, keyed by playlist id. Cloned
+        /// handles share the cell.
+        pub entries: Arc<
+            Mutex<
+                std::collections::HashMap<PlaylistId, Vec<riff_backend::app::store::PlaylistEntry>>,
+            >,
+        >,
         /// The next create or rename fails with
         /// `StoreError::InvalidOperation(reason)` and commits nothing; every
         /// write after it succeeds. The Application Store raises that ONE
@@ -1393,6 +1413,14 @@ pub mod mocks {
         /// Every name a create or rename COMMITTED with, in call order. Cloned
         /// handles share it, so a test can read what its gesture wrote.
         pub committed: Arc<Mutex<Vec<String>>>,
+        /// The session playlist generation the port answers: a fresh counter
+        /// this double keeps, which nothing bumps unless the owning suite
+        /// bumps the handle it read through the port. Cloned handles share
+        /// it.
+        pub generation: StoreGeneration,
+        /// How many `load_playlists` calls landed, failed loads included.
+        /// Cloned handles share the cell.
+        pub load_calls: Arc<Mutex<usize>>,
     }
 
     impl MockPlaylistStore {
@@ -1424,29 +1452,51 @@ pub mod mocks {
                 );
             }
             Self {
-                playlists: rows,
-                entries,
+                playlists: Arc::new(Mutex::new(rows)),
+                entries: Arc::new(Mutex::new(entries)),
                 ..Self::default()
             }
+        }
+
+        /// How many `load_playlists` calls landed — failed loads included, so
+        /// a staleness suite pins its refetch cadence through the same handle
+        /// it seeded.
+        #[must_use]
+        pub fn load_calls(&self) -> usize {
+            *self.load_calls.lock().unwrap()
         }
     }
 
     impl PlaylistStore for MockPlaylistStore {
+        /// The mock's own session playlist generation — fresh, and bumped by
+        /// nothing unless the owning suite bumps the handle it read through
+        /// the port.
+        fn playlist_generation(&self) -> StoreGeneration {
+            self.generation.clone()
+        }
+
         fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
-            if self.fail_loads {
+            *self.load_calls.lock().unwrap() += 1;
+            if *self.fail_loads.lock().unwrap() {
                 return Err(StoreError::InvalidOperation("playlists boom".to_string()));
             }
-            Ok(self.playlists.clone())
+            Ok(self.playlists.lock().unwrap().clone())
         }
 
         fn load_playlist_entries(
             &self,
             id: &PlaylistId,
         ) -> Result<Vec<riff_backend::app::store::PlaylistEntry>, StoreError> {
-            if self.fail_loads {
+            if *self.fail_loads.lock().unwrap() {
                 return Err(StoreError::InvalidOperation("entries boom".to_string()));
             }
-            Ok(self.entries.get(id).cloned().unwrap_or_default())
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .unwrap_or_default())
         }
 
         fn create_playlist(
@@ -1765,8 +1815,10 @@ pub mod mocks {
     ///
     /// Configuration happens before wiring; recordings accumulate behind an
     /// internal mutex because the port takes `&self`. Tests that must hand
-    /// ownership to the seam keep a shared handle (see
-    /// [`SharedQueryStore`]) or lock through the `Arc`.
+    /// ownership to the seam share the cell: `Arc::clone` the `Arc` and box
+    /// it — the shared-ownership forwarding implementation in
+    /// [`riff_persistence::test_support`] carries the port across — or lock
+    /// through the `Arc`.
     pub struct MockLibraryQueryStore {
         // --- canned answers -------------------------------------------------
         /// `get_track` answers keyed by id.
@@ -1891,6 +1943,13 @@ pub mod mocks {
         /// `count_of`) instead of touching this directly; it is `pub` only
         /// so test constructors can use `..Default::default()`.
         pub calls: Mutex<Vec<LibraryQueryCall>>,
+
+        /// The session Library generation the port answers: a fresh counter
+        /// this double keeps, which nothing bumps unless the owning suite
+        /// bumps the handle it read through the port. Deliberately NOT a
+        /// recorded query — the wiring read is not part of a listing's read
+        /// log, and a test's `calls()` assertions stay exactly as they are.
+        pub generation: StoreGeneration,
     }
 
     impl Default for MockLibraryQueryStore {
@@ -1939,6 +1998,7 @@ pub mod mocks {
                 custom_page: Vec::new(),
                 failing: Vec::new(),
                 calls: Mutex::new(Vec::new()),
+                generation: StoreGeneration::new(),
             }
         }
     }
@@ -2113,6 +2173,15 @@ pub mod mocks {
     }
 
     impl LibraryQueryStore for MockLibraryQueryStore {
+        /// The mock's own session Library generation — fresh, and bumped by
+        /// nothing unless the owning suite bumps the handle it read through
+        /// the port. Deliberately not recorded in `calls`: the wiring read is
+        /// not a listing read, and the recorded-query assertions stay as they
+        /// are.
+        fn library_generation(&self) -> StoreGeneration {
+            self.generation.clone()
+        }
+
         fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
             self.record(LibraryQueryCall::GetTrack(id.clone()));
             if self.failing.contains(&FailingQuery::GetTrack) {
@@ -2747,341 +2816,6 @@ pub mod mocks {
                 ));
             }
             Ok(self.custom_smart_playlists.clone())
-        }
-    }
-
-    /// [`LibraryQueryStore`] view over one shared [`MockLibraryQueryStore`]
-    /// behind a mutex: the seam under test takes ownership of the port, so the
-    /// test keeps the other handle for assertions and for post-wire
-    /// configuration changes (failure flags, mutated canned data).
-    ///
-    /// Every suite wiring a query-backed seam needs this pair: the
-    /// `SessionViews` app seam and the whole-`RiffApp` shell both own their
-    /// query port, so a test cannot reach the mock it handed over. Cloning
-    /// this is the other half — the boxed clone answers through the same mock,
-    /// and the test keeps the `Arc` it was built from.
-    pub struct SharedQueryStore(pub Arc<Mutex<MockLibraryQueryStore>>);
-
-    impl LibraryQueryStore for SharedQueryStore {
-        fn get_track(&self, id: &TrackId) -> Result<Option<Track>, StoreError> {
-            self.0.lock().unwrap().get_track(id)
-        }
-
-        fn metadata_version(&self) -> Result<u32, StoreError> {
-            Ok(riff_persistence::track::METADATA_VERSION)
-        }
-
-        fn tracks_page(
-            &self,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_page(order, offset, limit)
-        }
-
-        fn library_counts(&self) -> Result<riff_backend::app::store::LibraryCounts, StoreError> {
-            self.0.lock().unwrap().library_counts()
-        }
-
-        fn all_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
-            self.0.lock().unwrap().all_track_ids()
-        }
-
-        fn search_page(
-            &self,
-            query: &str,
-            order: riff_persistence::store::TrackListOrder,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .search_page(query, order, offset, limit)
-        }
-
-        fn custom_smart_playlist_page(
-            &self,
-            tree: &riff_persistence::store::RuleTree,
-            order: riff_persistence::store::TrackListOrder,
-            needle: Option<&str>,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .custom_smart_playlist_page(tree, order, needle, offset, limit)
-        }
-
-        fn all_artists(&self) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().all_artists()
-        }
-
-        fn artist_albums(&self, artist: &str) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums(artist)
-        }
-
-        fn album_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks(album_artist, album_title)
-        }
-
-        fn folder_has_audio(&self, folder: &std::path::Path) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().folder_has_audio(folder)
-        }
-
-        fn folder_has_search_match(
-            &self,
-            folder: &std::path::Path,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .folder_has_search_match(folder, query)
-        }
-
-        fn track_ids_in_folder_tree(
-            &self,
-            folder: &std::path::Path,
-        ) -> Result<Vec<TrackId>, StoreError> {
-            self.0.lock().unwrap().track_ids_in_folder_tree(folder)
-        }
-
-        fn tracks_in_folder(&self, folder: &std::path::Path) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().tracks_in_folder(folder)
-        }
-
-        fn folder_track_count(&self, folder: &std::path::Path) -> Result<usize, StoreError> {
-            self.0.lock().unwrap().folder_track_count(folder)
-        }
-
-        fn last_full_scan(
-            &self,
-        ) -> Result<Option<riff_backend::app::store::FullScanSummary>, StoreError> {
-            self.0.lock().unwrap().last_full_scan()
-        }
-
-        fn subdirs_with_audio(&self, folder: &std::path::Path) -> Result<Vec<PathBuf>, StoreError> {
-            self.0.lock().unwrap().subdirs_with_audio(folder)
-        }
-
-        fn smart_playlist(
-            &self,
-            kind: SmartPlaylistKind,
-            limit: usize,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().smart_playlist(kind, limit)
-        }
-
-        fn smart_list_counts(&self) -> Result<Vec<(SmartPlaylistKind, usize)>, StoreError> {
-            self.0.lock().unwrap().smart_list_counts()
-        }
-
-        fn genre_counts(&self) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genre_counts()
-        }
-
-        fn artists_in_genre(&self, genre: &str) -> Result<Vec<Artist>, StoreError> {
-            self.0.lock().unwrap().artists_in_genre(genre)
-        }
-
-        fn artist_albums_in_genre(
-            &self,
-            artist: &str,
-            genre: &str,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0.lock().unwrap().artist_albums_in_genre(artist, genre)
-        }
-
-        fn album_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_tracks_in_genre(album_artist, album_title, genre)
-        }
-
-        fn hit_albums_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().hit_albums_page(query, offset, limit)
-        }
-
-        fn hit_artists_page(
-            &self,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_page(query, offset, limit)
-        }
-
-        fn album_hit_tracks(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_hit_tracks(album_artist, album_title, query)
-        }
-
-        fn album_is_name_hit(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            query: &str,
-        ) -> Result<bool, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .album_is_name_hit(album_artist, album_title, query)
-        }
-
-        fn artist_is_name_hit(&self, artist: &str, query: &str) -> Result<bool, StoreError> {
-            self.0.lock().unwrap().artist_is_name_hit(artist, query)
-        }
-
-        fn hit_albums_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_albums_in_genre(genre, query, offset, limit)
-        }
-
-        fn hit_artists_in_genre(
-            &self,
-            genre: &str,
-            query: &str,
-            offset: usize,
-            limit: usize,
-        ) -> Result<Vec<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .hit_artists_in_genre(genre, query, offset, limit)
-        }
-
-        fn album_hit_tracks_in_genre(
-            &self,
-            album_artist: &str,
-            album_title: &str,
-            genre: &str,
-            query: &str,
-        ) -> Result<Vec<Track>, StoreError> {
-            self.0.lock().unwrap().album_hit_tracks_in_genre(
-                album_artist,
-                album_title,
-                genre,
-                query,
-            )
-        }
-
-        fn hit_genre_counts(&self, query: &str) -> Result<Vec<GenreCount>, StoreError> {
-            self.0.lock().unwrap().hit_genre_counts(query)
-        }
-
-        fn artists_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_page(direction, offset, limit)
-        }
-
-        fn albums_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0.lock().unwrap().albums_page(direction, offset, limit)
-        }
-
-        fn genres_page(
-            &self,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<GenreCount>, StoreError> {
-            self.0.lock().unwrap().genres_page(direction, offset, limit)
-        }
-
-        fn artists_in_genre_page(
-            &self,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Artist>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artists_in_genre_page(genre, direction, offset, limit)
-        }
-
-        fn artist_albums_in_genre_page(
-            &self,
-            artist: &str,
-            genre: &str,
-            direction: SortDirection,
-            offset: usize,
-            limit: usize,
-        ) -> Result<riff_persistence::store::Page<Album>, StoreError> {
-            self.0
-                .lock()
-                .unwrap()
-                .artist_albums_in_genre_page(artist, genre, direction, offset, limit)
-        }
-
-        fn picker_texts(&self, field_id: &str, limit: usize) -> Result<Vec<String>, StoreError> {
-            self.0.lock().unwrap().picker_texts(field_id, limit)
-        }
-
-        fn picker_numbers(&self, field_id: &str, limit: usize) -> Result<Vec<i64>, StoreError> {
-            self.0.lock().unwrap().picker_numbers(field_id, limit)
-        }
-
-        fn smart_playlist_tree(
-            &self,
-            id: &PlaylistId,
-        ) -> Result<Option<SmartPlaylistTree>, StoreError> {
-            self.0.lock().unwrap().smart_playlist_tree(id)
-        }
-
-        fn custom_smart_playlists(&self) -> Result<Vec<CustomSmartPlaylist>, StoreError> {
-            self.0.lock().unwrap().custom_smart_playlists()
         }
     }
 

@@ -3496,7 +3496,6 @@ impl super::app::RiffApp {
                             ),
                             riff_backend::app::events::NoticeSeverity::Info,
                         );
-                        library.scan_status = self.feedback.display_message();
                     }
                     Err(e) => {
                         tracing::error!("Failed to clear the library: {e}");
@@ -3505,7 +3504,6 @@ impl super::app::RiffApp {
                             "Failed to clear the library \u{2014} nothing was changed.".to_string(),
                             riff_backend::app::events::NoticeSeverity::Error,
                         );
-                        library.scan_status = self.feedback.display_message();
                     }
                 }
             }

@@ -42,10 +42,11 @@ mod tests {
         )
     }
 
-    /// A real store-backed playlists port plus a `SessionViews` seam sharing
-    /// its session playlist generation — the same pairing the composition
-    /// root wires, so commits through the port invalidate the seam's
-    /// playlist projection exactly like production.
+    /// A real store-backed playlists port plus a `SessionViews` seam reading
+    /// through the same store — the same pairing the composition root wires,
+    /// so commits through the port invalidate the seam's playlist projection
+    /// exactly like production (the seam derives the session generations it
+    /// observes from these ports).
     fn boxed_playlist_seam(
         dir: &tempfile::TempDir,
     ) -> (
@@ -60,8 +61,6 @@ mod tests {
         let views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
         (Box::new(store), views)
     }
@@ -77,8 +76,6 @@ mod tests {
         riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         )
     }
 
@@ -12286,8 +12283,6 @@ mod browser_column_ui_tests {
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
         let mut library_mutations: Box<dyn LibraryMutationStore> = Box::new(store.clone());
         let mut library = LibrarySession::default();
@@ -14554,8 +14549,6 @@ mod browser_column_ui_tests {
         let views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
 
         let state = DetailRenderState {
@@ -15362,8 +15355,6 @@ mod browser_column_ui_tests {
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
 
         // Album selection: the full readout — cover track, title, artist ·
@@ -15644,8 +15635,6 @@ mod browser_column_ui_tests {
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
         let row = |content: &riff_gui::ui::app::InspectorContent, label: &str| {
             content
@@ -15714,8 +15703,6 @@ mod browser_column_ui_tests {
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
         let mut row = |label: &str| {
             let content = resolve_inspector(
@@ -15765,8 +15752,6 @@ mod browser_column_ui_tests {
         let mut views = riff_backend::app::views::SessionViews::new(
             Box::new(store.clone()),
             Box::new(store.clone()),
-            store.library_generation(),
-            store.playlist_generation(),
         );
 
         // The album readout resolves one tag row per field in the stable
@@ -16397,7 +16382,7 @@ mod whole_frame_tests {
     use crate::mocks::{
         FailingQuery, LibraryQueryCall, MockLibraryMutationStore, MockLibraryQueryStore,
         MockPlaylistStore, MockScans, MockSettingsStore, MockTransport, SettingsCall,
-        SharedQueryStore, TransportIntent,
+        TransportIntent,
     };
     use crate::test_utils::{create_test_track_with_metadata, float_close};
 
@@ -16631,21 +16616,15 @@ mod whole_frame_tests {
         let pid = playlist_port
             .create_playlist("Gym", &track_ids)
             .expect("creating the playlist works");
-        let library_generation = store.library_generation();
-        let playlist_generation = store.playlist_generation();
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
-        // The real store serves all three ports and both generations — the
-        // mutation port, the query port, the playlist read port and the
-        // counters its own commits bump. `playlist_ports_at` states that wiring
-        // once; the store's own generations are load-bearing here (a committing
-        // write must move the projection).
-        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
-            Box::new(store.clone()),
-            store.clone(),
-            library_generation,
-            playlist_generation,
-        );
+        // The real store serves all three ports — the mutation port, the
+        // query port and the playlist read port — and the seam derives the
+        // counters its projections observe from those ports' handles, so the
+        // store's own commits move the projection exactly as the spelled
+        // generations did (a committing write must move the projection).
+        let (playlist_store, views) =
+            crate::composed_shell::playlist_ports(Box::new(store.clone()), store.clone());
         let shell = build(
             Box::new(MockTransport::new()),
             MockScans::default(),
@@ -16733,7 +16712,12 @@ mod whole_frame_tests {
             "a frame drains the backend event inbox it rendered from"
         );
         assert!(
-            shell.library.lock_or_recover().scan_status.is_none(),
+            shell
+                .harness
+                .state_mut()
+                .feedback
+                .display_message()
+                .is_none(),
             "a frame with nothing to report leaves the status line empty"
         );
         // The write-back covers only the five UI-owned fields, so the
@@ -16764,14 +16748,24 @@ mod whole_frame_tests {
             .expect("the notice channel is live");
 
         assert!(
-            shell.library.lock_or_recover().scan_status.is_none(),
+            shell
+                .harness
+                .state_mut()
+                .feedback
+                .display_message()
+                .is_none(),
             "nothing has been announced before the frame that drains it"
         );
 
         shell.harness.step();
 
         assert_eq!(
-            shell.library.lock_or_recover().scan_status.as_deref(),
+            shell
+                .harness
+                .state_mut()
+                .feedback
+                .display_message()
+                .as_deref(),
             Some("Playback error: the decoder fell over"),
             "one frame carries a drained typed notice to the status line"
         );
@@ -16793,14 +16787,22 @@ mod whole_frame_tests {
 
         shell.harness.step();
 
-        let library = shell.library.lock_or_recover();
         assert_eq!(
-            library.scan_status.as_deref(),
+            shell
+                .harness
+                .state_mut()
+                .feedback
+                .display_message()
+                .as_deref(),
             Some("Scan complete: 3 tracks"),
             "the queued outcome is on the status line by frame end"
         );
         assert_eq!(
-            library.library_paths.readiness(&root),
+            shell
+                .library
+                .lock_or_recover()
+                .library_paths
+                .readiness(&root),
             LibraryStatus::Scanned(3),
             "and the per-root readiness the panes read moves with it"
         );
@@ -17873,7 +17875,7 @@ mod whole_frame_tests {
         let shared = Arc::new(Mutex::new(mock));
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
         let (playlist_store, views) = crate::composed_shell::playlist_ports(
-            Box::new(crate::mocks::SharedQueryStore(Arc::clone(&shared))),
+            Box::new(Arc::clone(&shared)),
             MockPlaylistStore::default(),
         );
         let shell = build(
@@ -20807,7 +20809,7 @@ mod whole_frame_tests {
         let handle = Arc::new(Mutex::new(mock));
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
         let (playlist_store, views) = crate::composed_shell::playlist_ports(
-            Box::new(SharedQueryStore(Arc::clone(&handle))),
+            Box::new(Arc::clone(&handle)),
             MockPlaylistStore::default(),
         );
         let shell = build(
@@ -21108,14 +21110,11 @@ mod whole_frame_tests {
             .expect("saving the list works");
 
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
-        // The store's own generations, so its commits (the save above, and any
-        // delete after) move the projections the shell reads.
-        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
-            Box::new(store.clone()),
-            store.clone(),
-            store.library_generation(),
-            store.playlist_generation(),
-        );
+        // The seam derives the store's own generations from the ports it is
+        // handed, so its commits (the save above, and any delete after) move
+        // the projections the shell reads.
+        let (playlist_store, views) =
+            crate::composed_shell::playlist_ports(Box::new(store.clone()), store.clone());
         let shell = build(
             Box::new(MockTransport::new()),
             MockScans::default(),
@@ -22388,12 +22387,8 @@ mod whole_frame_tests {
 
         let transport = Arc::new(MockTransport::new());
         let settings_calls = Arc::new(Mutex::new(Vec::new()));
-        let (playlist_store, views) = crate::composed_shell::playlist_ports_at(
-            Box::new(store.clone()),
-            store.clone(),
-            store.library_generation(),
-            store.playlist_generation(),
-        );
+        let (playlist_store, views) =
+            crate::composed_shell::playlist_ports(Box::new(store.clone()), store.clone());
         let shell = build_at_step(
             Box::new(transport.as_ref().clone()),
             MockScans::default(),
@@ -22971,7 +22966,6 @@ mod whole_frame_tests {
     #[test]
     fn a_list_that_cannot_be_computed_shows_the_reason_not_an_empty_listing() {
         use riff_backend::app::state::TrackSort;
-        use riff_backend::app::store::StoreGeneration;
         use riff_backend::app::views::SessionViews;
 
         let id = PlaylistId("spl-broken-1".to_string());
@@ -22995,10 +22989,8 @@ mod whole_frame_tests {
         // The same reason, asked the way the editor's count line asks it: the
         // reason channel's own string, over the same mock.
         let mut views = SessionViews::new(
-            Box::new(SharedQueryStore(Arc::clone(&mock))),
+            Box::new(Arc::clone(&mock)),
             Box::new(MockPlaylistStore::default()),
-            StoreGeneration::new(),
-            StoreGeneration::new(),
         );
         let reason = views
             .custom_list_count(&id, TrackSort::default(), None)
@@ -24299,7 +24291,6 @@ mod context_menu_ui_tests {
     /// far enough to resolve an Album, an Artist, and a Genre to distinct
     /// batches.
     fn entity_views() -> riff_backend::app::views::SessionViews {
-        use riff_backend::app::store::StoreGeneration;
         use riff_backend::domain::{Album, Artist, GenreCount};
 
         let mock = MockLibraryQueryStore {
@@ -24357,8 +24348,6 @@ mod context_menu_ui_tests {
         riff_backend::app::views::SessionViews::new(
             Box::new(mock),
             Box::new(MockPlaylistStore::default()),
-            StoreGeneration::new(),
-            StoreGeneration::new(),
         )
     }
 
@@ -25660,10 +25649,6 @@ mod library_path_ui_tests {
             vec![SettingsCall::LibraryPaths],
             "the typed settings row is the only durable write"
         );
-        assert!(
-            library.scan_status.is_none(),
-            "registering a root announces no scan"
-        );
         assert_eq!(
             library.library_paths.readiness(&canonical),
             LibraryStatus::Idle,
@@ -26198,12 +26183,9 @@ mod component_boundary_tests {
 /// not have — reading the Library's picker values, once per picker-open.
 #[cfg(test)]
 mod rule_row_ui_tests {
-    use crate::mocks::{
-        LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore, SharedQueryStore,
-    };
+    use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore};
     use egui::accesskit::Toggled;
     use egui_kittest::kittest::{NodeT as _, Queryable};
-    use riff_backend::app::store::StoreGeneration;
     use riff_backend::app::views::SessionViews;
     use riff_backend::domain::field_catalog::{ValueType, spec};
     use riff_backend::domain::{CivilDateTime, Comparison, MatchableField, Rule, RuleValue};
@@ -26257,10 +26239,8 @@ mod rule_row_ui_tests {
         ) -> (Self, Arc<Mutex<MockLibraryQueryStore>>) {
             let mock = Arc::new(Mutex::new(mock));
             let views = SessionViews::new(
-                Box::new(SharedQueryStore(Arc::clone(&mock))),
+                Box::new(Arc::clone(&mock)),
                 Box::new(MockPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
             );
             (
                 Self {

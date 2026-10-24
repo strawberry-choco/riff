@@ -26,8 +26,6 @@ use riff_gui::ui::RiffApp;
 #[cfg(not(target_os = "linux"))]
 use riff_gui::ui::window_visibility::spawn_visibility_listener;
 
-// One linear wiring sequence into `RiffApp::new`'s argument list — the
-// composition root's shape, and one argument per line is the point.
 #[allow(clippy::too_many_lines)]
 fn main() {
     color_eyre::install().expect("failed to install color_eyre");
@@ -75,7 +73,11 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             let tray_icon = match riff_gui::ui::tray::create_tray(
                 cc.egui_ctx.clone(),
-                rt.tray_transport,
+                // A clone, like every other piece the tray holds: the
+                // transport is only its channel's sender, and a clone
+                // dispatches onto the same engine command channel. The bundle
+                // itself moves whole into the app below.
+                rt.tray_transport.clone(),
                 rt.playback.clone(),
                 // Cloned once here and shared: the tray stores it to declare a
                 // quit, the app loads it to tell that quit from an OS window
@@ -94,71 +96,31 @@ fn main() {
                 }
             };
 
-            // One arm per platform rather than one `not(linux)` arm, because
-            // the argument lists no longer agree: the trailing `quit_flag` is
-            // `macos`-gated in `RiffApp::new` (Windows resolves no close, so a
+            // One linear wiring sequence into `RiffApp::new`'s argument list —
+            // the composition root's shape, and one argument per line is the
+            // point: the App Runtime bundle the runtime handed back, then the
+            // pieces the platform supplies. The platform arguments carry the
+            // constructor's own cfg gates, so this ONE call serves every
+            // platform arm the binary used to spell.
+            //
+            // The macOS quit flag rides the bundle too, but the constructor
+            // keeps its macOS-gated parameter (Windows resolves no close, so a
             // `not(linux)` gate there would leave the field dead and fail CI's
-            // `-D warnings`). An arm's `cfg` must match the gate on the
-            // arguments it passes, hence the explicit Windows arm.
+            // `-D warnings`), so the binary clones it out of the bundle before
+            // the runtime moves — the same shared flag the tray stored a clone
+            // of above.
             #[cfg(target_os = "macos")]
+            let quit_flag = rt.quit_flag.clone();
             let app = RiffApp::new(
-                rt.playback,
-                rt.library,
-                rt.ui_transport,
-                Box::new(rt.scans.clone()),
-                rt.watcher_manager,
+                rt,
+                #[cfg(not(target_os = "linux"))]
                 tray_icon,
-                rt.settings,
-                rt.preferences,
-                rt.playlists,
-                rt.library_mutations,
-                rt.session_views,
-                rt.tag_edits,
-                rt.passes,
-                rt.covers,
-                rt.backend_events,
+                #[cfg(not(target_os = "linux"))]
                 visibility_listener,
+                #[cfg(not(target_os = "linux"))]
                 visibility_tx,
-                rt.quit_flag,
-            );
-
-            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
-            let app = RiffApp::new(
-                rt.playback,
-                rt.library,
-                rt.ui_transport,
-                Box::new(rt.scans.clone()),
-                rt.watcher_manager,
-                tray_icon,
-                rt.settings,
-                rt.preferences,
-                rt.playlists,
-                rt.library_mutations,
-                rt.session_views,
-                rt.tag_edits,
-                rt.passes,
-                rt.covers,
-                rt.backend_events,
-                visibility_listener,
-                visibility_tx,
-            );
-
-            #[cfg(target_os = "linux")]
-            let app = RiffApp::new(
-                rt.playback,
-                rt.library,
-                rt.ui_transport,
-                Box::new(rt.scans.clone()),
-                rt.watcher_manager,
-                rt.settings,
-                rt.preferences,
-                rt.playlists,
-                rt.library_mutations,
-                rt.session_views,
-                rt.tag_edits,
-                rt.passes,
-                rt.covers,
-                rt.backend_events,
+                #[cfg(target_os = "macos")]
+                quit_flag,
             );
 
             Ok(Box::new(app))

@@ -482,7 +482,7 @@ mod composition_root_tests {
     use crate::app::MutexExt;
     use crate::domain::TrackId;
     use riff_backend::app::events::{BackendEvent, NoticeSeverity, NoticeSource};
-    use riff_backend::app::scan_service::{ScanOutcome, Scans};
+    use riff_backend::app::scan_service::ScanOutcome;
     use riff_backend::app::tag_edit_service::TagEditRequest;
     use riff_backend::app::traits::TagEdit;
     use riff_backend::composition::{AppRuntime, RuntimeLifecycle};
@@ -860,7 +860,7 @@ mod composition_root_tests {
 
         lifecycle.shutdown();
 
-        let scans = rt.scans.clone();
+        let scans = rt.scans;
         let tag_edits = rt.tag_edits;
         let covers = rt.covers;
 

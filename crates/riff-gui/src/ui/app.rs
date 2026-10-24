@@ -74,17 +74,21 @@ use riff_backend::app::state::{
 use riff_backend::app::store::{
     CustomSmartPlaylist, LibraryMutationStore, PlaylistStore, SettingsStore,
 };
-use riff_backend::app::tag_edit_service::TagEdits;
 use riff_backend::app::traits::RequestedSize;
+use riff_backend::app::transport::ChannelTransport;
 use riff_backend::app::views::SessionViews;
 use riff_backend::app::watcher_manager::WatcherManager;
+// The App Runtime bundle: `new` and the test twin both take it as ONE
+// parameter and read the handles they render with from the bundle's fields.
+use riff_backend::composition::AppRuntime;
 use riff_backend::domain::{PlaybackState, PlaylistId, SmartPlaylistKind, Track, TrackId};
 pub use riff_gui_components::stage::column_widths;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-// The app-wide quit intent, read by the macOS close block below. Gated to
-// macOS with the field and the parameter that carry it: nothing on Windows or
-// Linux names it, and an ungated import would be an `unused_imports` there.
+// The app-wide quit intent, read by the macOS close block below. The field
+// and the parameter that carry it are macOS-gated, and so is the import:
+// nothing ungated names the flag type anymore — the test twin hands the
+// bundle's own flag over instead of constructing one.
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicBool;
 
@@ -227,7 +231,7 @@ pub struct LibraryNav<'a> {
 pub struct RiffApp {
     pub playback: Arc<Mutex<PlaybackSession>>,
     /// The library session: selection, view/browse mode, search, library
-    /// roots + per-path statuses, scan status, UI flags, and per-path watch
+    /// roots + per-path statuses, UI flags, and per-path watch
     /// state. UI-owned; only the UI thread mutates it.
     pub library: Arc<Mutex<LibrarySession>>,
     /// The Transport port: the UI's intent-level playback front end. Command
@@ -386,9 +390,11 @@ pub struct RiffApp {
     /// The structured feedback board the titlebar paints from (issue 11):
     /// independent persistent slots per source so a scan line cannot erase a
     /// playback error or a Tag Edit outcome, carrying severity, source, and any
-    /// recovery intent to the paint boundary. Its `display_message` feeds the
-    /// existing `scan_status` line unchanged.
-    pub(crate) feedback: crate::ui::feedback::FeedbackBoard,
+    /// recovery intent to the paint boundary. The titlebar reads its
+    /// `display_message` for the status line — the board is that line's one
+    /// source, which is why the root integration suites read it the way they
+    /// read the session handles above.
+    pub feedback: crate::ui::feedback::FeedbackBoard,
     /// Linux-only folder-picker input state (no native file dialog there).
     /// Grouped so the rest of the struct keeps its cross-platform shape.
     #[cfg(target_os = "linux")]
@@ -447,30 +453,29 @@ pub struct RiffApp {
 }
 
 impl RiffApp {
-    /// Composition-root constructor: the main thread wires every dependency
-    /// by hand, so the parameter count is the wiring surface itself.
+    /// Composition-root constructor: the App Runtime the Composition Root's
+    /// `spawn` already composed is the wiring surface, and every handle the
+    /// app renders with is read from the bundle's fields — the two shared
+    /// sessions, the event inbox, the UI Transport, the Library Scan front
+    /// end, the watcher-manager cell, the three Application Store ports, the
+    /// `SessionViews` read seam, the hydrated Preferences round-trip, and the
+    /// Tag Edit, `ReplayGain` Pass, and Cover service front ends.
     ///
-    /// `preferences` arrives already hydrated — the App Runtime's composition
-    /// loaded the stored Settings into these two sessions and started the
+    /// The pieces the Composition Root does not hand the app wholesale stay
+    /// explicit parameters: the tray icon (created in the binary from the egui
+    /// context, `None` where creation failed), the frontend-local visibility
+    /// listener-and-sender pair, and — macOS only, trailing — the shared quit
+    /// flag, which only macOS resolves a close through.
+    ///
+    /// The bundle's `preferences` arrives already hydrated — `AppRuntime::spawn`
+    /// loaded the stored Settings into the two sessions and started the
     /// restored Library Paths' watchers before the frontend was built, so
-    /// there is nothing for the first frame to restore.
-    #[allow(clippy::too_many_arguments)]
+    /// there is nothing for the first frame to restore. The bundle members the
+    /// app does not hold (the tray's Transport, the Thumbnail cache) stay
+    /// behind with the runtime and drop with the destructured value.
     pub fn new(
-        playback: Arc<Mutex<PlaybackSession>>,
-        library: Arc<Mutex<LibrarySession>>,
-        transport: Box<dyn Transport>,
-        scans: Box<dyn Scans>,
-        watcher_manager: Arc<Mutex<Option<WatcherManager>>>,
+        runtime: AppRuntime,
         #[cfg(not(target_os = "linux"))] tray_icon: Option<tray_icon::TrayIcon>,
-        settings_store: Box<dyn SettingsStore>,
-        preferences: Preferences,
-        playlist_store: Box<dyn PlaylistStore>,
-        library_mutations: Box<dyn LibraryMutationStore>,
-        views: SessionViews,
-        tag_edits: Box<dyn TagEdits>,
-        passes: Box<dyn Passes>,
-        covers: Box<dyn Covers>,
-        backend_events: Arc<Mutex<BackendEvents>>,
         #[cfg(not(target_os = "linux"))]
         visibility_listener: crate::ui::window_visibility::VisibilityListener,
         #[cfg(not(target_os = "linux"))] visibility_tx: crate::ui::window_visibility::VisibilityTx,
@@ -478,6 +483,27 @@ impl RiffApp {
         // list rather than interleaved with it.
         #[cfg(target_os = "macos")] quit_flag: Arc<AtomicBool>,
     ) -> Self {
+        // The bundle is the parameter list now: each field keeps the role the
+        // positional argument of the same name held, in the same order.
+        let AppRuntime {
+            playback,
+            library,
+            backend_events,
+            ui_transport: transport,
+            tray_transport: _,
+            preferences,
+            scans,
+            watcher_manager,
+            quit_flag: _,
+            settings: settings_store,
+            playlists: playlist_store,
+            library_mutations,
+            session_views: views,
+            tag_edits,
+            passes,
+            covers,
+            thumbnail_cache: _,
+        } = runtime;
         Self {
             playback,
             library,
@@ -553,40 +579,47 @@ impl RiffApp {
     /// Test-only constructor: the production wiring surface minus everything
     /// the platform supplies.
     ///
-    /// It fills in what [`Self::new`] takes from the host — no tray icon, an
-    /// empty watcher-manager handle, and a real visibility channel pair — so a
-    /// test can build the whole shell over mock ports with no audio device, no
-    /// tray, and no Application Store. The returned sender lets a test push a
-    /// Show/Hide request through the same path the tray uses; on Linux there
-    /// is nothing to drain it, so it is inert there.
+    /// It consumes the same App Runtime bundle [`Self::new`] does — one
+    /// parameter, the one wiring surface — spelled complete by its caller:
+    /// every port the UI renders with arrives as a bundle member and passes
+    /// through to the app as itself, and the stubbing rules apply to bundle
+    /// members instead of parameters. The members the app does not hold get
+    /// test stubs that answer nothing: the watcher-manager member is replaced
+    /// with the empty cell this constructor creates, and the tray's
+    /// `Transport` member with one that dispatches into a channel nobody
+    /// reads. The Thumbnail cache member is the caller's to fill — the bundle
+    /// literal must be complete and the app never holds the member — with the
+    /// store port's empty stub reached through the hidden re-export (in
+    /// production it lives behind the Cover Service, so no session and no UI
+    /// code reads it). It also fills in what the host supplies in production —
+    /// no tray icon and a real visibility channel pair — so a test can build
+    /// the whole shell over mock ports with no audio device, no tray, and no
+    /// Application Store. The returned sender lets a test push a Show/Hide
+    /// request through the same path the tray uses; on Linux there is nothing
+    /// to drain it, so it is inert there.
     ///
     /// It also stands in for the App Runtime's hydration step, which is
-    /// composition-root work in production: the store and transport it is
-    /// handed are used to hydrate the sessions before the first frame, over the
-    /// same empty watcher cell, so a test shell's session is as restored as
-    /// the real one's and a preset mock store lands in it. (A root the mock
-    /// store records as watched therefore restores to a fresh `Warning` here —
-    /// no watcher is running in a test process — which is the same honest
-    /// verdict production reports when its watcher could not be created.)
+    /// composition-root work in production: the bundle's own Settings store
+    /// and UI transport are used to hydrate the sessions, over the same empty
+    /// watcher cell the app is then constructed with, and the hydrated value
+    /// replaces the bundle's `preferences` member — the value the caller's
+    /// literal spells there is a formality. A test shell's session is as
+    /// restored as the real one's and a preset mock store lands in it. (A
+    /// root the mock store records as watched therefore restores to a fresh
+    /// `Warning` here — no watcher is running in a test process — which is
+    /// the same honest verdict production reports when its watcher could not
+    /// be created.)
+    ///
+    /// Every other member passes through as handed in — the quit flag, the
+    /// sessions, the event inbox, and the Scan front end among them — so an
+    /// override at a call site is field assignment on the bundle.
     ///
     /// It delegates to [`Self::new`] rather than repeating the struct literal,
     /// so the two constructors cannot drift field-for-field. That is also why
     /// it is `doc(hidden)`: `new` stays the one production path.
     #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new_for_test(
-        playback: Arc<Mutex<PlaybackSession>>,
-        library: Arc<Mutex<LibrarySession>>,
-        transport: Box<dyn Transport>,
-        scans: Box<dyn Scans>,
-        settings_store: Box<dyn SettingsStore>,
-        playlist_store: Box<dyn PlaylistStore>,
-        library_mutations: Box<dyn LibraryMutationStore>,
-        views: SessionViews,
-        tag_edits: Box<dyn TagEdits>,
-        passes: Box<dyn Passes>,
-        covers: Box<dyn Covers>,
-        backend_events: Arc<Mutex<BackendEvents>>,
+        mut runtime: AppRuntime,
     ) -> (Self, crate::ui::window_visibility::VisibilityTx) {
         let (visibility_tx, visibility_listener) =
             crate::ui::window_visibility::spawn_visibility_listener();
@@ -596,41 +629,34 @@ impl RiffApp {
         // The runtime's hydration, performed where the runtime would: the
         // empty watcher cell below is the one the app is built with.
         let watcher_manager = Arc::new(Mutex::new(None));
-        let preferences = Preferences::hydrate(
-            &playback,
-            &library,
-            settings_store.as_ref(),
-            transport.as_ref(),
+        runtime.preferences = Preferences::hydrate(
+            &runtime.playback,
+            &runtime.library,
+            runtime.settings.as_ref(),
+            runtime.ui_transport.as_ref(),
             &watcher_manager,
         );
+        runtime.watcher_manager = watcher_manager;
+        // The tray's Transport is dispatched into by a tray no test has, so
+        // the stub dispatches into a channel nobody reads.
+        runtime.tray_transport = ChannelTransport::new(crossbeam_channel::unbounded().0);
+
+        // The app is the only consumer of the quit intent in a headless test
+        // (no tray exists to set it), so the bundle's own flag is handed over
+        // the way production hands it over.
+        #[cfg(target_os = "macos")]
+        let quit_flag = Arc::clone(&runtime.quit_flag);
 
         let app = Self::new(
-            playback,
-            library,
-            transport,
-            scans,
-            watcher_manager,
+            runtime,
             #[cfg(not(target_os = "linux"))]
             None,
-            settings_store,
-            preferences,
-            playlist_store,
-            library_mutations,
-            views,
-            tag_edits,
-            passes,
-            covers,
-            backend_events,
             #[cfg(not(target_os = "linux"))]
             visibility_listener,
             #[cfg(not(target_os = "linux"))]
             visibility_tx.clone(),
-            // The app is the only consumer of the quit intent in a headless
-            // test (no tray exists to set it), so it starts cleared and stays
-            // that way — the same "a test pushes a request through the tray's
-            // channel" arrangement the visibility sender below documents.
             #[cfg(target_os = "macos")]
-            Arc::new(AtomicBool::new(false)),
+            quit_flag,
         );
         (app, visibility_tx)
     }
@@ -1266,9 +1292,10 @@ impl RiffApp {
     /// and the query rides back in the report, and the Ctrl+K focus request is
     /// consumed by [`Frame::apply_titlebar`] rather than cleared here.
     ///
-    /// `scan_status` is the string the Frame composed at step 5, one line above
-    /// every panel — so a slot filled after the compose really would be a frame
-    /// late, which is what the headless order test pins.
+    /// `scan_status` is the board's display message, read here at the top of
+    /// the panel order — the drains that filled the board ran earlier in this
+    /// same Frame's `advance`, so a slot filled after this read really would
+    /// be a frame late, which is what the headless order test pins.
     fn draw_titlebar(
         &mut self,
         ui: &mut egui::Ui,
@@ -1277,7 +1304,7 @@ impl RiffApp {
         library: &mut LibrarySession,
         out: &mut FrameOutput,
     ) {
-        let scan_status = library.scan_status.clone();
+        let scan_status = self.feedback.display_message();
         let mut report = TitlebarReport {
             // The viewport's maximized flag is egui-owned and the Frame cannot
             // read it, so it rides the report: the draw half reads, the Frame
@@ -1541,38 +1568,13 @@ impl eframe::App for RiffApp {
         let input = Self::read_frame_input(ui, frame);
 
         // Steps 1-9: the native close, the theme, the event inbox, the three
-        // background services, the status-line compose, the covers, the
-        // watcher, the keyboard, and the OS title. Then the egui-bound leaves
-        // they decided on, in the same order — before any panel draws, because
-        // the rows resolve cover textures as they paint and the widgets need
-        // the palette installed.
+        // background services, the covers, the watcher, the keyboard, the OS
+        // title, and the Smart Playlists draft's right to exist. Then the
+        // egui-bound leaves they decided on, in the same order — before any
+        // panel draws, because the rows resolve cover textures as they paint
+        // and the widgets need the palette installed.
         let mut output = self.frame(&mut playback, &mut library).advance(&input);
         self.enact_frame_head(ui.ctx(), &mut output, library.ui_flags.reduce_motion);
-
-        // The Smart Playlists draft's right to exist, decided once per frame
-        // and only here: it belongs to the Smart Playlists page and to a saved
-        // list that still exists, so leaving the page — another Settings
-        // section, or the Settings view itself — or losing the list it was
-        // written against discards it, while a rename of that list is followed
-        // by the draft. `SmartPlaylistsEditor::reconcile` is the ONE place
-        // that rule lives; no gesture clears a draft itself, so a stale draft
-        // cannot survive through a path nobody remembered to wire. Called
-        // before any panel draws, so a discarded draft is never painted. The
-        // enumeration is the same bounded read the page's own content fill
-        // makes, asked only while the page is on screen and through its
-        // fallible accessor: a store that *could not answer* must not reach
-        // the reconcile as a store that answered "no lists", because the draft
-        // is the only holder of the listener's work and a transient read error
-        // would otherwise destroy it.
-        let smart_page_open = matches!(library.view_mode, ViewMode::Settings)
-            && self.settings_section == SettingsSection::SmartPlaylists;
-        let stored = if smart_page_open {
-            self.views.try_custom_smart_playlists()
-        } else {
-            Ok(Vec::new())
-        };
-        self.smart_playlists_editor
-            .reconcile(smart_page_open, stored);
 
         // --- SHELL (Issue 06): unified Panel API at exact token dimensions ---
         //
@@ -2803,10 +2805,19 @@ pub fn apply_playlist_row_action(
     }
 }
 
-/// Commit the inline rename prompt's Save: trim the draft and rename through
-/// the [`PlaylistStore`] as one durable transaction. Empty drafts are
-/// ignored (pre-restyle behavior). The seam's next read reflects the commit
-/// on its own — no projection refresh here.
+/// Commit the inline rename prompt's Save: trim the draft, refuse a Built-in
+/// Smart Playlist's name, and rename through the [`PlaylistStore`] as one
+/// durable transaction. Empty drafts are ignored (pre-restyle behavior). The
+/// seam's next read reflects the commit on its own — no projection refresh
+/// here.
+///
+/// The Built-in-name half of the sidebar name rule is asked **here**, in the
+/// same position [`commit_custom_smart_list_rename`] already asks it — after
+/// the trim-and-empty guard, before the store is reached — so any future
+/// caller of this commit inherits the refusal instead of remembering it at a
+/// call site: the six Built-in Smart Playlists exist only as code, so no
+/// query can refuse a Playlist renamed into one, and the sidebar must never
+/// show two rows reading "Most Played" (story 8).
 ///
 /// `Err(reason)` is the refusal, already rendered, that the caller must show:
 /// [`StoreError`](riff_backend::app::errors::StoreError) has ONE variant, so a
@@ -2824,11 +2835,53 @@ pub fn commit_playlist_rename(
     if draft.is_empty() {
         return Ok(());
     }
+    if let Some(reason) = builtin_smart_list_name_conflict(&draft) {
+        return Err(reason);
+    }
     match store.rename_playlist(id, &draft) {
         // The `bool` is the store's "this playlist existed" verdict. A rename
         // of a row that is gone closes the prompt exactly as it did before
         // this refusal reporting existed; only the error has a reason to show.
         Ok(_found) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Commit the inline create prompt's Save: trim the draft, refuse a Built-in
+/// Smart Playlist's name, and create through the [`PlaylistStore`] as one
+/// immediate durable transaction, answering the new Playlist's id for the
+/// caller's navigation. An empty draft is ignored (pre-restyle behavior),
+/// reported as `Ok(None)` — distinguishable from a created playlist's
+/// `Ok(Some(id))`, so a silently-ignored empty Save and a committed one stay
+/// two different outcomes the caller maps differently.
+///
+/// `Err(reason)` is the refusal, already rendered, that the caller must show —
+/// the same one-variant [`StoreError`](riff_backend::app::errors::StoreError)
+/// shape [`commit_playlist_rename`] documents.
+///
+/// The Built-in-name half of the sidebar name rule is asked **here**, not at
+/// the prompt's call site, so that any future caller of this commit inherits
+/// it: the six Built-in Smart Playlists exist only as code, so no query can
+/// refuse a Playlist named after one, and the sidebar must never show two
+/// rows reading "Most Played" (story 8). The empty-ignore precedes the check
+/// whereas the frame-level check this helper replaces ran first — observably
+/// the same order, because the conflict function trims and folds its input
+/// exactly the way the store's cross-table name rule folds, and no empty
+/// draft folds to a Built-in display name.
+#[must_use = "a refused create has to reach the listener, not the log"]
+pub fn commit_playlist_create(
+    store: &mut dyn PlaylistStore,
+    draft: &str,
+) -> Result<Option<PlaylistId>, String> {
+    let name = draft.trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if let Some(reason) = builtin_smart_list_name_conflict(&name) {
+        return Err(reason);
+    }
+    match store.create_playlist(&name, &[]) {
+        Ok(id) => Ok(Some(id)),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -2848,9 +2901,10 @@ pub fn commit_playlist_rename(
 /// that any future caller of this commit inherits it: the six Built-in Smart
 /// Playlists exist only as code, so no query can refuse a Custom Smart
 /// Playlist named after one, and the sidebar must never show two rows reading
-/// "Most Played" (story 8). The same half is asked by the two playlist prompt
-/// arms and by the editor's Save; this is the fourth gesture that names a
-/// sidebar row.
+/// "Most Played" (story 8). The same half is asked by the two playlist
+/// commits beside this one and by the editor's Save; every gesture that names
+/// a sidebar row reaches it through a commit helper or the editor's own
+/// refusal ladder.
 #[must_use = "a refused rename has to reach the listener, not the log"]
 pub fn commit_custom_smart_list_rename(
     store: &mut dyn LibraryMutationStore,

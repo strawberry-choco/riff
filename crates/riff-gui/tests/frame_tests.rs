@@ -3,9 +3,10 @@
 //! Nothing here builds an `egui::Context`, a window, or a kittest harness. That
 //! is the point of the ticket this file belongs to: the frame's decision half
 //! names no egui type at all — [`FrameInput`] is pure data and [`FrameOutput`]
-//! is decisions only — so "the drains run before the compose" and "a titlebar
-//! click lands before the stage picks its view" are facts a test can reach
-//! directly instead of facts a golden diff would have to betray.
+//! is decisions only — so "the drains run before the titlebar reads the
+//! board" and "a titlebar click lands before the stage picks its view" are
+//! facts a test can reach directly instead of facts a golden diff would have
+//! to betray.
 //!
 //! The ports here are the smallest fakes that keep the seams real: a scripted
 //! scan service, a recording transport, and stores that answer "nothing". The
@@ -235,9 +236,17 @@ impl SettingsStore for RecordingSettingsStore {
 struct QuietPlaylistStore {
     created: Arc<Mutex<Vec<String>>>,
     next_id: Arc<Mutex<u64>>,
+    /// The session playlist generation the port answers: a fresh counter
+    /// this double keeps, which nothing bumps unless the owning suite does.
+    generation: StoreGeneration,
 }
 
 impl PlaylistStore for QuietPlaylistStore {
+    /// The double's own session playlist generation.
+    fn playlist_generation(&self) -> StoreGeneration {
+        self.generation.clone()
+    }
+
     fn load_playlists(&self) -> Result<Vec<Playlist>, StoreError> {
         Ok(Vec::new())
     }
@@ -309,7 +318,7 @@ struct RecordingMutationStore {
 impl RecordingMutationStore {
     fn new(copy: PlaylistId) -> Self {
         Self {
-            noop: StubLibraryMutationStore,
+            noop: StubLibraryMutationStore::default(),
             copy,
             duplicates: Arc::new(Mutex::new(Vec::new())),
             renames: Arc::new(Mutex::new(Vec::new())),
@@ -533,8 +542,6 @@ impl Harness {
                     "headless frame test: no store behind this seam",
                 )),
                 Box::new(QuietPlaylistStore::default()),
-                StoreGeneration::new(),
-                StoreGeneration::new(),
             ),
             scans: ScriptedScans::default(),
             covers: ScriptedCovers::default(),
@@ -707,13 +714,13 @@ struct Reports {
 // The order
 // ---------------------------------------------------------------------------
 
-/// **A slot filled after the compose is a frame late** — the rule the module
-/// doc names, and the one this ticket exists to make a test failure rather than
-/// a golden diff.
+/// **A slot filled after the titlebar reads is a frame late** — the rule the
+/// module doc names, and the one this ticket exists to make a test failure
+/// rather than a golden diff.
 ///
-/// A scan completion drained in step 4 must be in the composed `scan_status`
-/// the titlebar paints in step 5. Move the compose above the drains and
-/// `library.scan_status` is `None` on the frame that drew it, so this fails.
+/// A scan completion drained in step 4 must be on the board the titlebar
+/// reads at the top of the panel order. Move the drains below the titlebar's
+/// read and the board is empty on the frame that drew it, so this fails.
 #[test]
 fn the_compose_runs_after_the_drains_not_before_them() {
     let mut harness = Harness::new();
@@ -725,15 +732,15 @@ fn the_compose_runs_after_the_drains_not_before_them() {
     harness.advance(&FrameInput::default());
 
     assert_eq!(
-        harness.library.scan_status.as_deref(),
+        harness.feedback.display_message().as_deref(),
         Some("Scan complete: 42 tracks"),
         "the status line must carry what this frame's drains produced"
     );
 }
 
-/// The composed line is the *board's*, not the last thing anyone wrote into
-/// the status slot — the reason the compose exists as its own step (issue 11):
-/// a scan update cannot erase a live playback error.
+/// The line the titlebar reads is the *board's*, not the last thing anyone
+/// wrote into a status slot (issue 11): a scan update cannot erase a live
+/// playback error.
 #[test]
 fn a_scan_update_cannot_erase_a_playback_error() {
     let mut harness = Harness::new();
@@ -746,7 +753,7 @@ fn a_scan_update_cannot_erase_a_playback_error() {
     harness.advance(&FrameInput::default());
 
     assert_eq!(
-        harness.library.scan_status.as_deref(),
+        harness.feedback.display_message().as_deref(),
         Some("playback failed"),
         "the higher-severity source survives the scan's own slot"
     );
@@ -762,11 +769,11 @@ fn the_event_inbox_drains_before_anything_paints() {
 
     harness.advance(&FrameInput::default());
 
-    // The scan-slot line the drain writes is what the compose then reads, so a
-    // second frame with no events proves the drain happened exactly once and
+    // The scan-slot line the drain writes is what the titlebar then reads, so
+    // a second frame with no events proves the drain happened exactly once and
     // the generation is remembered rather than the events.
     assert!(
-        harness.library.scan_status.is_none(),
+        harness.feedback.display_message().is_none(),
         "a library-changed event carries no UI feedback of its own"
     );
     let second = FrameInput {
@@ -775,7 +782,7 @@ fn the_event_inbox_drains_before_anything_paints() {
     };
     harness.advance(&second);
     assert!(
-        harness.library.scan_status.is_none(),
+        harness.feedback.display_message().is_none(),
         "the inbox is empty on the second frame: the first drained it"
     );
 }
@@ -1469,10 +1476,10 @@ fn a_frame_without_a_drop_decides_nothing_about_drops() {
     );
 }
 
-/// The drop's report rides the EXISTING board slot and the frame's compose —
-/// no new surface. The Library Path adapter's drop resolution writes the
-/// Library notice (the scan slot), and the frame's step-5 compose feeds it to
-/// the titlebar line exactly like any other scan update; an all-rejected drop
+/// The drop's report rides the EXISTING board slot — no new surface. The
+/// Library Path adapter's drop resolution writes the
+/// Library notice (the scan slot), and the titlebar's board read carries it
+/// to the status line exactly like any other scan update; an all-rejected drop
 /// leaves the standard refusal standing there.
 #[test]
 fn a_drops_refusal_composes_onto_the_scan_line_like_any_library_notice() {
@@ -1501,9 +1508,9 @@ fn a_drops_refusal_composes_onto_the_scan_line_like_any_library_notice() {
     harness.advance(&FrameInput::default());
 
     assert_eq!(
-        harness.library.scan_status.as_deref(),
+        harness.feedback.display_message().as_deref(),
         Some("Path does not exist: /nowhere-b"),
-        "the last refusal stands on the line the frame composes — one slot, no new surface"
+        "the last refusal stands on the status line — one slot, no new surface"
     );
 }
 
@@ -1670,9 +1677,9 @@ fn a_settled_thumbnail_cache_clear_is_decided_by_the_frame() {
         "settled, so a later press may start a fresh clear"
     );
     assert_eq!(
-        harness.library.scan_status.as_deref(),
+        harness.feedback.display_message().as_deref(),
         Some("Thumbnail cache cleared. Covers rebuild as you browse."),
-        "and the status line is written BEFORE the compose, so it is on screen"
+        "and the status line is written BEFORE the titlebar reads it, so it is on screen"
     );
 }
 

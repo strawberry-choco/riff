@@ -11,13 +11,19 @@
 //! cap still loads, still converts, and is still spellable, because a newer
 //! riff's tree must answer rather than be refused.
 //!
-//! **The save path must not enforce the cap either.** [`RuleBoxDraft::to_root_box`]
-//! spells the listener's tree for ticket 18's one-call Save, and it refuses
-//! only what has no stored form at all: a half-filled Rule row makes it answer
-//! [`None`] (never a silent drop), an Unreadable Rule makes it answer [`None`]
-//! (re-inserting one would violate the schema's `CHECK` list), while an
-//! *empty* box converts as an empty box — refusing that is ticket 18's save
-//! decision, not the model's.
+//! **The spelling ladder lives here, once.** [`RuleBoxDraft::spell`] is the
+//! one recursive spelling walk — the stored tree a draft spells, with the
+//! value source ([`SpellSource`]) as its one parameter — and it refuses only
+//! what has no stored form at all: a half-filled Rule row blocks it (never a
+//! silent drop), an Unreadable Rule blocks it (re-inserting one would violate
+//! the schema's `CHECK` list), while an *empty* box converts as an empty box —
+//! refusing that is ticket 18's save decision, not the model's. The walk
+//! answers in one block vocabulary ([`SpellBlock`]) at the child slot a block
+//! sits in, which is what lets its two callers ask the same walk and name the
+//! same block the same way: [`RuleBoxDraft::to_root_box`] with the live
+//! source, for ticket 18's one-call Save, and the Smart Playlists editor's
+//! committed-tree ask with the committed source, for ticket 17's live match
+//! line.
 //!
 //! A box holds a `Vec` of children rather than parallel Rule and Box lists
 //! because the store numbers siblings together and the pane draws one list;
@@ -28,9 +34,9 @@
 //! is why its whole surface is testable with no context at all.
 
 use riff_backend::app::store::UnreadableRule;
-use riff_backend::domain::{Combine, RootBox, RuleBox, RuleChild};
+use riff_backend::domain::{Combine, RootBox, Rule, RuleBox, RuleChild};
 
-use crate::ui::rule_row::{RuleDraft, RulePanel};
+use crate::ui::rule_row::{RuleDraft, RuleGap, RulePanel};
 
 /// The most Rule Boxes a path from the Root Box may hold.
 ///
@@ -157,6 +163,70 @@ pub struct RuleBoxDraft {
     pub children: Vec<RuleChildDraft>,
 }
 
+/// Which answer each Rule row is spelled from — the value source of the one
+/// spelling walk, and the caller's one explicit choice at the ask.
+///
+/// The two sources are the two callers' standing choices, and the distinction
+/// between them is behavioral, not stylistic: Save refuses exactly the tree
+/// the listener is looking at, so it spells from the live parse of the typing
+/// buffers; the live match line counts a shape that holds still while the
+/// listener types and re-queries only when a value is committed, so it spells
+/// from each row's committed answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpellSource {
+    /// The live parse of each row's typing buffers
+    /// ([`RuleDraft::rule`], with [`RuleDraft::gap`] naming a half-filled
+    /// row).
+    Live,
+    /// Each row's committed answers ([`RuleDraft::committed_rule`]).
+    Committed,
+}
+
+/// Why a draft tree cannot be spelled as a stored tree, and where the block
+/// sits — the one block vocabulary every spelling of a draft answers in.
+///
+/// The walk's block order is stated here once and both callers rely on it: an
+/// Unreadable Rule **anywhere in the tree** blocks ahead of any half-filled
+/// row (it is the one row a listener cannot resolve by completing it), and the
+/// half-filled row named is the **first in draw order**. The slot puts each
+/// block at the child it sits in, so a caller paints its refusal under the row
+/// that caused it instead of re-walking the tree to find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpellBlock {
+    /// A stored Rule this build cannot read, at the child slot it sits in. No
+    /// tree is spelled while one is present: re-inserting it would violate the
+    /// schema's `CHECK` list.
+    Unreadable {
+        /// The slot of the Unreadable Rule.
+        slot: ChildSlot,
+    },
+    /// The first Rule row that is not whole, named in the row's own gap
+    /// vocabulary at the child slot it sits in.
+    Gap {
+        /// The slot of the half-filled row.
+        slot: ChildSlot,
+        /// What the row is still missing.
+        gap: RuleGap,
+    },
+}
+
+/// One Rule row spelled from `source` — the walk's per-row question, answered
+/// in the row's own gap vocabulary either way. The live source asks the row's
+/// live spelling and names a half-filled row with its own gap answer; the
+/// committed source asks the row's committed spelling, which answers in the
+/// same vocabulary directly.
+fn spell_row(draft: &RuleDraft, source: SpellSource) -> Result<Rule, RuleGap> {
+    match source {
+        SpellSource::Live => draft.rule().ok_or_else(|| {
+            draft.gap().expect(
+                "a row's live spelling and its gap are one ladder: a row that \
+                 spells no Rule is half-filled, and its gap names it",
+            )
+        }),
+        SpellSource::Committed => draft.committed_rule(),
+    }
+}
+
 impl RuleBoxDraft {
     /// A box that combines with `combine` and holds nothing yet.
     #[must_use]
@@ -189,37 +259,100 @@ impl RuleBoxDraft {
         }
     }
 
-    /// The tree this draft spells, or `None` while any Rule row is
-    /// half-filled — the shape ticket 18's one-call Save writes.
+    /// The one recursive spelling walk: the stored tree this draft spells —
+    /// every Rule row answered from `source`, every Box's combine and its
+    /// children in the one interleaved sibling order — or the block that stops
+    /// the spelling ([`SpellBlock`], at the child slot it sits in).
     ///
-    /// `None` rather than a partial tree: a conversion that skipped a
-    /// half-filled row would silently rewrite the listener's work on the next
-    /// Save, and ticket 18 names the offending row from its own walk before
-    /// it ever asks this. An empty box converts as an empty box (the save's
-    /// refusal to store one is ticket 18's decision), and the depth cap is
-    /// not consulted: a tree deeper than [`MAX_RULE_BOX_LEVELS`] spells back
-    /// exactly as it loaded.
-    #[must_use]
-    pub fn to_root_box(&self) -> Option<RootBox> {
-        self.to_rule_box().map(RootBox::new)
+    /// Which source a caller spells from is the caller's one explicit choice
+    /// at the ask, and the two standing choices are behavioral, not stylistic:
+    /// Save asks with [`SpellSource::Live`] because it refuses exactly the
+    /// tree the listener is looking at; the live match line asks with
+    /// [`SpellSource::Committed`] because a shape derived from buffers would
+    /// move on every keystroke and re-query with it.
+    ///
+    /// Every refusal rule is the walk's, stated here once:
+    ///
+    /// - a half-filled Rule row blocks the whole spelling — never a silent
+    ///   drop, which would rewrite the listener's work on the next Save — and
+    ///   the row named is the first in draw order, in the row's own gap
+    ///   vocabulary;
+    /// - an Unreadable Rule blocks the whole spelling — re-inserting one
+    ///   would violate the schema's `CHECK` list — and one **anywhere in the
+    ///   tree blocks ahead of any half-filled row**;
+    /// - an empty box converts as an empty box: refusing one is the Save's
+    ///   decision, not the model's;
+    /// - the display depth cap ([`MAX_RULE_BOX_LEVELS`]) is never consulted:
+    ///   a tree a newer riff wrote still spells back exactly as it loaded.
+    pub fn spell(&self, source: SpellSource) -> Result<RuleBox, SpellBlock> {
+        self.spell_box(&BoxPath::root(), source)
     }
 
-    /// The walk behind [`Self::to_root_box`].
-    fn to_rule_box(&self) -> Option<RuleBox> {
-        let children = self
-            .children
-            .iter()
-            .map(|child| match child {
-                RuleChildDraft::Rule(draft) => draft.rule().map(RuleChild::Rule),
-                RuleChildDraft::Box(nested) => nested.to_rule_box().map(RuleChild::Box),
+    /// The walk behind [`Self::spell`]: one pass over the box's children in
+    /// draw order, carrying the first half-filled row it met and returning an
+    /// Unreadable Rule the moment one appears — which is how [`SpellBlock`]'s
+    /// block order is kept in one pass. A child box's own answer is folded in
+    /// the same way, so the order holds for the whole tree.
+    fn spell_box(&self, path: &BoxPath, source: SpellSource) -> Result<RuleBox, SpellBlock> {
+        let mut children = Vec::with_capacity(self.children.len());
+        let mut first_gap: Option<SpellBlock> = None;
+        for (index, child) in self.children.iter().enumerate() {
+            match child {
+                RuleChildDraft::Rule(draft) => match spell_row(draft, source) {
+                    Ok(rule) => children.push(RuleChild::Rule(rule)),
+                    Err(gap) => {
+                        if first_gap.is_none() {
+                            first_gap = Some(SpellBlock::Gap {
+                                slot: ChildSlot::new(path.clone(), index),
+                                gap,
+                            });
+                        }
+                    }
+                },
+                RuleChildDraft::Box(nested) => {
+                    match nested.spell_box(&path.child(index), source) {
+                        Ok(boxed) => children.push(RuleChild::Box(boxed)),
+                        Err(block @ SpellBlock::Gap { .. }) => {
+                            if first_gap.is_none() {
+                                first_gap = Some(block);
+                            }
+                        }
+                        // An Unreadable Rule deeper in the tree outranks any
+                        // half-filled row this pass has already met.
+                        Err(unreadable) => return Err(unreadable),
+                    }
+                }
                 // An Unreadable Rule has no stored form this build can write,
                 // so a tree holding one spells no tree at all — which is what
                 // makes the save refuse instead of failing inside the store's
                 // `CHECK` list with no explanation.
-                RuleChildDraft::Unreadable(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(RuleBox::new(self.combine).with_children(children))
+                RuleChildDraft::Unreadable(_) => {
+                    return Err(SpellBlock::Unreadable {
+                        slot: ChildSlot::new(path.clone(), index),
+                    });
+                }
+            }
+        }
+        match first_gap {
+            Some(block) => Err(block),
+            None => Ok(RuleBox::new(self.combine).with_children(children)),
+        }
+    }
+
+    /// The tree this draft spells from its **live** buffers, or `None` while
+    /// any Rule row is half-filled or any Unreadable Rule is present — the
+    /// shape ticket 18's one-call Save writes, asked of the shared walk
+    /// ([`Self::spell`]) with the live source.
+    ///
+    /// `None` rather than a partial tree: a conversion that skipped a
+    /// half-filled row would silently rewrite the listener's work on the next
+    /// Save, and ticket 18 names the offending row from the walk's own answer.
+    /// An empty box converts as an empty box (the save's refusal to store one
+    /// is ticket 18's decision), and the depth cap is not consulted: a tree
+    /// deeper than [`MAX_RULE_BOX_LEVELS`] spells back exactly as it loads.
+    #[must_use]
+    pub fn to_root_box(&self) -> Option<RootBox> {
+        self.spell(SpellSource::Live).ok().map(RootBox::new)
     }
 
     /// How many Rules this box and every box below it holds — the same

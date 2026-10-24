@@ -19348,13 +19348,24 @@ mod whole_frame_tests {
     // with every dismissal route leaving the durable store untouched. Prompt
     // state and the store write stay where they are: in `RiffApp`.
 
-    /// Open the inline "New Playlist" name prompt through a real frame.
+    /// Open the inline "New Playlist" name prompt through a real frame: the
+    /// `+` offers the two kinds of list, and the prompt is the "Playlist"
+    /// choice's own flow.
     fn open_playlist_create_prompt(shell: &mut Shell) {
         shell.harness.get_by_label("New Playlist").click();
+        for _ in 0..4 {
+            shell.harness.step();
+        }
+        assert!(
+            shell.harness.query_by_label("Playlist").is_some(),
+            "the + offers its kind popup first"
+        );
+        shell.harness.get_by_label("Playlist").click();
+        shell.harness.step();
         shell.harness.step();
         assert!(
             shell.harness.query_by_label("Create").is_some(),
-            "the + control opens the inline name prompt"
+            "the Playlist choice opens the inline name prompt"
         );
     }
 
@@ -20705,6 +20716,48 @@ mod whole_frame_tests {
                 "the {label} built-in row survives the + unchanged"
             );
         }
+    }
+
+    /// The Playlists header's `+` offers the two kinds of list where it
+    /// sits, and the choice lands its flow: "Smart Playlist" the stage
+    /// editor on a fresh draft. The popup precedes both — a click on the
+    /// `+` alone writes nothing and opens nothing.
+    #[test]
+    fn the_playlists_plus_offers_both_kinds_and_each_choice_lands_its_flow() {
+        let (mut shell, _dir, _pid, store) = store_shell();
+
+        shell.harness.get_by_label("New Playlist").click();
+        // The popup needs its settling frames before its rows accept a
+        // pointer — the same dance the header sort control's popup takes.
+        for _ in 0..4 {
+            shell.harness.step();
+        }
+        for item in ["Playlist", "Smart Playlist"] {
+            assert!(
+                shell.harness.query_by_label(item).is_some(),
+                "the + opens its kind popup, and {item} is on it"
+            );
+        }
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "the + alone opens no prompt: a choice does"
+        );
+
+        shell.harness.get_by_label("Smart Playlist").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Rules").is_some(),
+            "the Smart Playlist choice puts the editor on the stage"
+        );
+        assert!(
+            shell.harness.query_by_label("Create").is_none(),
+            "the Smart Playlist choice opens no name prompt: the editor names its own list"
+        );
+        let lists = store
+            .custom_smart_playlists()
+            .expect("the store answers the D14 read");
+        assert!(lists.is_empty(), "choosing a kind writes nothing");
     }
 
     /// The nav entry (ticket 15) selects the section by clicking its label in

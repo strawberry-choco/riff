@@ -4027,7 +4027,7 @@ impl RiffApp {
                     egui::pos2(ui.max_rect().right() - 12.0, ui.cursor().center().y),
                     egui::vec2(24.0, 24.0),
                 );
-                if riff_gui_components::ghost_icon_button::ghost_icon_button(
+                let plus = riff_gui_components::ghost_icon_button::ghost_icon_button_response(
                     ui,
                     &mut self.icons,
                     &palette,
@@ -4036,8 +4036,26 @@ impl RiffApp {
                     Icon::Plus,
                     "New Playlist",
                     false,
-                ) {
-                    report.push(SidebarAction::NewPlaylist);
+                );
+                // The two kinds of list riff makes, offered where the `+`
+                // sits: a Playlist named and filled by hand, or a Smart
+                // Playlist whose Rules the stage editor writes. The popup is
+                // egui's transient menu keyed by the button's own response
+                // identity — the same popup the sort control opens — so each
+                // item is a real focusable row and choosing one closes the
+                // menu on its own activation frame.
+                let mut choice = None;
+                egui::Popup::menu(&plus).show(|ui| {
+                    use riff_gui_components::menu::{Item, item};
+                    if item(ui, &palette, &Item::new("Playlist")) {
+                        choice = Some(SidebarAction::NewPlaylist);
+                    }
+                    if item(ui, &palette, &Item::new("Smart Playlist")) {
+                        choice = Some(SidebarAction::NewSmartPlaylist);
+                    }
+                });
+                if let Some(action) = choice {
+                    report.push(action);
                 }
             });
         });

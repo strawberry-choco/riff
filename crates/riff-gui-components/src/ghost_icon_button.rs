@@ -28,6 +28,25 @@ pub fn ghost_icon_button(
     label: &str,
     hover_reveal: bool,
 ) -> bool {
+    ghost_icon_button_response(ui, cache, palette, rect, id, icon, label, hover_reveal).clicked()
+}
+
+/// The same button reporting its [`egui::Response`] rather than a bool, for
+/// the hosts that anchor something to the click — a popup menu keyed by the
+/// button's own response identity. The response is taken after the button's
+/// paint and a11y are finished, so the two entry points are one button, not
+/// two that could drift.
+#[allow(clippy::too_many_arguments)]
+pub fn ghost_icon_button_response(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    rect: egui::Rect,
+    id: egui::Id,
+    icon: Icon,
+    label: &str,
+    hover_reveal: bool,
+) -> egui::Response {
     let button = super::button::begin_icon_button(ui, rect, id, false);
     // A ghost button has no hover *fill* — hovering only reveals the glyph at
     // full ink — so the press is the first thing it ever paints behind that
@@ -47,5 +66,6 @@ pub fn ghost_icon_button(
         ui.painter_at(rect)
             .image(tex_id, rect.shrink(4.0), crate::UV_FULL, tint);
     }
-    super::button::finish_icon_button(ui, palette, &button, label)
+    super::button::finish_icon_button(ui, palette, &button, label);
+    button.response
 }

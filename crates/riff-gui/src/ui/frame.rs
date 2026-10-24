@@ -1450,10 +1450,11 @@ pub enum SidebarAction {
     OpenSmartList(SmartListIdentity),
     /// The Playlists header's "+": open the empty name prompt.
     NewPlaylist,
-    /// The SMART LISTS header's "+": put the Smart Playlist editor on the
-    /// stage on a new, empty, unsaved draft. A `+` that writes nothing — a
-    /// Custom Smart Playlist reaches the sidebar only at the editor's Save
-    /// (ticket 18).
+    /// A route that starts a Smart Playlist: the SMART LISTS header's `+` on
+    /// a fresh draft, or the Playlists header's `+` choosing "Smart
+    /// Playlist" from its kind popup. Either way the editor takes the stage
+    /// and nothing is written — a Custom Smart Playlist reaches the sidebar
+    /// only at the editor's Save (ticket 18).
     NewSmartPlaylist,
     /// A playlist row's own hover-revealed action, through the store flows.
     PlaylistRow {

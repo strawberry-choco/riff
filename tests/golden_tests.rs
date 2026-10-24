@@ -1419,6 +1419,34 @@ mod tests {
         );
     }
 
+    /// The empty sheet gives its empty state a real body: the hover widget the
+    /// composition plants so assistive tech (and this harness) can read it
+    /// spans actual height instead of the degenerate sliver that pushes the
+    /// title/description block past the sheet's bottom edge.
+    #[test]
+    fn queue_panel_empty_state_has_a_real_body() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut shell = composed(Seed {
+            library: LibrarySession {
+                queue_open: true,
+                ..LibrarySession::default()
+            },
+            ..Seed::default()
+        });
+        shell.run_steps(COMPOSED_FRAMES);
+        let body = shell
+            .query_all_by_label("Queue is empty")
+            .next()
+            .expect("the empty queue sheet's empty state must be readable");
+        assert!(
+            body.rect().height() > 0.0,
+            "the empty state's read surface is degenerate ({:?}), \
+             so its description paints outside the sheet",
+            body.rect(),
+        );
+    }
+
     // --- Titlebar ----------------------------------------------------------------
 
     /// The global "Search or jump to…" field where it actually lives: the

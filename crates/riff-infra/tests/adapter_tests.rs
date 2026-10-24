@@ -125,7 +125,8 @@ fn build_adts_frame(len: u16) -> Vec<u8> {
     f.push(0x50); // AAC-LC | sf=4 (44.1 kHz) | private=0 | ch_high=0
     f.push(0x80 | ((len >> 10) & 0x03) as u8); // ch_low=10 (stereo) | M[14:13]
     f.push(((len >> 3) & 0xff) as u8); // M[12:5]
-    f.push(((len & 0x07) << 5) as u8); // M[4:0] | buffer_fullness | num_raw_block=0
+    // The masked low three bits shifted left five always land in 0..=224.
+    f.push(u8::try_from((len & 0x07) << 5).unwrap()); // M[4:0] | buffer_fullness | num_raw_block=0
     f.push(0u8);
     while f.len() < len as usize {
         f.push(0);

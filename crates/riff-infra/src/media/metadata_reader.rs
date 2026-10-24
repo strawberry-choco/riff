@@ -10,9 +10,9 @@
 //! a shot, and every fallback is logged via `tracing::warn!` so a new lofty
 //! bug surfaces as an observable event rather than silent data loss.
 //!
-//! Limitation: symphonia cannot read ReplayGain. A file lofty fails to read
-//! will not surface ReplayGain values, even if the file carries them. The
-//! four ReplayGain fields of the fallback's `TrackMetadata` are `None`.
+//! Limitation: symphonia cannot read `ReplayGain`. A file lofty fails to read
+//! will not surface `ReplayGain` values, even if the file carries them. The
+//! four `ReplayGain` fields of the fallback's `TrackMetadata` are `None`.
 use lofty::file::TaggedFile;
 use lofty::prelude::*;
 use lofty::read_from_path;
@@ -236,7 +236,7 @@ impl LoftyMetadataReader {
 impl LoftyMetadataReader {
     /// Read the file through symphonia's format probe when lofty errors.
     /// Tags are pulled from the latest metadata revision's media container;
-    /// stream facts come from the first audio track. ReplayGain is not
+    /// stream facts come from the first audio track. `ReplayGain` is not
     /// exposed by symphonia's metadata layer, so those four fields stay
     /// `None`. Cover art is not surfaced either — the fallback returns
     /// `CoverSource::None`.
@@ -252,46 +252,8 @@ impl LoftyMetadataReader {
         ),
         LibraryError,
     > {
-        let source = std::fs::File::open(path)
-            .map_err(|e| LibraryError::MetadataRead(format!("Failed to open file: {e}")))?;
-        let mss = symphonia::core::io::MediaSourceStream::new(
-            Box::new(source),
-            symphonia::core::io::MediaSourceStreamOptions::default(),
-        );
-        let mut format: Box<dyn FormatReader> = get_probe()
-            .probe(
-                &Hint::new(),
-                mss,
-                FormatOptions::default(),
-                symphonia::core::meta::MetadataOptions::default(),
-            )
-            .map_err(|e| LibraryError::MetadataRead(format!("Symphonia probe failed: {e}")))?;
-
-        let track = format
-            .tracks()
-            .iter()
-            .find(|t| {
-                matches!(
-                    t.codec_params,
-                    Some(CodecParameters::Audio(ref p)) if p.codec != CODEC_ID_NULL_AUDIO
-                )
-            })
-            .ok_or_else(|| LibraryError::MetadataRead("No audio track found".to_string()))?;
-
-        let audio = match track.codec_params.as_ref() {
-            Some(CodecParameters::Audio(p)) => p,
-            _ => unreachable!("track filter guarantees Audio codec params"),
-        };
-        let sample_rate = audio
-            .sample_rate
-            .ok_or_else(|| LibraryError::MetadataRead("Unknown sample rate".to_string()))?;
-        let channels = audio
-            .channels
-            .as_ref()
-            .map_or(2u16, |c| u16::try_from(c.count()).unwrap_or(u16::MAX));
-        let duration = track
-            .num_frames
-            .map(|frames| duration_from_frames(frames, sample_rate));
+        let mut format = Self::symphonia_format(path)?;
+        let (sample_rate, channels, duration) = Self::first_audio_track_facts(format.tracks())?;
 
         // Pull the media-level tags out of the metadata log. The revision
         // reference returned by `skip_to_latest` is scoped to this block so
@@ -304,69 +266,7 @@ impl LoftyMetadataReader {
             }
         };
 
-        // The first tag whose standard form matches one of the given variant
-        // extractors, mapped to a String (numbers are stringified for the
-        // shared `Option<String>` return). Returning `None` when the file's
-        // tags don't set that field matches lofty's own behavior.
-        let first_std = |variants: &[fn(&StandardTag) -> Option<String>]| -> Option<String> {
-            variants.iter().find_map(|variant| {
-                tags_copy
-                    .iter()
-                    .find_map(|t| t.std.as_ref().and_then(variant))
-            })
-        };
-
-        let mut metadata = TrackMetadata::default();
-        metadata.title = first_std(&[|s| match s {
-            StandardTag::TrackTitle(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.artist = first_std(&[|s| match s {
-            StandardTag::Artist(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.album = first_std(&[|s| match s {
-            StandardTag::Album(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.album_artist = first_std(&[|s| match s {
-            StandardTag::AlbumArtist(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.composer = first_std(&[|s| match s {
-            StandardTag::Composer(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.comment = first_std(&[|s| match s {
-            StandardTag::Comment(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.genre = first_std(&[|s| match s {
-            StandardTag::Genre(v) => Some(v.as_str().to_owned()),
-            _ => None,
-        }]);
-        metadata.track_number = first_std(&[|s| match s {
-            StandardTag::TrackNumber(v) => Some(v.to_string()),
-            _ => None,
-        }])
-        .and_then(|s| s.parse::<u32>().ok());
-        metadata.disc_number = first_std(&[|s| match s {
-            StandardTag::DiscNumber(v) => Some(v.to_string()),
-            _ => None,
-        }])
-        .and_then(|s| s.parse::<u32>().ok());
-        metadata.year = first_std(&[
-            |s| match s {
-                StandardTag::RecordingYear(v) => Some((*v as u32).to_string()),
-                _ => None,
-            },
-            |s| match s {
-                StandardTag::RecordingTime(v) => Some(v.as_str().to_owned()),
-                _ => None,
-            },
-        ])
-        .and_then(|s| year_from_text(&s));
-
+        let metadata = Self::metadata_from_std_tags(&tags_copy);
         let audio_format = AudioFormatInfo {
             sample_rate,
             channels,
@@ -374,6 +274,122 @@ impl LoftyMetadataReader {
         };
 
         Ok((metadata, duration, CoverSource::None, audio_format))
+    }
+
+    /// Open the file and run symphonia's format probe, yielding the format
+    /// reader the fallback pulls tracks and tags from.
+    fn symphonia_format(path: &Path) -> Result<Box<dyn FormatReader>, LibraryError> {
+        let source = std::fs::File::open(path)
+            .map_err(|e| LibraryError::MetadataRead(format!("Failed to open file: {e}")))?;
+        let mss = symphonia::core::io::MediaSourceStream::new(
+            Box::new(source),
+            symphonia::core::io::MediaSourceStreamOptions::default(),
+        );
+        get_probe()
+            .probe(
+                &Hint::new(),
+                mss,
+                FormatOptions::default(),
+                symphonia::core::meta::MetadataOptions::default(),
+            )
+            .map_err(|e| LibraryError::MetadataRead(format!("Symphonia probe failed: {e}")))
+    }
+
+    /// Stream facts of the first audio track: sample rate, channel count,
+    /// and the frame-derived duration.
+    fn first_audio_track_facts(
+        tracks: &[symphonia::core::formats::Track],
+    ) -> Result<(u32, u16, Option<Duration>), LibraryError> {
+        let track = tracks
+            .iter()
+            .find(|t| {
+                matches!(
+                    t.codec_params,
+                    Some(CodecParameters::Audio(ref p)) if p.codec != CODEC_ID_NULL_AUDIO
+                )
+            })
+            .ok_or_else(|| LibraryError::MetadataRead("No audio track found".to_string()))?;
+        let Some(CodecParameters::Audio(audio)) = track.codec_params.as_ref() else {
+            unreachable!("track filter guarantees Audio codec params");
+        };
+        let sample_rate = audio
+            .sample_rate
+            .ok_or_else(|| LibraryError::MetadataRead("Unknown sample rate".to_string()))?;
+        let channels = audio
+            .channels
+            .as_ref()
+            .map_or(2u16, |c| u16::try_from(c.count()).unwrap_or(u16::MAX));
+        let duration = track
+            .num_frames
+            .map(|frames| duration_from_frames(frames, sample_rate));
+        Ok((sample_rate, channels, duration))
+    }
+
+    /// Build the fallback's `TrackMetadata` from the standard form of the
+    /// media-level tags. The four `ReplayGain` fields stay `None`.
+    fn metadata_from_std_tags(tags: &[symphonia::core::meta::Tag]) -> TrackMetadata {
+        // The first tag whose standard form matches one of the given variant
+        // extractors, mapped to a String (numbers are stringified for the
+        // shared `Option<String>` return). Returning `None` when the file's
+        // tags don't set that field matches lofty's own behavior.
+        let first_std = |variants: &[fn(&StandardTag) -> Option<String>]| -> Option<String> {
+            variants
+                .iter()
+                .find_map(|variant| tags.iter().find_map(|t| t.std.as_ref().and_then(variant)))
+        };
+
+        TrackMetadata {
+            title: first_std(&[|s| match s {
+                StandardTag::TrackTitle(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            artist: first_std(&[|s| match s {
+                StandardTag::Artist(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            album: first_std(&[|s| match s {
+                StandardTag::Album(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            album_artist: first_std(&[|s| match s {
+                StandardTag::AlbumArtist(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            composer: first_std(&[|s| match s {
+                StandardTag::Composer(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            comment: first_std(&[|s| match s {
+                StandardTag::Comment(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            genre: first_std(&[|s| match s {
+                StandardTag::Genre(v) => Some(v.as_str().to_owned()),
+                _ => None,
+            }]),
+            track_number: first_std(&[|s| match s {
+                StandardTag::TrackNumber(v) => Some(v.to_string()),
+                _ => None,
+            }])
+            .and_then(|s| s.parse::<u32>().ok()),
+            disc_number: first_std(&[|s| match s {
+                StandardTag::DiscNumber(v) => Some(v.to_string()),
+                _ => None,
+            }])
+            .and_then(|s| s.parse::<u32>().ok()),
+            year: first_std(&[
+                |s| match s {
+                    StandardTag::RecordingYear(v) => Some(u32::from(*v).to_string()),
+                    _ => None,
+                },
+                |s| match s {
+                    StandardTag::RecordingTime(v) => Some(v.as_str().to_owned()),
+                    _ => None,
+                },
+            ])
+            .and_then(|s| year_from_text(&s)),
+            ..TrackMetadata::default()
+        }
     }
 }
 
@@ -403,7 +419,7 @@ impl LoftyMetadataReader {
     /// a single file open. When lofty's `read_from_path` fails, fall back
     /// to symphonia's format probe so the file still enters the Library
     /// with its stream facts and any tags symphonia can surface. The
-    /// fallback loses ReplayGain and cover art, which are not readable via
+    /// fallback loses `ReplayGain` and cover art, which are not readable via
     /// symphonia's metadata layer.
     pub fn read_all(
         &self,

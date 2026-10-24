@@ -1246,10 +1246,27 @@ impl RiffApp {
         {
             let _ = out.tray_tooltip.take();
         }
-        #[cfg(not(target_os = "linux"))]
-        if !self.window_hidden {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // The frame's notification decisions become OS toasts here, drained
+        // like the tooltip above so a steady frame costs nothing. `show`
+        // swallows its own failures: the status line already carries the same
+        // text in-app, and a toast the OS refused is not worth a second
+        // complaint.
+        for notice in std::mem::take(&mut out.notifications) {
+            crate::ui::notifications::show(&notice);
         }
+        // The repaint heartbeat runs at two tempos. Visible, the 100 ms tick
+        // keeps the drains and the board responsive. Hidden to tray, a 1 s
+        // heartbeat replaces the old full stop — which froze the feedback
+        // surface exactly when system notifications matter, because a scan
+        // that finished while hidden would never be drained until the tray
+        // next woke the loop. One second is enough: nothing animates while
+        // hidden, only the polls need to run.
+        #[cfg(not(target_os = "linux"))]
+        ctx.request_repaint_after(if self.window_hidden {
+            std::time::Duration::from_secs(1)
+        } else {
+            std::time::Duration::from_millis(100)
+        });
         #[cfg(target_os = "linux")]
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }

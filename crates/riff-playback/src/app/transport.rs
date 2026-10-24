@@ -30,13 +30,21 @@ pub trait Transport: Send {
     /// already loaded the queue (via `Transport::load_queue` or similar).
     fn play(&self, track: TrackId);
 
+    /// Start a **fresh random session** from the Library: the engine picks a
+    /// Track, discards any parked queue, and starts the pick as a plain
+    /// `Play`. An empty Library is a silent no-op. No default: a silent
+    /// default in a test double would record an intent that never happened.
+    fn play_random(&self);
+
     /// Pause playback.
     fn pause(&self);
 
     /// Resume playback from pause.
     fn resume(&self);
 
-    /// Stop playback and clear the queue.
+    /// Stop playback. The Playback Queue is left parked — the engine tears
+    /// down the current stream and Track but does not clear the queued
+    /// Tracks.
     fn stop(&self);
 
     /// Seek to `secs` within the current track (clamped to `[0, total]`).
@@ -129,6 +137,10 @@ impl ChannelTransport {
 impl Transport for ChannelTransport {
     fn play(&self, track: TrackId) {
         self.send(PlaybackCommand::Play(track));
+    }
+
+    fn play_random(&self) {
+        self.send(PlaybackCommand::PlayRandom);
     }
 
     fn pause(&self) {
@@ -384,6 +396,20 @@ mod tests {
             "the batch mutates the queue once under one lock"
         );
         assert!(rx.try_recv().is_err(), "no per-track AddToQueue fan-out");
+    }
+
+    #[test]
+    fn play_random_sends_exactly_one_play_random() {
+        let (t, rx) = transport();
+
+        t.play_random();
+
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(PlaybackCommand::PlayRandom),
+            "the intent is the command — the pick happens engine-side"
+        );
+        assert!(rx.try_recv().is_err(), "one intent, one send");
     }
 
     /// The one thing that separates `add_many` from `play_many`: queueing a

@@ -21,6 +21,8 @@
 //! stated here rather than enforced at runtime: enforcing it would drag a
 //! library-mutation port into the domain layer.
 
+use fastrand::Rng;
+
 use crate::domain::queue::PlaybackQueue;
 use riff_persistence::track::TrackId;
 
@@ -92,5 +94,51 @@ impl Continuation {
         let index = library.iter().position(|id| id == wanted);
         queue.tracks = library;
         queue.current_index = index;
+    }
+
+    /// The pure pick behind a **fresh random session**: one Track from `ids`,
+    /// uniformly at random. `None` encodes an empty Library — there is no
+    /// Track to start, so the session has no answer. The sibling of [`Self::fill`]
+    /// asked *before* any queue is touched: the caller picks, discards, and
+    /// re-asks `fill` through the normal start path.
+    pub fn pick_random(ids: &[TrackId]) -> Option<TrackId> {
+        // `Rng::usize` panics on an empty range, and an empty Library has no
+        // answer to give anyway.
+        if ids.is_empty() {
+            return None;
+        }
+        let mut rng = Rng::new();
+        ids.get(rng.usize(0..ids.len())).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(s: &str) -> TrackId {
+        TrackId(s.to_string())
+    }
+
+    /// An empty Library has no pick: the `None` the engine turns into a
+    /// silent no-op.
+    #[test]
+    fn an_empty_library_has_no_pick() {
+        assert_eq!(Continuation::pick_random(&[]), None);
+    }
+
+    /// Every draw comes from the list it was asked over — the pick never
+    /// invents a Track. Enough draws that a bug answering a fixed id cannot
+    /// pass by luck.
+    #[test]
+    fn every_pick_is_a_member_of_the_library() {
+        let ids = vec![id("a"), id("b"), id("c"), id("d")];
+        for _ in 0..64 {
+            let picked = Continuation::pick_random(&ids).expect("a non-empty list has a pick");
+            assert!(
+                ids.contains(&picked),
+                "{picked:?} is not one of the ids asked over"
+            );
+        }
     }
 }

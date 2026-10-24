@@ -70,6 +70,7 @@ struct SilentTransport;
 
 impl Transport for SilentTransport {
     fn play(&self, _track: TrackId) {}
+    fn play_random(&self) {}
     fn pause(&self) {}
     fn resume(&self) {}
     fn stop(&self) {}

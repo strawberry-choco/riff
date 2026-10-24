@@ -1560,6 +1560,9 @@ pub mod mocks {
     #[derive(Debug, Clone, PartialEq)]
     pub enum TransportIntent {
         Play(TrackId),
+        /// A fresh random session start: the button had no selection behind
+        /// it, so the engine picks.
+        PlayRandom,
         PlayMany(TrackId, Vec<TrackId>),
         PlayNext(TrackId),
         AddToQueue(TrackId),
@@ -1621,6 +1624,10 @@ pub mod mocks {
     impl riff_backend::app::transport::Transport for MockTransport {
         fn play(&self, track: TrackId) {
             self.record(TransportIntent::Play(track));
+        }
+
+        fn play_random(&self) {
+            self.record(TransportIntent::PlayRandom);
         }
 
         fn play_many(&self, first: TrackId, rest: Vec<TrackId>) {

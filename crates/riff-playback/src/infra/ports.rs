@@ -76,11 +76,12 @@ pub(crate) enum QueueStart<'a> {
 /// trigger and the once-only idle auto-play, in one place, answering every
 /// Playback Command that can start or grow the Playback Queue.
 ///
-/// The split is deliberate: the *what* of a Queue Fill — which Tracks the queue
-/// holds, and which of them is current — is [`Continuation`]'s answer, and this
-/// type only decides the *when*. It is what makes the engine's own claim
-/// literally true: the engine holds a Library port, and asks it for nothing
-/// about queue order.
+/// The split is deliberate: *which* Track a start plays stays
+/// [`Continuation`]'s answer, while this type decides when a start becomes a
+/// `Play` and performs the queue writes each start needs — a Fill's
+/// replacement, a random session's discard. It is what makes the engine's own
+/// claim literally true: the engine holds a Library port, and asks it for
+/// nothing about queue order.
 ///
 /// It reads three facts and holds no audio: the Playback Session, the engine's
 /// own command channel (how a start is re-dispatched as a `Play` the engine
@@ -175,6 +176,33 @@ impl PlaybackStart {
             // here so every start goes through the engine's one load path.
             let _ = self.cmd_tx.send(PlaybackCommand::Play(id));
         }
+    }
+
+    /// Start a **fresh random session**: pick one Track from the Library,
+    /// discard whatever queue is parked, and re-dispatch the pick as a `Play`
+    /// the engine then loads — so the start materializes as the Queue Fill
+    /// every fresh session gets, indistinguishable from a selection play.
+    ///
+    /// An empty Library (no pick) or a store error is a silent no-op,
+    /// deliberate and matching the Fill branch's `&& let Ok` precedent: a
+    /// persistently erroring store is set aside at startup, and this type
+    /// holds no update channel to surface an error through.
+    ///
+    /// The re-dispatch is unconditional, never through the idle gate:
+    /// `current_track_id` survives a natural queue-end EOF, so gating the
+    /// `Play` on "nothing is playing" would swallow a start a stopped session
+    /// asked for.
+    pub(crate) fn start_random_session(&self) {
+        // No pick, no start: an unreadable store and an empty Library both
+        // leave the parked queue exactly as they found it.
+        let Ok(library) = self.library.library_track_ids() else {
+            return;
+        };
+        let Some(picked) = Continuation::pick_random(&library) else {
+            return;
+        };
+        self.session.lock_or_recover().queue.clear();
+        let _ = self.cmd_tx.send(PlaybackCommand::Play(picked));
     }
 }
 

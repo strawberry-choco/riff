@@ -889,6 +889,10 @@ pub mod geometry {
         pub const QUEUE_PANEL_MAX_LIST_H: f32 = 320.0;
         /// Height of the panel's "Up Next" header line.
         pub const QUEUE_PANEL_HEADER_H: f32 = 28.0;
+        /// Height of the queue panel's body while the queue is empty: the
+        /// shared empty-state block — a `TEXT_XL` title, a 6px gap and a
+        /// `TEXT_XS` hint, ≈46px tall — plus room to breathe on both sides.
+        pub const QUEUE_PANEL_EMPTY_LIST_H: f32 = 64.0;
         /// Width of the now-playing zone (cover + two text lines) at its
         /// widest.
         pub const NOW_PLAYING_W: f32 = 250.0;

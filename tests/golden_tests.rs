@@ -125,8 +125,9 @@ mod tests {
         /// sized by the same `QUEUE_PANEL_W` / header / list tokens.
         QueuePanel {
             /// How many Up Next rows the sheet is showing; its height is the
-            /// header plus `rows` row heights, capped at
-            /// `QUEUE_PANEL_MAX_LIST_H`, plus the frame's own margin.
+            /// header plus `rows` row heights — or the empty-state floor when
+            /// `rows` is 0 — capped at `QUEUE_PANEL_MAX_LIST_H`, plus the
+            /// frame's own margin.
             rows: usize,
         },
     }
@@ -172,10 +173,15 @@ mod tests {
                 ),
                 Self::QueuePanel { rows } => {
                     use riff_gui_theme::theme::geometry::playerbar::{
-                        QUEUE_PANEL_HEADER_H, QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W,
+                        QUEUE_PANEL_EMPTY_LIST_H, QUEUE_PANEL_HEADER_H, QUEUE_PANEL_MAX_LIST_H,
+                        QUEUE_PANEL_W,
                     };
-                    let list_h = (rows as f32 * riff_gui_theme::theme::geometry::sidebar::ROW_H)
-                        .min(QUEUE_PANEL_MAX_LIST_H);
+                    let list_h = if rows == 0 {
+                        QUEUE_PANEL_EMPTY_LIST_H
+                    } else {
+                        (rows as f32 * riff_gui_theme::theme::geometry::sidebar::ROW_H)
+                            .min(QUEUE_PANEL_MAX_LIST_H)
+                    };
                     let height = QUEUE_PANEL_HEADER_H + list_h + 2.0 * 8.0;
                     let right = size.x - 16.0;
                     let bottom = size.y - theme::PLAYERBAR_H - 8.0;

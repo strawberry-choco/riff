@@ -24,8 +24,9 @@ use riff_gui_components::linear;
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::playerbar::{
     CENTER_MIN_W, COVER, GHOST_BTN, MIN_INNER_H, MIN_TEXT_W, NOW_PLAYING_GAP, NOW_PLAYING_LINE_GAP,
-    NOW_PLAYING_MIN_W, NOW_PLAYING_W, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_HEADER_H,
-    QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, TEXT_HIDE_META_W, VOLUME_THUMB, VOLUME_W,
+    NOW_PLAYING_MIN_W, NOW_PLAYING_W, PLAY_BTN, QUEUE_LABEL_SPACE, QUEUE_PANEL_EMPTY_LIST_H,
+    QUEUE_PANEL_HEADER_H, QUEUE_PANEL_MAX_LIST_H, QUEUE_PANEL_W, TEXT_HIDE_META_W, VOLUME_THUMB,
+    VOLUME_W,
 };
 use riff_gui_theme::theme::geometry::seek::{TIME_LABEL_SPACE, TRACK_H};
 use riff_gui_theme::theme::geometry::sidebar::ROW_H;
@@ -801,7 +802,11 @@ pub fn show_queue_panel(
     entries: &[super::sidebar::UpNextEntry],
     actions: &mut Vec<PlayerBarAction>,
 ) {
-    let list_h = (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H);
+    let list_h = if entries.is_empty() {
+        QUEUE_PANEL_EMPTY_LIST_H
+    } else {
+        (entries.len() as f32 * ROW_H).min(QUEUE_PANEL_MAX_LIST_H)
+    };
 
     egui::Area::new(egui::Id::new("playerbar_queue_panel"))
         .order(egui::Order::Foreground)

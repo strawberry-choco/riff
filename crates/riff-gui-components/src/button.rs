@@ -15,6 +15,7 @@
 use egui;
 
 use riff_gui_theme::icons::{Icon, IconCache};
+use riff_gui_theme::theme::geometry::text_button::ICON_CHARGE;
 use riff_gui_theme::theme::{self, Palette, styled_font};
 
 /// An icon button's allocated target and this frame's interaction state,
@@ -172,12 +173,6 @@ fn wash_tween(
 }
 
 // --- Semantic text buttons -------------------------------------------------------
-
-/// The room a leading glyph charges ahead of the label, as [`paint_text_button`]
-/// lays it out: a 16px icon plus the 8px gap. One spelling for the paint and
-/// the flow sizing, so a button's measured width can never drift from its own
-/// paint.
-const ICON_CHARGE: f32 = 16.0 + 8.0;
 
 /// The five semantic button roles the design system speaks. Each maps to one
 /// idle paint; hover, focus and disabled states are shared mechanics layered

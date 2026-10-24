@@ -1221,6 +1221,17 @@ pub mod geometry {
         pub const NAV_ITEM_H: f32 = 32.0;
     }
 
+    /// The shared semantic text button (`riff_gui_components::button`): the
+    /// room a leading glyph charges ahead of the label.
+    pub mod text_button {
+        /// The charge a leading glyph takes ahead of the label, as the
+        /// button's paint lays it out: a 16px icon plus the 8px gap before
+        /// the text. One spelling for the paint and the flow sizing, so a
+        /// button's measured width can never drift from its own paint.
+        /// Previously declared in the component; the value is unchanged.
+        pub const ICON_CHARGE: f32 = 16.0 + 8.0;
+    }
+
     /// The inline option-list selector (`riff_gui_components::option_list`):
     /// the generic single-choice row stack the rule editor will offer for its
     /// Matchable Field, comparison and library-derived value picks. The row

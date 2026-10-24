@@ -4719,13 +4719,12 @@ mod tests {
 
     #[test]
     fn test_play_selected_plays_the_selected_track() {
-        let (mut playback, mut library, transport) = applied(PlayerBarAction::PlaySelected); // no selection yet
-        assert!(
-            transport.recorded().is_empty(),
-            "no selection means no play intent"
-        );
-
-        library.selected_track = Some(TrackId("song.flac".to_string()));
+        let mut playback = PlaybackSession::default();
+        let mut library = LibrarySession {
+            selected_track: Some(TrackId("song.flac".to_string())),
+            ..LibrarySession::default()
+        };
+        let transport = crate::mocks::MockTransport::new();
         apply_player_bar_action(
             PlayerBarAction::PlaySelected,
             &mut library,
@@ -4734,7 +4733,20 @@ mod tests {
         );
         assert_eq!(
             transport.recorded(),
-            vec![TransportIntent::Play(TrackId("song.flac".to_string()))]
+            vec![TransportIntent::Play(TrackId("song.flac".to_string()))],
+            "a selection still plays the selection"
+        );
+    }
+
+    /// The stopped fallback: with no selection the primary button starts a
+    /// fresh random session instead of doing nothing.
+    #[test]
+    fn test_play_with_no_selection_starts_a_random_session() {
+        let (_, _, transport) = applied(PlayerBarAction::PlaySelected);
+        assert_eq!(
+            transport.recorded(),
+            vec![TransportIntent::PlayRandom],
+            "no selection starts a fresh random session"
         );
     }
     #[test]

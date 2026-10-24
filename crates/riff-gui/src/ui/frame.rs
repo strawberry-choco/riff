@@ -1272,12 +1272,14 @@ pub fn apply_player_bar_action(
         Action::Previous => transport.previous(),
         Action::Pause => transport.pause(),
         Action::Resume => transport.resume(),
-        Action::PlaySelected => {
-            // Pre-restyle behavior: with nothing selected, play does nothing.
-            if let Some(selected) = library.selected_track.clone() {
-                transport.play(selected);
-            }
-        }
+        Action::PlaySelected => match library.selected_track.clone() {
+            // A selection plays the selection — the unchanged documented
+            // behavior.
+            Some(selected) => transport.play(selected),
+            // Nothing selected: a fresh random session from the Library, so a
+            // stopped app's primary button never does nothing.
+            None => transport.play_random(),
+        },
         Action::Next => transport.next(),
         Action::Stop => transport.stop(),
         Action::Seek(target) => {

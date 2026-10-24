@@ -169,7 +169,8 @@ pub enum PlayerBarAction {
     Pause,
     /// Resume playback (primary button while paused).
     Resume,
-    /// Start the selected track (primary button while stopped).
+    /// Start the selected track — or, with no selection, a fresh random
+    /// session from the Library (primary button while stopped).
     PlaySelected,
     /// Skip to the next track.
     Next,

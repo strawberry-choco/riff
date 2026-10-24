@@ -261,6 +261,8 @@ impl AudioEngine {
                             .send(PlaybackUpdate::StateChanged(PlaybackState::Playing));
                     }
 
+                    PlaybackCommand::PlayRandom => self.start.start_random_session(),
+
                     PlaybackCommand::Pause => {
                         if output_started {
                             stop_stream(self.output.as_mut(), &mut output_started);
@@ -949,6 +951,96 @@ mod tests {
             f.commands.try_recv().ok(),
             Some(PlaybackCommand::Play(next)),
             "and started, because nothing was playing"
+        );
+    }
+
+    /// A Library whose reads fail — the store-error side of the port.
+    struct UnreadableLibrary;
+
+    impl PlaybackLibrary for UnreadableLibrary {
+        fn get_track(&self, _id: &TrackId) -> Result<Option<Track>, StoreError> {
+            Err(StoreError::InvalidOperation("unreadable".into()))
+        }
+
+        fn library_track_ids(&self) -> Result<Vec<TrackId>, StoreError> {
+            Err(StoreError::InvalidOperation("unreadable".into()))
+        }
+    }
+
+    /// A random session over a parked queue and a populated Library: the
+    /// parked queue is discarded, and exactly one `Play` is re-dispatched —
+    /// of a Track the Library actually holds, never of the parked leftovers.
+    #[test]
+    fn a_random_session_discards_the_parked_queue_and_re_dispatches_the_pick() {
+        let f = fixture(&["music/a.wav", "music/b.wav", "music/c.wav"]);
+        {
+            let mut session = f.session.lock_or_recover();
+            session.queue.append(id("music/parked.wav"));
+            session.queue.current_index = Some(0);
+        }
+
+        f.start.start_random_session();
+
+        let picked = match f.commands.try_recv().ok() {
+            Some(PlaybackCommand::Play(picked)) => picked,
+            other => panic!("expected exactly one re-dispatched Play, got {other:?}"),
+        };
+        assert!(
+            ["music/a.wav", "music/b.wav", "music/c.wav"].contains(&picked.0.as_str()),
+            "the pick is a Library Track, not {picked:?}"
+        );
+        assert!(
+            f.commands.try_recv().is_err(),
+            "exactly once — a second dispatch would restart the Track"
+        );
+        assert!(
+            f.session.lock_or_recover().queue.tracks.is_empty(),
+            "the parked queue is discarded; the fresh Fill is the re-dispatched Play's to make"
+        );
+    }
+
+    /// An empty Library has no pick, so a random session is a silent no-op:
+    /// nothing is dispatched and the parked queue survives untouched.
+    #[test]
+    fn an_empty_library_starts_nothing_and_leaves_the_parked_queue() {
+        let f = fixture(&[]);
+        {
+            let mut session = f.session.lock_or_recover();
+            session.queue.append(id("music/parked.wav"));
+            session.queue.current_index = Some(0);
+        }
+
+        f.start.start_random_session();
+
+        assert!(f.commands.try_recv().is_err(), "no pick, no start");
+        let session = f.session.lock_or_recover();
+        assert_eq!(
+            session.queue.tracks,
+            vec![id("music/parked.wav")],
+            "the no-op does not clear the queue it could not replace"
+        );
+        assert_eq!(session.queue.current_index, Some(0));
+    }
+
+    /// A store error is the same silent no-op: the session is not touched on
+    /// the strength of a read that failed.
+    #[test]
+    fn an_unreadable_library_starts_nothing_and_leaves_the_parked_queue() {
+        let (cmd_tx, commands) = unbounded();
+        let session = Arc::new(Mutex::new(PlaybackSession::default()));
+        session
+            .lock_or_recover()
+            .queue
+            .append(id("music/parked.wav"));
+        let start = PlaybackStart::new(session.clone(), cmd_tx, Arc::new(UnreadableLibrary));
+
+        start.start_random_session();
+
+        assert!(commands.try_recv().is_err(), "no pick, no start");
+        assert_eq!(
+            session.lock_or_recover().queue.tracks,
+            vec![id("music/parked.wav")],
+            "the no-op does not clear the queue it could not replace"
         );
     }
 }

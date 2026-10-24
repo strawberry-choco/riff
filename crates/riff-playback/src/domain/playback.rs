@@ -34,6 +34,16 @@ pub enum PlaybackCommand {
     /// such a queue re-sends this, so the provenance rides to every member;
     /// a plain `Play` is a single-Track choice and levels the Track's own.
     PlayAlbum(riff_persistence::track::TrackId),
+    /// A user-pressed start of a **fresh random session**: the engine picks a
+    /// Track from the Library, discards any parked queue, and re-dispatches
+    /// the pick as a plain `Play`, so the start is indistinguishable from a
+    /// selection play — the same Queue Fill, `ReplayGain` leveling, and
+    /// TrackChanged/StateChanged announcements ride along.
+    ///
+    /// Caveat: the discard and the re-dispatch are two steps on the same FIFO
+    /// channel, so a user `Stop` sent in the window between the clear and the
+    /// re-dispatched `Play` being polled does not cancel the start.
+    PlayRandom,
     Pause,
     Resume,
     Stop,

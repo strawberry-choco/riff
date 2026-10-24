@@ -204,7 +204,7 @@ pub struct PassPrefs {
 
 /// UI display flags grouped out of [`LibrarySession`] so the top-level state
 /// struct stays cohesive.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each persisted display preference is an independent toggle"
@@ -231,6 +231,30 @@ pub struct UiFlags {
     /// honouring the listener's system reduce-motion preference. `false`
     /// (the default) leaves motion as it is (persisted, restored on launch).
     pub reduce_motion: bool,
+    /// `true` = finished background work (a Library Scan, a `ReplayGain`
+    /// Pass, a playback failure) raises an OS notification in addition to
+    /// the in-app status line (persisted; inert on Linux, which has no
+    /// notifier integration). `true` (the default) matches the store
+    /// column's default of 1, so a session that predates the first hydrate
+    /// and a fresh store agree before the first read ever happens.
+    pub system_notifications: bool,
+}
+
+/// Manual because one flag breaks the all-false pattern: the store column
+/// `system_notifications` defaults to 1, and a derived `Default` here would
+/// make an un-hydrated session silently run notifications-off until the
+/// first `Preferences::hydrate` lands.
+impl Default for UiFlags {
+    fn default() -> Self {
+        Self {
+            advanced_mode: false,
+            high_contrast: false,
+            smart_lists_collapsed: false,
+            close_quits_app: false,
+            reduce_motion: false,
+            system_notifications: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

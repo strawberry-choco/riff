@@ -74,10 +74,13 @@ fn table_info(store: &SqliteStore, table: &str) -> Vec<(String, String, bool, i6
 }
 
 /// The fully-populated `schema_migrations` inventory this build must record:
-/// the nineteen versions that shipped before, plus this ticket's `020`, in
-/// order and with no gaps.
+/// every shipped version, in order and with no gaps. Migration 021 (the
+/// system-notifications preference) shipped after this ticket's `020`; the
+/// inventory here is deliberately derived, not hand-listed, so a later
+/// migration does not have to touch this file's history fixture again —
+/// only the count-style assertions below move with the shipped set.
 fn expected_versions() -> Vec<i64> {
-    (1..=20).collect()
+    (1..=21).collect()
 }
 
 #[test]
@@ -648,7 +651,7 @@ fn test_reopening_a_store_written_by_this_build_reapplies_nothing() {
     );
     assert_eq!(
         count_of(&reopened, "SELECT COUNT(*) FROM schema_migrations"),
-        20,
+        21,
         "no duplicate bookkeeping row"
     );
     assert_eq!(
@@ -663,6 +666,8 @@ fn test_reopening_a_store_written_by_this_build_reapplies_nothing() {
 
 /// A rolled-back store — migration 020's row forgotten and its three tables
 /// dropped — so the next open genuinely re-applies the pending migration.
+/// Later-shipped migrations (021) stay recorded: the point is a pending 020,
+/// not a period-accurate store.
 fn roll_back_to_019(store: &mut SqliteStore) {
     store
         .with_connection(|conn| {
@@ -680,8 +685,8 @@ fn roll_back_to_019(store: &mut SqliteStore) {
     );
     assert_eq!(
         versions.last(),
-        Some(&19),
-        "the rolled-back store must sit exactly where an earlier build left it"
+        Some(&21),
+        "the rolled-back store forgets only migration 020's row; every other recorded migration stays"
     );
     assert_eq!(
         count_of(

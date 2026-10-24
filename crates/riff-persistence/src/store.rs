@@ -124,6 +124,12 @@ pub struct ScalarSettings {
     /// honouring the listener's system reduce-motion preference. `false`
     /// (the default) leaves motion as it is.
     pub reduce_motion: bool,
+    /// Whether finished background work (a Library Scan, a `ReplayGain` Pass,
+    /// a playback failure) raises an OS notification in addition to the
+    /// in-app status line. `true` (the default) — the moments this covers are
+    /// exactly the ones the listener waits out with the window hidden, so the
+    /// feature ships on. Inert on Linux, which has no notifier integration.
+    pub system_notifications: bool,
 }
 
 impl Default for ScalarSettings {
@@ -150,6 +156,7 @@ impl Default for ScalarSettings {
             replaygain_pass_track: false,
             replaygain_pass_album: false,
             reduce_motion: false,
+            system_notifications: true,
         }
     }
 }

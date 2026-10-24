@@ -517,6 +517,18 @@ const MIGRATIONS: &[Migration] = &[
           position    INTEGER NOT NULL
         );",
     },
+    Migration {
+        version: 21,
+        name: "021_system_notifications",
+        // Finished background work raises an OS notification alongside the
+        // in-app status line. Unlike the add-a-boolean precedent of
+        // migrations 009/013/017/019 the default is 1: the covered moments
+        // (scan finished, pass finished, playback failed) are exactly the
+        // ones the listener waits out with the window hidden, so the feature
+        // ships on and the Settings card is how it is turned off.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN system_notifications INTEGER NOT NULL DEFAULT 1 CHECK (system_notifications IN (0, 1));",
+    },
 ];
 
 /// Location of the Application Store database file: `riff.sqlite3` in the
@@ -4052,7 +4064,7 @@ impl SettingsStore for SqliteStore {
                             skip_hidden_files, scan_formats, read_embedded_artwork,
                             smart_lists_collapsed, close_quits_app,
                             replaygain_pass_track, replaygain_pass_album,
-                            replaygain_mode, reduce_motion
+                            replaygain_mode, reduce_motion, system_notifications
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -4077,6 +4089,7 @@ impl SettingsStore for SqliteStore {
                             replaygain_pass_album: row.get::<_, i64>(12)? != 0,
                             replaygain_mode: row.get(13)?,
                             reduce_motion: row.get::<_, i64>(14)? != 0,
+                            system_notifications: row.get::<_, i64>(15)? != 0,
                         })
                     },
                 )
@@ -4132,7 +4145,7 @@ impl SettingsStore for SqliteStore {
                          read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
                          close_quits_app = ?11, replaygain_pass_track = ?12,
                          replaygain_pass_album = ?13, replaygain_mode = ?14,
-                         reduce_motion = ?15
+                         reduce_motion = ?15, system_notifications = ?16
                      WHERE id = 1",
                     rusqlite::params![
                         scalars.volume,
@@ -4150,6 +4163,7 @@ impl SettingsStore for SqliteStore {
                         i64::from(scalars.replaygain_pass_album),
                         scalars.replaygain_mode,
                         i64::from(scalars.reduce_motion),
+                        i64::from(scalars.system_notifications),
                     ],
                 )
                 .map(|_| ())

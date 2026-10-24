@@ -107,6 +107,7 @@ impl Preferences {
             session.ui_flags.smart_lists_collapsed = settings.scalars.smart_lists_collapsed;
             session.ui_flags.close_quits_app = settings.scalars.close_quits_app;
             session.ui_flags.reduce_motion = settings.scalars.reduce_motion;
+            session.ui_flags.system_notifications = settings.scalars.system_notifications;
             session.scan_prefs = ScanPrefs::from(&settings.scalars);
             session.pass_prefs = PassPrefs {
                 track_values: settings.scalars.replaygain_pass_track,
@@ -169,6 +170,7 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         read_embedded_artwork: library.scan_prefs.read_embedded_artwork,
         close_quits_app: library.ui_flags.close_quits_app,
         reduce_motion: library.ui_flags.reduce_motion,
+        system_notifications: library.ui_flags.system_notifications,
         replaygain_pass_track: library.pass_prefs.track_values,
         replaygain_pass_album: library.pass_prefs.album_values,
     }

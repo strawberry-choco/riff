@@ -33,11 +33,12 @@ fn test_store_fresh_start_creates_file_and_applies_initial_migration_once() {
     //   `METADATA_VERSION`) + v16 (ReplayGain album peak) + v17 (the
     //   ReplayGain Mode preference) + v18 (the pass's Settings gating)
     //   + v19 (the Reduce Motion accessibility preference) + v20 (the Custom
-    //   Smart Playlist rule tables).
+    //   Smart Playlist rule tables) + v21 (the system-notifications
+    //   preference).
     assert_eq!(
         applied.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
         ]
     );
 }
@@ -90,11 +91,11 @@ fn test_store_double_apply_is_idempotent() {
             mapped.collect()
         })
         .expect("reading schema_migrations must work");
-    assert_eq!(rows.len(), 20, "no duplicate migration rows allowed");
+    assert_eq!(rows.len(), 21, "no duplicate migration rows allowed");
     assert_eq!(
         rows.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
         ]
     );
 
@@ -128,14 +129,15 @@ fn test_store_migration_010_drops_the_missing_artwork_strategy_column() {
     // non-default scalars that 010's table rebuild must preserve. The later
     // app_settings-column migrations (013 `close_quits_app`, 015 the
     // metadata version, 017 the ReplayGain Mode, 018 the pass's Settings
-    // gating, 019 Reduce Motion) are also un-applied, because
+    // gating, 019 Reduce Motion, 021 system notifications) are also
+    // un-applied, because
     // 010 rebuilds the settings row from a column snapshot predating them;
     // re-applying them on the way back keeps the newest scalars present for
     // reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version IN (10, 13, 15, 17, 18, 19);
+                "DELETE FROM schema_migrations WHERE version IN (10, 13, 15, 17, 18, 19, 21);
                  ALTER TABLE app_settings
                    ADD COLUMN missing_artwork_strategy TEXT NOT NULL DEFAULT 'generated_colour'
                      CHECK (missing_artwork_strategy IN ('generated_colour'));
@@ -361,7 +363,7 @@ fn test_store_checksum_tamper_is_fatal() {
             )
             .expect("the tampered bookkeeping row must still be there");
     assert_eq!(
-        tampered, 20,
+        tampered, 21,
         "the store's own migration rows are untouched: nothing re-applied, nothing replaced"
     );
 }
@@ -857,6 +859,78 @@ fn test_store_migration_019_adds_the_reduce_motion_column() {
     );
 }
 
+/// Migration 021 adds the system-notifications preference. Unlike the
+/// add-a-boolean family it follows (009/013/017/019), the column arrives with
+/// `DEFAULT 1`: the moments it covers — scan finished, pass finished,
+/// playback failed — are the ones the listener waits out with the window
+/// hidden, so the feature ships on and the Settings card is the opt-out. A
+/// store that predates the migration upgrades to notifications on, and the
+/// opt-out round-trips once set.
+#[test]
+fn test_store_migration_021_adds_the_system_notifications_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("riff.sqlite3");
+
+    // A fully migrated fresh store is the base; roll it back to the pre-021
+    // state, exactly as an install that predated the migration would be.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx).unwrap();
+        store
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    "DELETE FROM schema_migrations WHERE version = 21;
+                     ALTER TABLE app_settings DROP COLUMN system_notifications;",
+                )
+            })
+            .expect("rolling back to the pre-021 schema must work");
+    }
+
+    // Reopening applies the pending migration 021: the column arrives with
+    // DEFAULT 1, so the preference reads back on.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let upgraded = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening must succeed");
+        let scalars = upgraded
+            .load_settings()
+            .expect("loading settings from the upgraded store must work")
+            .scalars;
+        assert!(
+            scalars.system_notifications,
+            "migration 021 defaults system_notifications on, so an upgraded store starts notifying"
+        );
+    }
+
+    // Opt out, then "restart": the value survives in its typed column.
+    {
+        let (changes_tx, _changes_rx) =
+            crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+        let mut store = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+            .expect("reopening for the save must succeed");
+        store
+            .save_scalars(&riff_persistence::store::ScalarSettings {
+                system_notifications: false,
+                ..riff_persistence::store::ScalarSettings::default()
+            })
+            .expect("saving scalars must work");
+    }
+    let (changes_tx, _changes_rx) =
+        crossbeam_channel::unbounded::<riff_persistence::store::StoreChanged>();
+    let reopened = riff_infra::store::SqliteStore::open_and_migrate(&db_path, changes_tx)
+        .expect("reopening must succeed");
+    let scalars = reopened
+        .load_settings()
+        .expect("loading settings must work")
+        .scalars;
+    assert!(
+        !scalars.system_notifications,
+        "system_notifications = false must survive the round trip"
+    );
+}
+
 /// Migration 012 retires the list/grid browser layout: the persisted scalar
 /// column is dropped with the concept. Simulate a store that predates the
 /// migration — un-apply 012 and re-add the column — then reopen through the
@@ -873,13 +947,14 @@ fn test_store_migration_012_drops_the_browser_layout_column() {
     // engagement and some non-default scalars that the rebuild must preserve.
     // The later app_settings-column migrations (013 `close_quits_app`, 015
     // the metadata version, 017 the ReplayGain Mode, 018 the pass's Settings
-    // gating, 019 Reduce Motion) are also un-applied, because 012 rebuilds the
+    // gating, 019 Reduce Motion, 021 system notifications) are also
+    // un-applied, because 012 rebuilds the
     // settings row from a column snapshot predating them; re-applying them
     // keeps the newest scalars present for reads.
     store
         .with_connection(|conn| {
             conn.execute_batch(
-                "DELETE FROM schema_migrations WHERE version IN (12, 13, 15, 17, 18, 19);
+                "DELETE FROM schema_migrations WHERE version IN (12, 13, 15, 17, 18, 19, 21);
                  ALTER TABLE app_settings
                    ADD COLUMN browser_layout INTEGER NOT NULL DEFAULT 0
                      CHECK (browser_layout IN (0, 1));

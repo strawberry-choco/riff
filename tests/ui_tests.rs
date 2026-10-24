@@ -10975,6 +10975,7 @@ mod playback_notice_ui_tests {
     #[test]
     fn test_playback_typed_notice_routes_message_to_status_line() {
         let mut board = FeedbackBoard::default();
+        let mut notifications = Vec::new();
 
         apply_backend_events(
             vec![notice(
@@ -10983,6 +10984,8 @@ mod playback_notice_ui_tests {
                 "Playback error: boom",
             )],
             &mut board,
+            true,
+            &mut notifications,
         );
 
         assert_eq!(
@@ -10995,11 +10998,48 @@ mod playback_notice_ui_tests {
             Some(&NoticeSource::Playback),
             "the notice's playback source survives the boundary"
         );
+        assert_eq!(
+            notifications.len(),
+            1,
+            "a playback notice is newsworthy off-screen and rides the notification list"
+        );
+        assert_eq!(
+            notifications[0].message, "Playback error: boom",
+            "the notification carries the status line's own wording"
+        );
+    }
+
+    #[test]
+    fn test_a_playback_notice_does_not_notify_when_the_preference_is_off() {
+        let mut board = FeedbackBoard::default();
+        let mut notifications = Vec::new();
+
+        apply_backend_events(
+            vec![notice(
+                NoticeSource::Playback,
+                NoticeSeverity::Error,
+                "Playback error: boom",
+            )],
+            &mut board,
+            false,
+            &mut notifications,
+        );
+
+        assert!(
+            notifications.is_empty(),
+            "the gate is applied at assembly: off means the list stays empty"
+        );
+        assert_eq!(
+            board.display_message().as_deref(),
+            Some("Playback error: boom"),
+            "the status line is unaffected by the notification preference"
+        );
     }
 
     #[test]
     fn test_scan_notice_does_not_erase_a_live_playback_error() {
         let mut board = FeedbackBoard::default();
+        let mut notifications = Vec::new();
         // A playback error is already on the board.
         apply_backend_events(
             vec![notice(
@@ -11008,8 +11048,11 @@ mod playback_notice_ui_tests {
                 "Playback error: boom",
             )],
             &mut board,
+            true,
+            &mut notifications,
         );
         // A lower-severity Library Scan update then arrives.
+        let mut scan_notifications = Vec::new();
         apply_backend_events(
             vec![notice(
                 NoticeSource::Scan,
@@ -11017,6 +11060,8 @@ mod playback_notice_ui_tests {
                 "Scanning 12 files",
             )],
             &mut board,
+            true,
+            &mut scan_notifications,
         );
 
         // The scan notice lives in its own slot and cannot clobber the playback
@@ -11033,6 +11078,10 @@ mod playback_notice_ui_tests {
             Some((NoticeSource::Playback, NoticeSeverity::Error)),
             "the surviving notice keeps its source and severity"
         );
+        assert!(
+            scan_notifications.is_empty(),
+            "a non-playback notice through the inbox stays board-only: scan outcomes announce at their own settle site"
+        );
     }
 
     #[test]
@@ -11046,7 +11095,7 @@ mod playback_notice_ui_tests {
         assert!(!board.is_empty());
 
         // An empty drained batch changes nothing.
-        apply_backend_events(Vec::new(), &mut board);
+        apply_backend_events(Vec::new(), &mut board, true, &mut Vec::new());
         assert_eq!(
             board.display_message().as_deref(),
             Some("Scanning 12 files")

@@ -788,6 +788,162 @@ fn the_event_inbox_drains_before_anything_paints() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// System notifications
+// ---------------------------------------------------------------------------
+
+/// A completed scan is newsworthy off-screen: it settles once, so it rides
+/// the frame's notification list exactly once, in the status line's own
+/// wording.
+#[test]
+fn a_completed_scan_announces_one_notification() {
+    let mut harness = Harness::new();
+    harness.scans.serve(ScanOutcome::Complete {
+        path: PathBuf::from("/music"),
+        total_files: 42,
+    });
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert_eq!(
+        out.notifications.len(),
+        1,
+        "a settled scan announces exactly one notification"
+    );
+    let notice = &out.notifications[0];
+    assert_eq!(notice.source, riff_backend::app::events::NoticeSource::Scan);
+    assert_eq!(
+        notice.severity,
+        riff_backend::app::events::NoticeSeverity::Info,
+        "a clean scan is information, not a failure"
+    );
+    assert_eq!(
+        notice.message, "Scan complete: 42 tracks",
+        "the notification carries the status line's own wording"
+    );
+}
+
+/// Scan progress changes again on the very next drain, so it must never
+/// reach the notification list — the board's transient slot is its only
+/// surface.
+#[test]
+fn scan_progress_never_announces() {
+    let mut harness = Harness::new();
+    harness.scans.serve(ScanOutcome::Progress {
+        path: PathBuf::from("/music"),
+        files_found: 7,
+    });
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert!(
+        out.notifications.is_empty(),
+        "a progress line is transient and stays off the notification list"
+    );
+    assert_eq!(
+        harness.feedback.display_message().as_deref(),
+        Some("7 files"),
+        "the board still carries the progress line itself"
+    );
+}
+
+/// A playback error arriving through the inbox is the one backend-emitted
+/// notice that is newsworthy off-screen.
+#[test]
+fn a_playback_error_announces_a_notification() {
+    let mut harness = Harness::new();
+    harness.push_playback_error("Playback error: boom");
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert_eq!(out.notifications.len(), 1, "the drained notice announces");
+    assert_eq!(
+        out.notifications[0].source,
+        riff_backend::app::events::NoticeSource::Playback
+    );
+    assert_eq!(
+        out.notifications[0].severity,
+        riff_backend::app::events::NoticeSeverity::Error
+    );
+}
+
+/// A settled pass announces through the same shape: one notification, Error
+/// when tracks failed, in the outcome line's own wording.
+#[test]
+fn a_failed_pass_announces_an_error_notification() {
+    let mut harness = Harness::new();
+    harness.passes.settle(PassReport {
+        measured: 10,
+        skipped: 0,
+        failed: 2,
+        first_failure: Some("clipped sample".to_string()),
+        cancelled: false,
+    });
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert_eq!(out.notifications.len(), 1);
+    assert_eq!(
+        out.notifications[0].severity,
+        riff_backend::app::events::NoticeSeverity::Error
+    );
+    assert_eq!(
+        out.notifications[0].message,
+        "ReplayGain pass finished: 10 measured, 2 failed \u{2014} clipped sample"
+    );
+}
+
+/// A cancelled pass is the listener's own stop — the board still records the
+/// outcome line, but nothing finished, so nothing announces off-screen.
+#[test]
+fn a_cancelled_pass_settles_without_a_notification() {
+    let mut harness = Harness::new();
+    harness.passes.settle(PassReport {
+        measured: 5,
+        skipped: 0,
+        failed: 0,
+        first_failure: None,
+        cancelled: true,
+    });
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert!(
+        out.notifications.is_empty(),
+        "a cancelled pass is a stop, not an outcome"
+    );
+    assert_eq!(
+        harness.feedback.display_message().as_deref(),
+        Some("ReplayGain pass stopped: 5 tracks measured so far"),
+        "the board still records where the pass stopped"
+    );
+}
+
+/// The preference gates at assembly: turned off, the list stays empty even
+/// for the outcomes that would otherwise announce, and the status line is
+/// untouched by the choice.
+#[test]
+fn the_preference_off_leaves_the_notification_list_empty() {
+    let mut harness = Harness::new();
+    harness.library.ui_flags.system_notifications = false;
+    harness.scans.serve(ScanOutcome::Complete {
+        path: PathBuf::from("/music"),
+        total_files: 42,
+    });
+    harness.push_playback_error("Playback error: boom");
+
+    let out = harness.advance(&FrameInput::default());
+
+    assert!(
+        out.notifications.is_empty(),
+        "off means the frame assembles no notifications at all"
+    );
+    assert!(
+        harness.feedback.display_message().is_some(),
+        "the status line is unaffected by the notification preference"
+    );
+}
+
 /// Steps 10 → 13 are ordered, and the test proves it by giving each slot an
 /// action that overwrites the *same* fact: the active view. The last one wins,
 /// so the assertion names the order rather than a state.

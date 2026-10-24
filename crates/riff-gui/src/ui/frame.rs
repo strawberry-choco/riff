@@ -82,6 +82,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
+use riff_backend::app::events::NoticePayload;
 use riff_backend::app::preferences::Preferences;
 use riff_backend::app::scan_service::{ScanOutcome, Scans};
 use riff_backend::app::state::{
@@ -251,6 +252,14 @@ pub struct FrameOutput {
     /// which the draw half enacts at the tail — where the folder picker is
     /// already performed.
     pub dropped_paths: Vec<PathBuf>,
+    /// OS notifications the frame decided to raise, in decision order. Only
+    /// settled outcomes land here — a finished scan, a settled `ReplayGain`
+    /// Pass, a playback failure — never a progress line, because a progress
+    /// line changes again next drain and would walk the listener's screen
+    /// with toasts. The payloads are plain backend types, so this list keeps
+    /// the output's no-egui contract; the draw half enacts them through
+    /// [`crate::ui::notifications`], which knows the platform.
+    pub notifications: Vec<NoticePayload>,
 }
 
 impl FrameOutput {
@@ -428,7 +437,7 @@ impl<'a> Frame<'a> {
 
         self.resolve_native_close(input, &mut out);
         self.apply_theme(&mut out);
-        self.drain_backend_events();
+        self.drain_backend_events(&mut out);
         self.drain_background_outcomes(&mut out);
         out.cover_arrivals = self.settle_covers();
         self.poll_watchers();
@@ -604,7 +613,7 @@ impl<'a> Frame<'a> {
     /// playback session; this seam's events are the observability surface that
     /// proves every dispatch path (mouse/keyboard/tray) flows through one
     /// recorded Transport.
-    fn drain_backend_events(&mut self) {
+    fn drain_backend_events(&mut self, out: &mut FrameOutput) {
         let events = {
             use std::sync::PoisonError;
             self.parts
@@ -616,10 +625,33 @@ impl<'a> Frame<'a> {
         // Fold any Library-generation move into the Scroll Memory, so a
         // committed rescan turns every Section slot's fingerprint stale.
         self.parts.scroll_memory.note_backend_events(&events);
-        apply_backend_events(events, self.parts.feedback);
+        let gate_on = self.library.ui_flags.system_notifications;
+        apply_backend_events(events, self.parts.feedback, gate_on, &mut out.notifications);
     }
 
     // --- Step 4: the three background services -----------------------------
+
+    /// One newsworthy outcome, said once: the status line's slot and the
+    /// frame's OS-notification decision carry the same wording because they
+    /// are written by the same call. Gated on the persisted preference here,
+    /// at assembly — the draw half enacts whatever this list says, so the
+    /// gate is assertable headless as "the list is empty".
+    fn announce(
+        &mut self,
+        out: &mut FrameOutput,
+        source: riff_backend::app::events::NoticeSource,
+        message: String,
+        severity: riff_backend::app::events::NoticeSeverity,
+    ) {
+        if self.library.ui_flags.system_notifications {
+            out.notifications.push(NoticePayload {
+                severity: severity.clone(),
+                source: source.clone(),
+                message: message.clone(),
+            });
+        }
+        self.parts.feedback.set(source, message, severity);
+    }
 
     /// Drain every background service's outstanding results into the feedback
     /// board, in the order the titlebar later reads it back. The three
@@ -627,10 +659,10 @@ impl<'a> Frame<'a> {
     /// board read is load-bearing: a slot filled after that read is a frame
     /// late.
     fn drain_background_outcomes(&mut self, out: &mut FrameOutput) {
-        self.poll_library_updates();
+        self.poll_library_updates(out);
         self.parts.tag_edits.poll_outcomes(self.parts.feedback);
         self.poll_cache_clear_outcome(out);
-        self.poll_pass_outcome();
+        self.poll_pass_outcome(out);
     }
 
     /// Poll the `ReplayGain` Pass service: while a pass runs, its progress
@@ -639,7 +671,7 @@ impl<'a> Frame<'a> {
     /// the way Tag Edit outcomes are surfaced. Nothing else in the frame is
     /// touched: the values themselves are Store facts the read models pick
     /// up through the session generation.
-    fn poll_pass_outcome(&mut self) {
+    fn poll_pass_outcome(&mut self, out: &mut FrameOutput) {
         use riff_backend::app::events::{NoticeSeverity, NoticeSource};
         let passes = self.parts.passes;
         if passes.is_running() {
@@ -654,6 +686,11 @@ impl<'a> Frame<'a> {
         }
         while let Some(report) = passes.poll() {
             let failed = report.failed > 0;
+            // A cancelled pass is the listener's own stop — nothing finished,
+            // so there is nothing to announce off-screen. A cancelled pass
+            // that also failed still announces: the failures outlived the
+            // stop and the listener chose to hear about them.
+            let newsworthy = failed || !report.cancelled;
             *self.parts.last_pass_report = Some(report.clone());
             let message = pass_outcome_line(&report);
             let severity = if failed {
@@ -661,9 +698,13 @@ impl<'a> Frame<'a> {
             } else {
                 NoticeSeverity::Info
             };
-            self.parts
-                .feedback
-                .set(NoticeSource::ReplayGain, message, severity);
+            if newsworthy {
+                self.announce(out, NoticeSource::ReplayGain, message, severity);
+            } else {
+                self.parts
+                    .feedback
+                    .set(NoticeSource::ReplayGain, message, severity);
+            }
         }
     }
 
@@ -674,7 +715,7 @@ impl<'a> Frame<'a> {
     /// session — plus the titlebar scan-status line. The service NEVER touches
     /// `LibrarySession` (ADR 0006). The watcher observes a scan's end itself
     /// via `is_scanning`, so no relay fires here.
-    fn poll_library_updates(&mut self) {
+    fn poll_library_updates(&mut self, out: &mut FrameOutput) {
         use riff_backend::app::events::{NoticeSeverity, NoticeSource};
         for outcome in self.parts.scans.poll() {
             match outcome {
@@ -692,7 +733,8 @@ impl<'a> Frame<'a> {
                     self.library
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Scanned(total_files));
-                    self.parts.feedback.set(
+                    self.announce(
+                        out,
                         NoticeSource::Scan,
                         format!("Scan complete: {total_files} tracks"),
                         NoticeSeverity::Info,
@@ -720,11 +762,23 @@ impl<'a> Frame<'a> {
                         .library_paths
                         .report_readiness(&path, LibraryStatus::Idle);
                     // A failed scan carries an Error severity and a Rescan
-                    // recovery intent through to the paint boundary.
+                    // recovery intent through to the paint boundary. The
+                    // message is bound once and said twice — board and
+                    // notification — through the same shape `announce` uses,
+                    // because this arm writes the board through `put` (its
+                    // recovery rides the notice) rather than `set`.
+                    let message = format!("Error: {reason}");
+                    if self.library.ui_flags.system_notifications {
+                        out.notifications.push(NoticePayload {
+                            severity: NoticeSeverity::Error,
+                            source: NoticeSource::Scan,
+                            message: message.clone(),
+                        });
+                    }
                     self.parts.feedback.put(Feedback {
                         severity: NoticeSeverity::Error,
                         source: NoticeSource::Scan,
-                        message: format!("Error: {reason}"),
+                        message,
                         recovery: Some(super::feedback::Recovery::Rescan),
                     });
                 }
@@ -1489,13 +1543,26 @@ pub fn apply_keyboard(
 /// error severity; each is folded into its source's persistent slot so it
 /// survives alongside — not overwritten by — Library Scan progress. Other event
 /// kinds carry no UI feedback yet.
+///
+/// A playback notice is also newsworthy off-screen — "nothing happened when I
+/// pressed play" is exactly what the listener wants explained from another
+/// window — so it rides the notification list too, gated on the preference.
+/// Non-playback notices (none exist today, but the type allows them) stay
+/// board-only: their sources own assembly sites of their own above.
 pub fn apply_backend_events(
     events: Vec<riff_backend::app::events::BackendEvent>,
     feedback: &mut FeedbackBoard,
+    notifications_on: bool,
+    notifications: &mut Vec<NoticePayload>,
 ) {
     use riff_backend::app::events::BackendEvent;
     for event in events {
         if let BackendEvent::TypedNotice(payload) = event {
+            if notifications_on
+                && payload.source == riff_backend::app::events::NoticeSource::Playback
+            {
+                notifications.push(payload.clone());
+            }
             feedback.put(Feedback::from_notice(&payload, None));
         }
     }

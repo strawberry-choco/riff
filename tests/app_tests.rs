@@ -4439,6 +4439,115 @@ mod audio_engine_tests {
         release(h);
     }
 
+    /// PlayRandom from a stopped session with a parked queue and a populated
+    /// Library: the pick is announced like any selection play, and the fresh
+    /// Fill materializes — the whole Library becomes the queue with the pick
+    /// current, the parked queue discarded.
+    #[test]
+    fn engine_play_random_starts_a_fresh_random_session() {
+        let state = Arc::new(Mutex::new(PlaybackSession::default()));
+        {
+            let mut s = state.lock_or_recover();
+            s.playback_state = PlaybackState::Stopped;
+            s.queue.set_shuffle(true);
+            s.queue.append(TrackId("music/parked1.wav".into()));
+            s.queue.append(TrackId("music/parked2.wav".into()));
+            s.queue.current_index = Some(0);
+        }
+        let tracks: Vec<Track> = ["music/a.wav", "music/b.wav", "music/c.wav"]
+            .iter()
+            .map(|path| crate::test_utils::create_test_track(path, path))
+            .collect();
+        let library = FakeLibrary::holding(&tracks);
+
+        let script = vec![batch(2_400), batch(2_400)];
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
+
+        h.cmd_tx.send(PlaybackCommand::PlayRandom).unwrap();
+
+        let updates = collect_until(&h, |u| is_state(u, PlaybackState::Playing));
+        let picked = updates
+            .iter()
+            .find_map(|u| match u {
+                PlaybackUpdate::TrackChanged(t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("the fresh random session announces its pick");
+        assert!(
+            ["music/a.wav", "music/b.wav", "music/c.wav"].contains(&picked.0.as_str()),
+            "the announced Track is a Library Track, not {picked:?}"
+        );
+        assert!(
+            updates.iter().all(|u| matches!(
+                u,
+                PlaybackUpdate::TrackChanged(_) | PlaybackUpdate::StateChanged(_)
+            )),
+            "the start is indistinguishable from a selection play's announcements: {updates:?}"
+        );
+
+        let s = state.lock_or_recover();
+        assert_eq!(
+            s.queue.tracks,
+            vec![
+                TrackId("music/a.wav".into()),
+                TrackId("music/b.wav".into()),
+                TrackId("music/c.wav".into()),
+            ],
+            "the fresh Fill materializes: the whole Library is the queue, parked leftovers gone"
+        );
+        assert_eq!(
+            s.queue.current_index,
+            s.queue.tracks.iter().position(|t| *t == picked),
+            "the pick is current in that order"
+        );
+        assert!(
+            !s.queue.shuffle,
+            "a fresh Fill resets shuffle, even from a parked shuffled queue"
+        );
+        drop(s);
+        release(h);
+    }
+
+    /// PlayRandom with an empty Library is a graceful no-op: nothing is
+    /// announced, the session stays stopped, and the parked queue survives
+    /// the no-op. The `Pause` sent after it is the FIFO marker: once it
+    /// announces, the PlayRandom has been fully processed — and said nothing.
+    #[test]
+    fn engine_play_random_with_an_empty_library_changes_nothing() {
+        let state = Arc::new(Mutex::new(PlaybackSession::default()));
+        {
+            let mut s = state.lock_or_recover();
+            s.playback_state = PlaybackState::Stopped;
+            s.queue.append(TrackId("music/parked.wav".into()));
+            s.queue.current_index = Some(0);
+        }
+        let library = FakeLibrary::holding(&Vec::<Track>::new());
+        let script = vec![batch(2_400)];
+        let source = source_with_duration(Some(Duration::from_secs(1)));
+        let h = spawn_engine(state.clone(), library, script, Vec::new(), source);
+
+        h.cmd_tx.send(PlaybackCommand::PlayRandom).unwrap();
+        h.cmd_tx.send(PlaybackCommand::Pause).unwrap();
+        let updates = collect_until(&h, |u| is_state(u, PlaybackState::Paused));
+        assert_eq!(
+            updates.len(),
+            1,
+            "an empty Library starts nothing — no TrackChanged, no Playing: {updates:?}"
+        );
+
+        let s = state.lock_or_recover();
+        assert_eq!(s.playback_state, PlaybackState::Stopped, "still stopped");
+        assert_eq!(
+            s.queue.tracks,
+            vec![TrackId("music/parked.wav".into())],
+            "the parked queue survives the no-op"
+        );
+        assert_eq!(s.queue.current_index, Some(0));
+        drop(s);
+        release(h);
+    }
+
     /// Manual skips from a known idle position walk the session queue and
     /// re-dispatch Play for the new current track: Previous from the last
     /// entry lands one back, Next from the middle lands one ahead.

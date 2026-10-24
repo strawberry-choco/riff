@@ -8,6 +8,7 @@ pub mod detail;
 pub mod drop_overlay;
 pub mod feedback;
 pub mod frame;
+pub mod notifications;
 pub mod now_playing;
 pub mod playerbar;
 pub mod rule_box;

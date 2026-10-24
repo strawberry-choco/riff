@@ -84,6 +84,13 @@ crossbeam-channel = "0.5"
 tray-icon = "0.24"
 muda = "0.19"
 rfd = "0.17"
+# OS system notifications (`ui::notifications`), the same platform split the
+# tray takes. Windows goes through the WinRT toast backend with the crate's
+# default app id — riff is an unpackaged exe with no registered
+# AppUserModelID, so riding the default is what makes toasts appear at all;
+# proper branding waits for an installer that can register one. Scoped off
+# Linux so that backend's zbus tree stays out of that build entirely.
+notify-rust = "4"
 
 # macOS traffic-light placement (`ui::traffic_lights`). Pinned to 0.3.2 —
 # deliberately the version eframe 0.35 already resolves — so every feature

@@ -61,18 +61,22 @@ use crate::ui::settings::{
 };
 use crate::ui::sidebar::{self, TreeRow};
 use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
+use riff_backend::app::state::{LibrarySession, PlaybackSession};
 use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
+use riff_backend::app::views::SessionViews;
 use riff_backend::domain::field_catalog::{ValueType, spec};
 use riff_backend::domain::{Combine, MatchableField, PlaylistId, RootBox};
-use riff_gui_components::button::{FlowTextButton, Variant, flow_text_button};
+use riff_gui_components::button::{
+    FlowTextButton, TextButton, Variant, flow_text_button, text_button,
+};
 use riff_gui_components::ghost_icon_button::ghost_icon_button;
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
 use riff_gui_components::text_field::{TextField, TrailingText, TrailingTone, text_field};
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_box;
 use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, LIST_TOP_GAP, PART_GAP, WELL_H};
-use riff_gui_theme::theme::geometry::settings::SECTION_GAP;
-use riff_gui_theme::theme::{self, Palette};
+use riff_gui_theme::theme::geometry::settings::{PAGE_HEADER_H, PANE_PAD, SECTION_GAP};
+use riff_gui_theme::theme::{self, Palette, styled_font};
 
 /// The Library values the pane read for one open picker, held as the editor's
 /// own buffers (the row takes them as a borrowed prop).
@@ -701,6 +705,102 @@ pub fn picker_is_numeric(field: MatchableField) -> bool {
     matches!(spec(field).value_type(), ValueType::Number)
 }
 
+/// Draw the Smart Playlist editor on the stage: the editor column alone — no
+/// saved-lists column, no Settings chrome — under its own header.
+///
+/// The column keeps the width the Settings pane's two-column branch gives it,
+/// so a listener who met the editor in Settings finds the same pixels here; a
+/// narrower stage falls back to the full width, the same boundary the stacked
+/// pane already draws. Everything else is the column's own contract: buffers
+/// in place, [`SettingsAction`]s out.
+pub fn smart_playlist_editor_pane(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    editor: &mut SmartPlaylistsEditor,
+    actions: &mut Vec<SettingsAction>,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt("smart_playlist_editor_pane")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::from(PANE_PAD))
+                .show(ui, |ui| {
+                    editor_header(ui, cache, palette, reduce_motion, actions);
+                    let cap = match settings_pane_columns(ui.available_width()) {
+                        LibraryPaneColumns::TwoColumns { right, .. } => right,
+                        LibraryPaneColumns::Stacked { width } => width,
+                    };
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width().min(cap), ui.available_height()),
+                        )),
+                        |ui| editor_column(ui, cache, palette, reduce_motion, editor, actions),
+                    );
+                })
+        });
+}
+
+/// The editor page's header: the surface's name at the left, the Back control
+/// at the right edge — the Settings page header's exact shape, so the two
+/// pages read as one chrome. Back is Cancel wearing a route: it discards the
+/// draft and closes the editor through the same single
+/// [`SettingsAction::CancelSmartPlaylist`] the column's own Cancel row
+/// reports.
+fn editor_header(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    actions: &mut Vec<SettingsAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), PAGE_HEADER_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+
+    let heading_font = styled_font(ui, egui::TextStyle::Heading, theme::TEXT_XL);
+    let galley = painter.layout_no_wrap("Smart Playlists".to_owned(), heading_font, palette.ink);
+    painter.galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        palette.ink,
+    );
+
+    // Back control at the header's right edge, hugging its content, painted
+    // through the shared [`Variant::Caption`] primitive.
+    let body_font = styled_font(ui, egui::TextStyle::Button, theme::TEXT_SM);
+    let label_galley = painter.layout_no_wrap("Back".to_owned(), body_font, palette.ink_2);
+    let btn_w = 12.0 + 16.0 + 8.0 + label_galley.size().x + 12.0;
+    let btn_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - btn_w - 12.0, rect.center().y - 16.0),
+        egui::vec2(btn_w, 32.0),
+    );
+    if text_button(
+        ui,
+        cache,
+        palette,
+        reduce_motion,
+        &TextButton {
+            id: egui::Id::new("smart_playlist_editor_back"),
+            rect: btn_rect,
+            label: "Back",
+            a11y: "Back from the Smart Playlist editor",
+            tooltip: None,
+            icon: Some(Icon::ArrowLeft),
+            small: false,
+            variant: Variant::Caption,
+            enabled: true,
+        },
+    ) {
+        actions.push(SettingsAction::CancelSmartPlaylist);
+    }
+}
+
 /// Draw the Smart Playlists section's pane: the listener's lists down the
 /// left, the Rules being written on the right, collapsing to one stacked
 /// column below the two-column boundary the Library pane already honors.
@@ -730,7 +830,7 @@ pub fn smart_playlists_pane(
                 |ui| {
                     lists_column(ui, cache, palette, content, editor, actions);
                     ui.add_space(SECTION_GAP);
-                    editor_column(ui, cache, palette, content, editor, actions);
+                    editor_column(ui, cache, palette, content.reduce_motion, editor, actions);
                 },
             );
         }
@@ -760,7 +860,7 @@ pub fn smart_playlists_pane(
                         .layout(egui::Layout::top_down(egui::Align::Min))
                         .id_salt(("smart-playlists-column", 1)),
                     |ui| {
-                        editor_column(ui, cache, palette, content, editor, actions);
+                        editor_column(ui, cache, palette, content.reduce_motion, editor, actions);
                     },
                 );
             });
@@ -917,7 +1017,7 @@ fn editor_column(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
-    content: &SettingsContent,
+    reduce_motion: bool,
     editor: &mut SmartPlaylistsEditor,
     actions: &mut Vec<SettingsAction>,
 ) {
@@ -973,7 +1073,6 @@ fn editor_column(
     // this function's. The refusal travels beside the tree as an immutable
     // borrow so each row can paint the reason that belongs to it, exactly where
     // that row is drawn.
-    let reduce_motion = content.reduce_motion;
     let mut picker_events = Vec::new();
     {
         // Disjoint borrows for the walk: the tree is drawn from `root` while
@@ -1020,7 +1119,7 @@ fn editor_column(
     }
     ui.add_space(theme::SPACE_MD);
 
-    save_cancel_row(ui, cache, palette, content.reduce_motion, actions);
+    save_cancel_row(ui, cache, palette, reduce_motion, actions);
 }
 
 /// One Rule Box's contents, inside the card that says they are combined by one
@@ -1695,5 +1794,142 @@ fn save_cancel_row(
         },
     ) {
         actions.push(SettingsAction::CancelSmartPlaylist);
+    }
+}
+
+// --- App adapter --------------------------------------------------------------------
+
+/// Load one saved Custom Smart Playlist into an editor draft: its name and
+/// its Root Box's Rules. The tree comes through ticket 11's projection read —
+/// the D6 reason channel — like every other Custom-list read; a degraded
+/// answer still hands the last good tree (or none), and what to do with the
+/// reason is the editor's refusal decision, not this load's.
+///
+/// A free function over the two facts it needs so the Frame's sidebar Edit
+/// arm and `RiffApp`'s own routes share one loader — the tag editor's
+/// `open_track` shape.
+pub fn load_saved_list(
+    views: &mut SessionViews,
+    editor: &mut SmartPlaylistsEditor,
+    id: &PlaylistId,
+) {
+    let lists = views.custom_smart_playlists();
+    let list = lists.iter().find(|list| &list.id == id).cloned();
+    if let Some(list) = list {
+        let tree = views
+            .custom_list_tree(id)
+            .unwrap_or_else(|degraded| degraded.value);
+        // The whole tree — Unreadable rows included, put back at their stored
+        // positions by the load itself (ticket 18) — so a row riff cannot
+        // read is shown, preserved, and keeps blocking Save until the
+        // listener deletes it.
+        editor.load_saved(&list, tree.as_ref());
+    }
+}
+
+impl super::app::RiffApp {
+    /// Render the Smart Playlist editor on the stage and apply everything the
+    /// listener did this frame. The pane itself is a pure renderer
+    /// ([`smart_playlist_editor_pane`]); this adapter owns the effects, the
+    /// picker's one read, and the live match line, in the same order the
+    /// Settings view's draw gave them — the gestures land first, then the
+    /// picker answer, then the match-line refresh reads this frame's
+    /// committed shape.
+    pub fn show_smart_playlist_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        library: &mut LibrarySession,
+        playback: &mut PlaybackSession,
+    ) {
+        let palette = self.theme.active;
+        let reduce_motion = library.ui_flags.reduce_motion;
+        let mut actions = Vec::new();
+        smart_playlist_editor_pane(
+            ui,
+            &mut self.icons,
+            &palette,
+            reduce_motion,
+            &mut self.smart_playlists_editor,
+            &mut actions,
+        );
+        for action in actions {
+            self.apply_settings_action(action, library, playback);
+        }
+
+        // The one read the open library picker owes (ticket 14's host duty): a
+        // Rule row asks exactly once, on the frame its list opens, and the
+        // values reach the row back as a prop. Nothing on the paint path
+        // touches a store.
+        if let Some(field) = self.smart_playlists_editor.pending_picker {
+            let values = if picker_is_numeric(field) {
+                SmartPlaylistPickerValues::Numbers(
+                    self.views.picker_numbers(field, rule_row::PICKER_LIMIT),
+                )
+            } else {
+                SmartPlaylistPickerValues::Texts(
+                    self.views.picker_texts(field, rule_row::PICKER_LIMIT),
+                )
+            };
+            self.smart_playlists_editor.picker_answered(values);
+        }
+
+        // The live match line's read, once per frame while the editor is on
+        // stage: after the gestures above have landed on the draft, so the
+        // shape counted is this frame's.
+        self.refresh_smart_playlist_match_line();
+    }
+
+    /// The editor's **single Save entry point**: ask the draft for a plan —
+    /// which is where every frontend-side refusal is decided and rendered —
+    /// and, when it has one, perform the one store call that writes the name
+    /// and the whole rule tree together (D12). A refused write leaves the
+    /// draft exactly as typed and puts the store's own words above the Save
+    /// line; a committed one leaves the listener on the editor, because the
+    /// sidebar already lists the new row.
+    pub(crate) fn save_smart_playlist_from_editor(&mut self) {
+        let Some(plan) = self.smart_playlists_editor.prepare_save() else {
+            return;
+        };
+        match self
+            .library_mutations
+            .save_smart_playlist(plan.id.as_ref(), &plan.name, &plan.tree)
+        {
+            Ok(id) => self.smart_playlists_editor.mark_saved(id),
+            Err(e) => self.smart_playlists_editor.refuse_save(e.to_string()),
+        }
+    }
+
+    /// Refresh the editor's live match line (ticket 17) for the draft as it
+    /// stands **after this frame's gestures have landed**, so a value a
+    /// click, an Enter or a blur just committed is counted on the same
+    /// frame's write-back and painted on the next.
+    ///
+    /// The read is [`SessionViews::custom_list_match_count`] — the one read
+    /// this line costs, on the UI thread with every other read the editor
+    /// makes and no worker anywhere. What reaches the seam is the draft's
+    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`]), so a
+    /// repaint and a keystroke both arrive with a shape the seam already
+    /// holds and no store read comes of them; a commit moves the shape, and
+    /// a shape whose count is held is served from the hold rather than
+    /// queried again.
+    ///
+    /// A draft that cannot be counted is not counted: the line gets the block
+    /// sentence and the seam is not asked at all. A store refusal reaches the
+    /// line as its reason, never as the zero beside it — a number the engine
+    /// just refused is exactly what must not be drawn.
+    pub fn refresh_smart_playlist_match_line(&mut self) {
+        if !self.smart_playlist_editor_open
+            && self.settings_section != crate::ui::settings::SettingsSection::SmartPlaylists
+        {
+            return;
+        }
+        let line = match self.smart_playlists_editor.committed_tree() {
+            Err(block) => SmartPlaylistMatchLine::Uncountable(block),
+            Ok(tree) => match self.views.custom_list_match_count(&tree) {
+                Ok(count) => SmartPlaylistMatchLine::Matches(count),
+                Err(degraded) => SmartPlaylistMatchLine::Failed(degraded.reason),
+            },
+        };
+        self.smart_playlists_editor.match_line = Some(line);
     }
 }

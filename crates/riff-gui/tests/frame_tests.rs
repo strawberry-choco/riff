@@ -448,6 +448,7 @@ struct Harness {
     last_pass_report: Option<PassReport>,
     playlist_view: Option<PlaylistId>,
     smart_playlist_view: Option<SmartListIdentity>,
+    smart_playlist_editor_open: bool,
     playlist_rename: Option<(PlaylistId, String)>,
     playlist_create_name: Option<String>,
     playlist_create_error: Option<String>,
@@ -551,6 +552,7 @@ impl Harness {
             last_pass_report: None,
             playlist_view: None,
             smart_playlist_view: None,
+            smart_playlist_editor_open: false,
             playlist_rename: None,
             playlist_create_name: None,
             playlist_create_error: None,
@@ -617,6 +619,7 @@ impl Harness {
             title_key: &mut self.title_key,
             playlist_view: &mut self.playlist_view,
             smart_playlist_view: &mut self.smart_playlist_view,
+            smart_playlist_editor_open: &mut self.smart_playlist_editor_open,
             playlist_rename: &mut self.playlist_rename,
             playlist_create_name: &mut self.playlist_create_name,
             playlist_create_error: &mut self.playlist_create_error,
@@ -1147,6 +1150,96 @@ fn folding_the_smart_lists_section_closes_an_open_custom_list_and_keeps_the_play
         harness.playlist_view,
         Some(PlaylistId("pl-keep".to_string())),
         "the fold clears only the smart-list slot"
+    );
+}
+
+/// The SMART LISTS `+` is a route onto the stage, not a write and not a
+/// Settings detour: the editor goes on the stage holding a fresh, empty,
+/// unsaved draft, and neither the view nor the Settings section moved.
+#[test]
+fn the_new_smart_playlist_route_opens_the_editor_on_the_stage() {
+    let mut harness = Harness::new();
+    // The route replaces whatever the editor held — an edit left over from an
+    // earlier open must not leak into a "new" draft.
+    harness.smart_playlists_editor.name = "half-written".to_string();
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::NewSmartPlaylist],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+
+    assert!(
+        harness.smart_playlist_editor_open,
+        "the editor takes the stage"
+    );
+    assert!(harness.smart_playlists_editor.is_new());
+    assert_eq!(
+        harness.smart_playlists_editor.name, "",
+        "the route hands the editor a fresh draft, not the one it held"
+    );
+    assert_eq!(harness.library.view_mode, ViewMode::Library);
+    assert_eq!(harness.settings_section, SettingsSection::Library);
+}
+
+/// The editor belongs to the stage only while nothing else claims it: a
+/// sidebar navigation closes it, and the frame's reconcile then discards the
+/// half-written draft — the same discard-on-leave the Settings page gave an
+/// abandoned edit.
+#[test]
+fn a_sidebar_navigation_closes_the_stage_editor_and_discards_the_draft() {
+    let mut harness = Harness::new();
+    harness.smart_playlist_editor_open = true;
+    harness.smart_playlists_editor.name = "half-written".to_string();
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::Navigate {
+                section: LibrarySection::Albums,
+            }],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+    // The reconcile that discards an out-of-place draft runs ahead of the
+    // apply slots in frame order, so the discard lands on the NEXT frame —
+    // the same one-frame timing leaving the Settings page always had.
+    harness.run_frame(&Reports::default());
+
+    assert!(!harness.smart_playlist_editor_open);
+    assert_eq!(
+        harness.smart_playlists_editor.name, "",
+        "a draft left behind by the navigation is discarded, not parked"
+    );
+}
+
+/// The row's Edit route opens the same stage editor the `+` routes open. Over
+/// a store that cannot answer, the load keeps the draft it held — the degrade
+/// behavior the D14 reason channel promises — and the route still lands.
+#[test]
+fn the_row_edit_route_opens_the_stage_editor() {
+    let mut harness = Harness::new();
+
+    let reports = Reports {
+        sidebar: SidebarReport {
+            actions: vec![SidebarAction::CustomSmartList {
+                id: PlaylistId("spl-late-night-1".to_string()),
+                name: "Late night jazz".to_string(),
+                action: CustomSmartListAction::Edit,
+            }],
+        },
+        ..Reports::default()
+    };
+
+    harness.run_frame(&reports);
+
+    assert!(
+        harness.smart_playlist_editor_open,
+        "Edit puts the editor on the stage"
     );
 }
 

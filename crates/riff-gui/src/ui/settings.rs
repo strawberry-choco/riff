@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ui::rule_box::BoxPath;
-use crate::ui::smart_playlists_page::SmartPlaylistMatchLine;
 
 /// How the Library pane's lower four sections are arranged at a given width.
 ///
@@ -3099,88 +3098,13 @@ fn replaygain_pass_action_row(
 // --- App adapter --------------------------------------------------------------------
 
 impl super::app::RiffApp {
-    /// Load one saved Custom Smart Playlist into the frontend-local editor:
-    /// its name and its Root Box's Rules. The tree comes through ticket 11's
-    /// projection read — the D6 reason channel — like every other Custom-list
-    /// read; a degraded answer still hands the last good tree (or none), and
-    /// what to do with the reason is ticket 18's refusal decision, not this
-    /// load's.
-    fn load_smart_playlist_into_editor(&mut self, id: &PlaylistId) {
-        let lists = self.views.custom_smart_playlists();
-        let list = lists.iter().find(|list| &list.id == id).cloned();
-        if let Some(list) = list {
-            let tree = self
-                .views
-                .custom_list_tree(id)
-                .unwrap_or_else(|degraded| degraded.value);
-            // The whole tree — Unreadable rows included, put back at their
-            // stored positions by the load itself (ticket 18) — so a row
-            // riff cannot read is shown, preserved, and keeps blocking Save
-            // until the listener deletes it.
-            self.smart_playlists_editor.load_saved(&list, tree.as_ref());
-        }
-    }
-
-    /// The editor's **single Save entry point**: ask the draft for a plan —
-    /// which is where every frontend-side refusal is decided and rendered —
-    /// and, when it has one, perform the one store call that writes the name
-    /// and the whole rule tree together (D12). A refused write leaves the
-    /// draft exactly as typed and puts the store's own words above the Save
-    /// line; a committed one leaves the listener on the page, because the
-    /// sidebar already lists the new row.
-    fn save_smart_playlist_from_editor(&mut self) {
-        let Some(plan) = self.smart_playlists_editor.prepare_save() else {
-            return;
-        };
-        match self
-            .library_mutations
-            .save_smart_playlist(plan.id.as_ref(), &plan.name, &plan.tree)
-        {
-            Ok(id) => self.smart_playlists_editor.mark_saved(id),
-            Err(e) => self.smart_playlists_editor.refuse_save(e.to_string()),
-        }
-    }
-
-    /// Refresh the editor's live match line (ticket 17) for the draft as it
-    /// stands **after this frame's gestures have landed**, so a value a
-    /// click, an Enter or a blur just committed is counted on the same
-    /// frame's write-back and painted on the next.
-    ///
-    /// The read is [`SessionViews::custom_list_match_count`](riff_backend::app::views::SessionViews::custom_list_match_count)
-    /// ([`riff_backend::app::views::SessionViews`]) — the one read this line
-    /// costs, on the UI thread with every other read the Settings page makes
-    /// and no worker anywhere. What reaches the seam is the draft's
-    /// **committed** tree ([`SmartPlaylistsEditor::committed_tree`](crate::ui::smart_playlists_page::SmartPlaylistsEditor::committed_tree)), so a
-    /// repaint and a keystroke both arrive with a shape the seam already
-    /// holds and no store read comes of them; a commit moves the shape, and
-    /// a shape whose count is held is served from the hold rather than
-    /// queried again.
-    ///
-    /// A draft that cannot be counted is not counted: the line gets the block
-    /// sentence and the seam is not asked at all. A store refusal reaches the
-    /// line as its reason, never as the zero beside it — a number the engine
-    /// just refused is exactly what must not be drawn.
-    fn refresh_smart_playlist_match_line(&mut self) {
-        if self.settings_section != SettingsSection::SmartPlaylists {
-            return;
-        }
-        let line = match self.smart_playlists_editor.committed_tree() {
-            Err(block) => SmartPlaylistMatchLine::Uncountable(block),
-            Ok(tree) => match self.views.custom_list_match_count(&tree) {
-                Ok(count) => SmartPlaylistMatchLine::Matches(count),
-                Err(degraded) => SmartPlaylistMatchLine::Failed(degraded.reason),
-            },
-        };
-        self.smart_playlists_editor.match_line = Some(line);
-    }
-
     /// Apply one [`SettingsAction`] through the app's state/service/store
     /// paths.
     #[expect(
         clippy::too_many_lines,
         reason = "one SettingsAction dispatch, the house shape for the action tables"
     )]
-    fn apply_settings_action(
+    pub(crate) fn apply_settings_action(
         &mut self,
         action: SettingsAction,
         library: &mut LibrarySession,
@@ -3227,7 +3151,13 @@ impl super::app::RiffApp {
                     Some(super::app::PendingDestructive::ClearThumbnailCache);
             }
             // --- Smart Playlists page (ticket 15; the tree is ticket 16) ---
-            SettingsAction::SelectSmartPlaylist(id) => self.load_smart_playlist_into_editor(&id),
+            SettingsAction::SelectSmartPlaylist(id) => {
+                super::smart_playlists_page::load_saved_list(
+                    &mut self.views,
+                    &mut self.smart_playlists_editor,
+                    &id,
+                );
+            }
             // The page's own button opens the same new, empty, unsaved draft
             // as the sidebar's `+`; the four tree gestures below land on the
             // box model the pane drew. Save and Cancel are ticket 18's one
@@ -3251,7 +3181,13 @@ impl super::app::RiffApp {
                 self.smart_playlists_editor.set_combine(&path, combine);
             }
             SettingsAction::SaveSmartPlaylist => self.save_smart_playlist_from_editor(),
-            SettingsAction::CancelSmartPlaylist => self.smart_playlists_editor.cancel(),
+            SettingsAction::CancelSmartPlaylist => {
+                // Cancel discards the draft, and from the stage editor it
+                // also closes the editor: Back and Cancel are the same
+                // decision there, reported through this one action.
+                self.smart_playlists_editor.cancel();
+                self.smart_playlist_editor_open = false;
+            }
             SettingsAction::SetAdvanced(value) => {
                 library.ui_flags.advanced_mode = value;
             }

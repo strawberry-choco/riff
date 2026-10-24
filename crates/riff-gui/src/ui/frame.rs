@@ -344,6 +344,11 @@ pub struct FrameParts<'a> {
     /// Which smart list is open — one of the six Built-in Smart Playlists or
     /// a Custom Smart Playlist, by its store id ([`SmartListIdentity`]).
     pub smart_playlist_view: &'a mut Option<SmartListIdentity>,
+    /// Whether the Smart Playlist editor is on the stage. The sidebar's two
+    /// `+` routes open it; every navigation clears it, and the Frame's
+    /// reconcile then discards whatever draft it held (the draft belongs to
+    /// an open editor, exactly as it belonged to the Settings page).
+    pub smart_playlist_editor_open: &'a mut bool,
     /// The inline rename prompt: (playlist id, draft name).
     pub playlist_rename: &'a mut Option<(PlaylistId, String)>,
     /// The inline "New Playlist" name prompt, holding the draft.
@@ -956,8 +961,10 @@ impl<'a> Frame<'a> {
     /// land first, then the picker answer, then the match-line refresh reads
     /// this frame's committed shape.
     fn reconcile_smart_playlist_draft(&mut self) {
-        let smart_page_open = matches!(self.library.view_mode, ViewMode::Settings)
-            && *self.parts.settings_section == SettingsSection::SmartPlaylists;
+        let editor_on_stage = *self.parts.smart_playlist_editor_open;
+        let smart_page_open = editor_on_stage
+            || (matches!(self.library.view_mode, ViewMode::Settings)
+                && *self.parts.settings_section == SettingsSection::SmartPlaylists);
         let stored = if smart_page_open {
             self.parts.views.try_custom_smart_playlists()
         } else {
@@ -1003,10 +1010,12 @@ impl<'a> Frame<'a> {
                     ViewMode::Library | ViewMode::Settings => ViewMode::NowPlaying,
                     ViewMode::NowPlaying => ViewMode::Library,
                 };
+                *self.parts.smart_playlist_editor_open = false;
             }
             TitleBarAction::GoSettings => {
                 NavDestination::Settings
                     .apply(&mut self.library.view_mode, &mut self.library.browse_mode);
+                *self.parts.smart_playlist_editor_open = false;
             }
             TitleBarAction::Minimize => out.viewport.push(FrameViewport::Minimize),
             TitleBarAction::ToggleMaximize => {
@@ -1053,12 +1062,14 @@ impl<'a> Frame<'a> {
                 self.library.library_section = section;
                 *self.parts.smart_playlist_view = None;
                 *self.parts.playlist_view = None;
+                *self.parts.smart_playlist_editor_open = false;
             }
             SidebarAction::NavigateFolders => {
                 self.land_on_library();
                 self.library.browse_mode = BrowseMode::Folders;
                 *self.parts.smart_playlist_view = None;
                 *self.parts.playlist_view = None;
+                *self.parts.smart_playlist_editor_open = false;
             }
             SidebarAction::ToggleSmartListsCollapsed => {
                 // Folding the section away also closes any smart list it
@@ -1072,6 +1083,7 @@ impl<'a> Frame<'a> {
                 self.land_on_library();
                 *self.parts.smart_playlist_view = Some(kind);
                 *self.parts.playlist_view = None;
+                *self.parts.smart_playlist_editor_open = false;
             }
             SidebarAction::NewPlaylist => {
                 *self.parts.playlist_create_name = Some(String::new());
@@ -1081,17 +1093,12 @@ impl<'a> Frame<'a> {
                 *self.parts.playlist_create_error = None;
             }
             SidebarAction::NewSmartPlaylist => {
-                // Ticket 15: this `+` is a route, not a write. It switches to
-                // the Settings stage (the same enactment the Linux folder flow
-                // uses, and it must happen at an apply slot so this frame's
-                // stage already draws the page), selects the Smart Playlists
-                // section, and hands the pane a fresh empty draft. Nothing
-                // reaches the store and nothing appears in the sidebar — a
-                // Custom Smart Playlist is saved, and so listed, only through
-                // ticket 18's Save.
-                crate::ui::chrome::NavDestination::Settings
-                    .apply(&mut self.library.view_mode, &mut self.library.browse_mode);
-                *self.parts.settings_section = SettingsSection::SmartPlaylists;
+                // This `+` is a route, not a write. It puts the Smart Playlist
+                // editor on the stage and hands it a fresh empty draft.
+                // Nothing reaches the store and nothing appears in the
+                // sidebar — a Custom Smart Playlist is saved, and so listed,
+                // only through the editor's Save.
+                *self.parts.smart_playlist_editor_open = true;
                 self.parts.smart_playlists_editor.start_new();
             }
             SidebarAction::PlaylistRow { id, action } => {
@@ -1117,6 +1124,7 @@ impl<'a> Frame<'a> {
                 // screen, and clears any search filter over the results.
                 if action == PlaylistRowAction::Open {
                     self.land_on_library();
+                    *self.parts.smart_playlist_editor_open = false;
                 }
             }
             SidebarAction::PlaylistCreate(outcome) => self.apply_playlist_create(outcome),
@@ -1232,6 +1240,17 @@ impl<'a> Frame<'a> {
         action: CustomSmartListAction,
     ) {
         match action {
+            CustomSmartListAction::Edit => {
+                // The row's way into its own Rules: the editor takes the
+                // stage with the list loaded, the same surface and draft the
+                // `+` routes open on a fresh one.
+                *self.parts.smart_playlist_editor_open = true;
+                super::smart_playlists_page::load_saved_list(
+                    self.parts.views,
+                    self.parts.smart_playlists_editor,
+                    id,
+                );
+            }
             CustomSmartListAction::Duplicate => {
                 // Duplicate is the STORE's operation, not a read-then-save
                 // replay: only inside its single transaction can the copy's
@@ -1431,9 +1450,10 @@ pub enum SidebarAction {
     OpenSmartList(SmartListIdentity),
     /// The Playlists header's "+": open the empty name prompt.
     NewPlaylist,
-    /// The SMART LISTS header's "+": open the Smart Playlists page on a new,
-    /// empty, unsaved draft. The one `+` in the sidebar that writes nothing —
-    /// a Custom Smart Playlist reaches the sidebar only at Save (ticket 18).
+    /// The SMART LISTS header's "+": put the Smart Playlist editor on the
+    /// stage on a new, empty, unsaved draft. A `+` that writes nothing — a
+    /// Custom Smart Playlist reaches the sidebar only at the editor's Save
+    /// (ticket 18).
     NewSmartPlaylist,
     /// A playlist row's own hover-revealed action, through the store flows.
     PlaylistRow {

@@ -20618,21 +20618,20 @@ mod whole_frame_tests {
         }
     }
 
-    // --- Ticket 15: the Smart Playlists page is reachable and reachable back -----
+    // --- Ticket 15: the Smart Playlist editor is reachable and reachable back -----
     //
-    // Both routes into the page are measured in a composed frame with the
+    // The routes into the editor are measured in a composed frame with the
     // pane's real hit areas: a control that paints but cannot be clicked is
     // this repo's twice-recorded trap, so every assertion here reads what the
-    // click DID — the view switch, the section's pane on screen — not that a
-    // label exists.
+    // click DID — the editor's pane on screen — not that a label exists.
 
     /// The SMART LISTS header's `+` (ticket 15): a route, not a write. It
-    /// switches into Settings, SELECTS the Smart Playlists section (its pane
-    /// draws on the same frame — the sidebar slot applies before the stage
-    /// paints), opens a new empty draft, and writes nothing anywhere: the
-    /// store gains no Custom Smart Playlist, and no settings write commits.
+    /// puts the Smart Playlist editor on the stage over the Library view —
+    /// no Settings detour — opens a new empty draft, and writes nothing
+    /// anywhere: the store gains no Custom Smart Playlist, and no settings
+    /// write commits.
     #[test]
-    fn test_the_smart_lists_plus_opens_the_page_on_a_new_draft_and_writes_nothing() {
+    fn test_the_smart_lists_plus_opens_the_stage_editor_on_a_new_draft_and_writes_nothing() {
         let (mut shell, _dir, _pid, store) = store_shell();
 
         // Before: the sidebar's built-ins are all there (four visible; the
@@ -20663,22 +20662,23 @@ mod whole_frame_tests {
 
         assert_eq!(
             shell.library.lock().unwrap().view_mode,
-            ViewMode::Settings,
-            "the + switches the view into Settings"
+            ViewMode::Library,
+            "the + does not switch the view: the editor takes the stage it is on"
         );
         assert!(
-            shell
-                .harness
-                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
-                .is_some(),
-            "the Smart Playlists pane — not just Settings — is on screen"
+            shell.harness.query_by_label("Rules").is_some(),
+            "the editor — its Rules section included — is on the stage"
+        );
+        assert!(
+            shell.harness.query_by_label("Save").is_some(),
+            "the editor's Save line is on the stage"
         );
         assert!(
             shell
                 .harness
                 .query_by_label("No smart playlists yet")
-                .is_some(),
-            "with nothing saved the page opens on its empty state"
+                .is_none(),
+            "the editor carries no saved-lists column"
         );
 
         // The one `+` in riff that writes nothing.
@@ -21609,10 +21609,10 @@ mod whole_frame_tests {
     }
 
     /// A real secondary click on a Custom row opens the real popup, offering
-    /// exactly Duplicate, Rename and Delete — and the SAME hit area keeps the
-    /// primary-click open gesture. Both gestures are proven here, in one
-    /// composed frame, because a control that paints is not a control that is
-    /// reachable (this repo has five measured cases).
+    /// exactly Edit, Duplicate, Rename and Delete — and the SAME hit area
+    /// keeps the primary-click open gesture. Both gestures are proven here,
+    /// in one composed frame, because a control that paints is not a control
+    /// that is reachable (this repo has five measured cases).
     ///
     /// The secondary probe starts from the Settings view on purpose: opening
     /// the menu must not also open the list, and "the view stayed where it
@@ -21630,20 +21630,12 @@ mod whole_frame_tests {
         shell.harness.step();
 
         open_custom_row_menu(&mut shell, "Late night jazz");
-        for item in ["Duplicate", "Rename", "Delete"] {
+        for item in ["Edit", "Duplicate", "Rename", "Delete"] {
             assert!(
                 shell.harness.query(By::new().label(item)).is_some(),
                 "the secondary click opened its menu, and {item} is on it"
             );
         }
-        assert!(
-            shell
-                .harness
-                .query_all_by_label_contains("Edit")
-                .next()
-                .is_none(),
-            "the menu offers no route to editing Rules"
-        );
         assert_eq!(
             shell.library.lock().unwrap().view_mode,
             ViewMode::Settings,
@@ -21664,6 +21656,29 @@ mod whole_frame_tests {
             "Escape closes the menu"
         );
 
+        // The menu's own edit route: choosing Edit loads the row's list into
+        // the stage editor — one more tree read, the editor's surface on
+        // screen, and still no view switch, because the editor takes the
+        // stage rather than moving it.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Edit").click();
+        shell.harness.step();
+        shell.harness.step();
+        assert!(
+            shell.harness.query_by_label("Rules").is_some(),
+            "choosing Edit puts the editor on the stage"
+        );
+        assert_eq!(
+            shell.library.lock().unwrap().view_mode,
+            ViewMode::Settings,
+            "the editor takes the stage; the view beneath it did not move"
+        );
+        assert_eq!(
+            tree_reads_for(&mock, &id),
+            1,
+            "the load read the list's tree exactly once"
+        );
+
         // The row's primary gesture is untouched: the same hit area opens the
         // list, which is what the store-backed read below proves happened.
         shell.harness.get_by_label("Late night jazz").click();
@@ -21676,7 +21691,7 @@ mod whole_frame_tests {
         assert_eq!(
             tree_reads_for(&mock, &id),
             1,
-            "and the list the click opened is the one the stage read"
+            "the open rode the projection's held tree: the Edit load's one read, no second store call"
         );
     }
 

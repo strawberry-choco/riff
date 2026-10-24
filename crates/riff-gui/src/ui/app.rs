@@ -281,6 +281,13 @@ pub struct RiffApp {
     pub(crate) smart_playlist_view: Option<SmartListIdentity>,
     /// Which user playlist is open in the library explorer, if any.
     playlist_view: Option<PlaylistId>,
+    /// Whether the Smart Playlist editor is on the stage. The stage hosts
+    /// exactly one occupant: while this is set, the editor pane renders in
+    /// place of the active view, and every navigation — a sidebar row, the
+    /// titlebar's Settings or Now Playing controls — clears it. Transient UI
+    /// state (precedent: [`Self::smart_playlist_view`]); the draft it edits
+    /// lives in [`Self::smart_playlists_editor`] and is reconciled against it.
+    pub(crate) smart_playlist_editor_open: bool,
     /// The playing track's id whose cover the Now Playing stage last
     /// requested/rendered; only re-cloned when the track moves. Read and
     /// written only by [`Self::now_playing_cover`], which owns the key-change
@@ -519,6 +526,7 @@ impl RiffApp {
             tag_editor: InlineTagEditor::new(tag_edits),
             smart_playlist_view: None,
             playlist_view: None,
+            smart_playlist_editor_open: false,
             now_playing_cover_key: None,
             now_playing_labels: (None, None),
             last_title_key: TitleKey::Unset,
@@ -1100,6 +1108,7 @@ impl RiffApp {
                 title_key: &mut self.last_title_key,
                 playlist_view: &mut self.playlist_view,
                 smart_playlist_view: &mut self.smart_playlist_view,
+                smart_playlist_editor_open: &mut self.smart_playlist_editor_open,
                 playlist_rename: &mut self.playlist_rename,
                 playlist_create_name: &mut self.playlist_create_name,
                 playlist_create_error: &mut self.playlist_create_error,
@@ -1446,10 +1455,11 @@ impl RiffApp {
                 // sidebar is shared chrome, so the question must show whatever
                 // is on stage. WHERE it renders is what differs by view.
                 //
-                // The Settings page leaves the panel's bottom edge free, and
-                // the two wipes keep their historical place beneath the page
-                // — the same slot in the same `ui` the modal drew into, so
-                // their pixels and order are unchanged.
+                // The Settings page and the stage's Smart Playlist editor
+                // leave the panel's bottom edge free, and the two wipes keep
+                // their historical place beneath the page — the same slot in
+                // the same `ui` the modal drew into, so their pixels and order
+                // are unchanged.
                 //
                 // Every other stage fills the panel to that edge, and a
                 // confirmation laid out after it would sit outside the
@@ -1459,27 +1469,37 @@ impl RiffApp {
                 // did nothing). So on those views the question takes a band
                 // reserved at the bottom FIRST, and the stage fills the space
                 // above it.
-                let beneath_page = matches!(library.view_mode, ViewMode::Settings);
+                let beneath_page = self.smart_playlist_editor_open
+                    || matches!(library.view_mode, ViewMode::Settings);
                 if !beneath_page {
                     self.render_pending_destructive_band(ui, library);
                 }
-                match library.view_mode {
-                    ViewMode::Library => {
-                        // The elastic column stage (elastic-column spec): the
-                        // section-driven column sequence plus the collapsible
-                        // inspector replace the fixed three-pane explorer.
-                        self.render_elastic_stage(ui, library, playback);
-                    }
-                    ViewMode::NowPlaying => {
-                        self.show_now_playing_view(
-                            ui,
-                            playback,
-                            library.ui_flags.reduce_motion,
-                            &mut report,
-                        );
-                    }
-                    ViewMode::Settings => {
-                        self.show_settings_view(ui, library, playback);
+                if self.smart_playlist_editor_open {
+                    // The editor takes the whole stage in place of the active
+                    // view — the one surface that edits a Custom Smart
+                    // Playlist's Rules. Whichever navigation moved the
+                    // listener here cleared the view slots, so there is no
+                    // listing to keep warm behind it.
+                    self.show_smart_playlist_editor(ui, library, playback);
+                } else {
+                    match library.view_mode {
+                        ViewMode::Library => {
+                            // The elastic column stage (elastic-column spec): the
+                            // section-driven column sequence plus the collapsible
+                            // inspector replace the fixed three-pane explorer.
+                            self.render_elastic_stage(ui, library, playback);
+                        }
+                        ViewMode::NowPlaying => {
+                            self.show_now_playing_view(
+                                ui,
+                                playback,
+                                library.ui_flags.reduce_motion,
+                                &mut report,
+                            );
+                        }
+                        ViewMode::Settings => {
+                            self.show_settings_view(ui, library, playback);
+                        }
                     }
                 }
                 if beneath_page {
@@ -2523,7 +2543,10 @@ pub enum SmartListIdentity {
 /// gets no menu at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomSmartListAction {
-    /// Copy the list through the store and open the page on the copy.
+    /// Open the Smart Playlist editor on the stage with this list loaded.
+    Edit,
+    /// Copy the list through the store and open the copy over the library
+    /// view.
     Duplicate,
     /// Open the inline rename prompt on the row.
     Rename,
@@ -2653,7 +2676,7 @@ pub fn smart_list_openable(kind: SmartPlaylistKind, advanced: bool) -> bool {
 /// `Sense::click()`, which in egui 0.35 already includes the secondary
 /// button; attaching `context_menu` to it is the whole change — no Sense
 /// widening, and the primary-click open gesture below is untouched. The menu
-/// offers exactly [`CustomSmartListAction`]'s three items and reports the
+/// offers exactly [`CustomSmartListAction`]'s four items and reports the
 /// chosen one as a typed intent; the painted menu touches no store.
 ///
 /// A free function rather than an app method so the UI seam is assertable on
@@ -2703,6 +2726,9 @@ pub fn custom_smart_list_rows(
         let mut chosen = None;
         row.response.context_menu(|ui| {
             use riff_gui_components::menu::{Item, item};
+            if item(ui, palette, &Item::new("Edit")) {
+                chosen = Some(CustomSmartListAction::Edit);
+            }
             if item(ui, palette, &Item::new("Duplicate")) {
                 chosen = Some(CustomSmartListAction::Duplicate);
             }
@@ -3435,11 +3461,11 @@ impl RiffApp {
                 response.on_hover_text(label);
                 // The section's `+` (ticket 15): the slot immediately left of
                 // the chevron, the same 24 px grid the Playlists header's `+`
-                // is placed on. It is a route, not a write — pressing it opens
-                // the Smart Playlists page on a new, empty, unsaved draft, so
-                // unlike the other two `+` controls nothing it does survives
-                // the frame at the store, and no row appears in this section
-                // until ticket 18's Save.
+                // is placed on. It is a route, not a write — pressing it puts
+                // the Smart Playlist editor on the stage with a new, empty,
+                // unsaved draft, so unlike the other two `+` controls nothing
+                // it does survives the frame at the store, and no row appears
+                // in this section until the editor's Save.
                 let plus_rect = egui::Rect::from_center_size(
                     egui::pos2(ui.max_rect().right() - 12.0 - 28.0, ui.cursor().center().y),
                     egui::vec2(24.0, 24.0),

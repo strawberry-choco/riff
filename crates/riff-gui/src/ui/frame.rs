@@ -385,14 +385,13 @@ pub struct FrameParts<'a> {
     /// an ungated import would be an `unused_imports` there).
     #[cfg(target_os = "macos")]
     pub quit_flag: &'a std::sync::atomic::AtomicBool,
-    /// The Settings modal's currently selected section. The sidebar's SMART
-    /// LISTS `+` writes it — the one route into the Smart Playlists page that
-    /// does not start from the nav rail (ticket 15).
+    /// The Settings modal's currently selected section, written by the nav
+    /// rail's own rows (`SelectSection`) and remembered between Settings
+    /// visits.
     pub settings_section: &'a mut SettingsSection,
-    /// The Smart Playlists page's frontend-local draft (ticket 15). The
-    /// sidebar's `+` opens a new, empty, unsaved one through it; a Save is
-    /// ticket 18's and writes the store, never this slot's persistence —
-    /// there is none.
+    /// The stage's Smart Playlist editor draft (ticket 15). The sidebar's `+`
+    /// routes and a saved list's Edit open it; a Save is ticket 18's and
+    /// writes the store, never this slot's persistence — there is none.
     pub smart_playlists_editor: &'a mut SmartPlaylistsEditor,
 }
 
@@ -936,43 +935,38 @@ impl<'a> Frame<'a> {
     // --- Step 9: the Smart Playlists draft's right to exist -----------------
 
     /// Decide the Smart Playlists draft's right to exist, once per frame and
-    /// before any panel draws: it belongs to the Smart Playlists page and to
-    /// a saved list that still exists, so leaving the page — another Settings
-    /// section, or the Settings view itself — or losing the list it was
-    /// written against discards it, while a rename of that list is followed
-    /// by the draft. [`SmartPlaylistsEditor::reconcile`] is the ONE place
-    /// that rule lives; this step is its one caller, so a stale draft cannot
-    /// survive through a path nobody remembered to wire. A discarded draft is
-    /// never painted, because the step precedes every draw.
+    /// before any panel draws: it belongs to an open editor and to a saved
+    /// list that still exists, so closing the editor — every navigation does —
+    /// or losing the list it was written against discards it, while a rename
+    /// of that list is followed by the draft.
+    /// [`SmartPlaylistsEditor::reconcile`] is the ONE place that rule lives;
+    /// this step is its one caller, so a stale draft cannot survive through a
+    /// path nobody remembered to wire. A discarded draft is never painted,
+    /// because the step precedes every draw.
     ///
-    /// The page-open fact is derived here — the Settings view is active and
-    /// the Settings section is the Smart Playlists page — from the library
-    /// session's view mode and the parts' Settings section slot. The
-    /// enumeration is the same bounded read the page's own content fill
-    /// makes, asked only while the page is on screen and through the
-    /// Session Views seam's fallible accessor: a store that *could not
-    /// answer* must not reach the reconcile as a store that answered "no
-    /// lists", because the draft is the only holder of the listener's work
-    /// and a transient read error would otherwise destroy it. A closed page
-    /// hands the reconcile the not-on-page fact without touching the store.
+    /// The editor-open fact is the parts' stage slot. The enumeration is the
+    /// same bounded read the editor's own surface makes, asked only while the
+    /// editor is on stage and through the Session Views seam's fallible
+    /// accessor: a store that *could not answer* must not reach the reconcile
+    /// as a store that answered "no lists", because the draft is the only
+    /// holder of the listener's work and a transient read error would
+    /// otherwise destroy it. A closed editor hands the reconcile the
+    /// not-on-page fact without touching the store.
     ///
-    /// The pane's other per-frame duties are pane-draw duties and stay in the
-    /// Settings pane's content fill, in their documented order: the gestures
-    /// land first, then the picker answer, then the match-line refresh reads
-    /// this frame's committed shape.
+    /// The pane's other per-frame duties are pane-draw duties and stay with
+    /// the stage editor's host, in their documented order: the gestures land
+    /// first, then the picker answer, then the match-line refresh reads this
+    /// frame's committed shape.
     fn reconcile_smart_playlist_draft(&mut self) {
         let editor_on_stage = *self.parts.smart_playlist_editor_open;
-        let smart_page_open = editor_on_stage
-            || (matches!(self.library.view_mode, ViewMode::Settings)
-                && *self.parts.settings_section == SettingsSection::SmartPlaylists);
-        let stored = if smart_page_open {
+        let stored = if editor_on_stage {
             self.parts.views.try_custom_smart_playlists()
         } else {
             Ok(Vec::new())
         };
         self.parts
             .smart_playlists_editor
-            .reconcile(smart_page_open, stored);
+            .reconcile(editor_on_stage, stored);
     }
 
     // --- Step 10: the titlebar's actions -----------------------------------

@@ -338,11 +338,11 @@ fn the_reconcile_drops_the_draft_only_where_it_no_longer_belongs() {
 }
 
 /// A failed enumeration read is not a successful read that found no lists: the
-/// draft — and the name typed into it — stays, and the reason is kept for the
-/// page to show. Only an answered read that no longer names the list drops it,
-/// and leaving the page drops it whatever the read said.
+/// draft — and the name typed into it — stays. Only an answered read that no
+/// longer names the list drops it, and leaving the editor drops it whatever
+/// the read said.
 #[test]
-fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
+fn a_failed_enumeration_read_keeps_the_draft() {
     let tree = nested_tree();
     // The draft and the enumeration this test answers with are built from ONE
     // `list` call: `PlaylistId::new` stamps the wall clock, so a second call
@@ -361,27 +361,17 @@ fn a_failed_enumeration_read_keeps_the_draft_and_carries_the_reason() {
         editor.name, "half-typed",
         "so nothing of the listener's is dropped"
     );
-    assert_eq!(
-        editor.lists_reason.as_deref(),
-        Some("the store is locked"),
-        "and the page is left the reason to paint"
-    );
 
-    // The read answers again — with the list — and the reason goes with it.
+    // The read answers again — with the list — and nothing changes.
     editor.reconcile(true, Ok(vec![saved.clone()]));
-    assert_eq!(editor.lists_reason, None);
     assert_eq!(
         editor.name, "half-typed",
         "an answered read changed nothing here"
     );
 
-    // Leaving the page is still a discard, whatever the read said.
+    // Leaving the editor is still a discard, whatever the read said.
     editor.reconcile(false, Err("the store is locked".to_string()));
     assert!(editor.is_new());
-    assert_eq!(
-        editor.lists_reason, None,
-        "a discarded draft leaves no reason behind"
-    );
 }
 
 /// A new, unsaved draft belongs to the page: the reconcile does not touch it

@@ -1104,8 +1104,10 @@ mod tests {
     }
 
     /// The sidebar's inline "New Playlist" name prompt, opened by pressing the
-    /// Playlists header's `+`. The prompt is a frontend-local draft, so this is
-    /// the only honest way to reach it: the real gesture on the real widget.
+    /// Playlists header's `+` and choosing "Playlist" from its kind popup. The
+    /// prompt is a frontend-local draft, so the real gestures on the real
+    /// widgets are the only honest way to reach it — popup settling frames
+    /// included.
     #[test]
     fn playlist_create_prompt_dark_matches_golden_baseline() {
         let library = Library::geogaddi();
@@ -1117,7 +1119,12 @@ mod tests {
             )),
             Region::Sidebar,
             Plan::columns(1),
-            |shell| click(shell, "New Playlist"),
+            |shell| {
+                click(shell, "New Playlist");
+                shell.run_steps(4);
+                click(shell, "Playlist");
+                shell.run_steps(2);
+            },
             Seed::over(&library),
         );
     }
@@ -2303,27 +2310,27 @@ mod tests {
         );
     }
 
-    /// The Smart Playlists pane (ticket 15), reached by clicking its nav item —
-    /// the nav's current section is a frontend-local field, so the gesture is
-    /// the only honest way in. Pins the empty state the sidebar `+` and the
-    /// section both open on: the way to write the first list and the editor
-    /// column waiting beside it.
+    /// The Smart Playlist editor on the stage (ticket 15), reached by pressing
+    /// the SMART LISTS header's `+` — the editor's slot is a frontend-local
+    /// field, so the gesture is the only honest way in. Pins what the route
+    /// opens: the header with its Back control, the empty name field wearing
+    /// its standing sentence, and the one blank Rule row waiting under it.
     #[test]
-    fn settings_smart_playlists_dark_matches_golden_baseline() {
+    fn smart_playlist_editor_dark_matches_golden_baseline() {
         let library = Library::geogaddi();
         snapshot_composed(
-            "settings_smart_playlists_dark",
-            window_with_stage(egui::vec2(920.0, 840.0)),
+            "smart_playlist_editor_dark",
+            window_with_stage(egui::vec2(1280.0, 960.0)),
             Region::Stage,
             Plan::columns(1),
-            |shell| click(shell, "Smart Playlists"),
-            on_settings(scanned(Seed::over(&library), &library, 1284)),
+            open_stage_editor,
+            scanned(Seed::over(&library), &library, 1284),
         );
     }
 
-    /// The saved Custom Smart Playlist every Smart Playlists golden below
-    /// opens: the list row, its nested tree, and the two Tracks its Rule
-    /// matches, seeded exactly as the query port serves them.
+    /// The saved Custom Smart Playlist every editor golden below opens: the
+    /// sidebar row, its nested tree, and the two Tracks its Rule matches,
+    /// seeded exactly as the query port serves them.
     fn morning_drive_seed(library: &Library) -> Seed {
         use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
         use riff_backend::domain::{
@@ -2332,7 +2339,7 @@ mod tests {
         };
 
         let id = PlaylistId::new("spl-morning-1");
-        let mut seed = on_settings(scanned(Seed::over(library), library, 1284));
+        let mut seed = scanned(Seed::over(library), library, 1284);
         seed.query.custom_smart_playlists = vec![CustomSmartPlaylist {
             id: id.clone(),
             name: "Morning drive".to_string(),
@@ -2369,57 +2376,62 @@ mod tests {
         seed
     }
 
-    /// Open one saved list in the Smart Playlists editor through its own row —
-    /// the honest way in, since the draft is frontend-local. The list's name is
-    /// worn by that row AND by ticket 12's sidebar row: the same shared
-    /// `tree_row` primitive, the same label and role, so the a11y tree cannot
-    /// tell them apart and the click has to take the match right of the
-    /// sidebar, which is what every one of these goldens crops.
-    fn open_saved_smart_playlist(
+    /// Put the Smart Playlist editor on the stage the honest way: the SMART
+    /// LISTS header's `+`, the same route a listener takes. The editor's
+    /// settling frames are the popup-free ones — the route opens the editor
+    /// directly, so two frames settle the stage it re-planned.
+    fn open_stage_editor(shell: &mut egui_kittest::Harness<'static, riff_gui::ui::RiffApp>) {
+        click(shell, "New Smart Playlist");
+        shell.run_steps(3);
+    }
+
+    /// Open one saved list's Rules in the stage editor through its sidebar
+    /// row's Edit — the honest way in, since the draft is frontend-local. The
+    /// menu's own settling frames precede the click, the same dance every
+    /// composed popup takes.
+    fn edit_saved_smart_playlist(
         shell: &mut egui_kittest::Harness<'static, riff_gui::ui::RiffApp>,
         name: &str,
     ) {
         use egui_kittest::kittest::Queryable as _;
 
-        click(shell, "Smart Playlists");
-        // The nav click applies at the end of its frame; the list's row exists
-        // in the tree only after the pane has painted.
-        shell.run_steps(2);
         shell
             .query_all_by_label(name)
-            .find(|node| node.rect().center().x > theme::SIDEBAR_W)
-            .expect("the pane's own row for the saved list")
-            .click();
-        shell.remove_cursor();
+            .find(|node| node.rect().center().x < theme::SIDEBAR_W)
+            .expect("the sidebar row bearing the name")
+            .click_secondary();
+        shell.run_steps(4);
+        click(shell, "Edit");
+        shell.run_steps(3);
     }
 
-    /// The Smart Playlists pane holding a **nested** tree (ticket 16): a saved
-    /// list whose Rules sit inside Boxes inside Boxes.
+    /// The editor holding a **nested** tree (ticket 16): a saved list whose
+    /// Rules sit inside Boxes inside Boxes.
     ///
     /// What the picture pins: the Root Box's sentence — "Match songs where",
     /// its one-word combine chip, "of the following are true" — each Rule as one
     /// row of chips with no disclosure glyph, and every Box's contents inside a
-    /// card: a step of fill above the page with a left edge, so a nested Box is
+    /// card: a step of fill above the stage with a left edge, so a nested Box is
     /// *seen* rather than counted off an indent. Also the count in the name
     /// well, the interleaved Rules-and-Boxes order, each Box's own remove
     /// control, and each Box's add controls under its children.
     #[test]
-    fn settings_smart_playlists_nested_dark_matches_golden_baseline() {
+    fn smart_playlist_editor_nested_dark_matches_golden_baseline() {
         let library = Library::geogaddi();
         snapshot_composed(
-            "settings_smart_playlists_nested_dark",
+            "smart_playlist_editor_nested_dark",
             window_with_stage(egui::vec2(1280.0, 960.0)),
             Region::Stage,
             Plan::columns(1),
-            |shell| open_saved_smart_playlist(shell, "Morning drive"),
+            |shell| edit_saved_smart_playlist(shell, "Morning drive"),
             morning_drive_seed(&library),
         );
     }
 
-    /// The same pane at a stage too narrow to split — below the
-    /// `MIN_TWO_COL_W` the Library pane already honors — so the lists column
-    /// draws first and the editor sits under it: the sentence, the chips and a
-    /// card inside a card, at the width they have least room at.
+    /// The same editor on a stage at the narrow end — below the width the
+    /// editor's column is capped to, so the column takes the full stage minus
+    /// its padding: the sentence, the chips and a card inside a card, at the
+    /// width they have least room at.
     ///
     /// Its Rules are `is missing` ones on purpose. A comparison that takes no
     /// value draws no well, and that is the only row a stage this narrow can
@@ -2429,7 +2441,7 @@ mod tests {
     /// nothing but the clipping — a standing defect of the row's own, and not
     /// what this golden is the guard for.
     #[test]
-    fn settings_smart_playlists_stacked_dark_matches_golden_baseline() {
+    fn smart_playlist_editor_narrow_dark_matches_golden_baseline() {
         use riff_backend::app::store::SmartPlaylistTree;
         use riff_backend::domain::{
             Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild,
@@ -2458,11 +2470,11 @@ mod tests {
             ))),
         );
         snapshot_composed(
-            "settings_smart_playlists_stacked_dark",
+            "smart_playlist_editor_narrow_dark",
             window_with_stage(egui::vec2(560.0, 900.0)),
             Region::Stage,
             Plan::columns(1),
-            |shell| open_saved_smart_playlist(shell, "Morning drive"),
+            |shell| edit_saved_smart_playlist(shell, "Morning drive"),
             seed,
         );
     }
@@ -2470,18 +2482,18 @@ mod tests {
     /// The name well wearing a count the engine refused: the store's own reason
     /// in the error ink, and no number standing in for it.
     #[test]
-    fn settings_smart_playlists_count_failed_dark_matches_golden_baseline() {
+    fn smart_playlist_editor_count_failed_dark_matches_golden_baseline() {
         use crate::mocks::FailingQuery;
 
         let library = Library::geogaddi();
         let mut seed = morning_drive_seed(&library);
         seed.query.failing = vec![FailingQuery::CustomSmartPlaylistCount];
         snapshot_composed(
-            "settings_smart_playlists_count_failed_dark",
+            "smart_playlist_editor_count_failed_dark",
             window_with_stage(egui::vec2(1280.0, 960.0)),
             Region::Stage,
             Plan::columns(1),
-            |shell| open_saved_smart_playlist(shell, "Morning drive"),
+            |shell| edit_saved_smart_playlist(shell, "Morning drive"),
             seed,
         );
     }

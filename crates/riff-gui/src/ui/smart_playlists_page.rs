@@ -1,19 +1,17 @@
-//! The Smart Playlists page — Settings' editor for Custom Smart Playlists
-//! (ticket 15; ADR 0021: rules are collection data, Settings is only where
-//! they are edited).
+//! The Smart Playlist editor — the stage's surface for writing a Custom
+//! Smart Playlist's Rules (ticket 15; ADR 0021: rules are collection data,
+//! the editor is only the surface that edits them).
 //!
-//! Two columns while the pane is wide enough to split — the listener's saved
-//! Custom Smart Playlists down the left, the Rules they are writing on the
-//! right, and the name typed as they write — collapsing to one stacked column
-//! below [`MIN_TWO_COL_W`](riff_gui_theme::theme::geometry::settings::MIN_TWO_COL_W),
-//! exactly the branch the Library pane already draws ([`settings_pane_columns`]).
+//! The editor renders on the stage: the editor column under its own header,
+//! at the width the Settings pane's two-column branch used to give it, so a
+//! listener who met the editor in Settings finds the same pixels here. It is
+//! reached from the sidebar — either `+`'s "Smart Playlist" choice or a saved
+//! list's Edit — and every navigation closes it.
 //!
 //! **The editor state is frontend-local and this module owns its shape.**
 //! [`SmartPlaylistsEditor`] is one `RiffApp` field, the same owner-held-draft
 //! pattern as the inline tag editor: nothing here is persisted, which is what
-//! keeps "a list appears in the sidebar only at Save" true, and what keeps the
-//! last-selected Settings section (also `RiffApp`-local) free of any new
-//! stored state.
+//! keeps "a list appears in the sidebar only at Save" true.
 //!
 //! **The handoff.** Tickets 16–20 build *inside* this pane, and the boundary
 //! is deliberate:
@@ -49,17 +47,14 @@
 //! the answer lands through `RiffApp`'s apply step and reaches the row as the
 //! [`RulePickerValues`] prop.
 
-use crate::ui::browser;
 use crate::ui::rule_box::{
     BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft, SpellBlock, SpellSource,
 };
 use crate::ui::rule_row::{
     self, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, ValueGap, rule_row,
 };
-use crate::ui::settings::{
-    LibraryPaneColumns, SettingsAction, SettingsContent, settings_pane_columns,
-};
-use crate::ui::sidebar::{self, TreeRow};
+use crate::ui::settings::{LibraryPaneColumns, SettingsAction, settings_pane_columns};
+use crate::ui::sidebar;
 use riff_backend::app::playlist_name::builtin_smart_list_name_conflict;
 use riff_backend::app::state::{LibrarySession, PlaybackSession};
 use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
@@ -75,7 +70,7 @@ use riff_gui_components::text_field::{TextField, TrailingText, TrailingTone, tex
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_box;
 use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, LIST_TOP_GAP, PART_GAP, WELL_H};
-use riff_gui_theme::theme::geometry::settings::{PAGE_HEADER_H, PANE_PAD, SECTION_GAP};
+use riff_gui_theme::theme::geometry::settings::{PAGE_HEADER_H, PANE_PAD};
 use riff_gui_theme::theme::{self, Palette, styled_font};
 
 /// The Library values the pane read for one open picker, held as the editor's
@@ -237,14 +232,6 @@ pub struct SmartPlaylistsEditor {
     /// single slot is the tag editor's shape (`draft.error`), shared, and it
     /// is cleared only by a Save that passes every local check.
     pub refusal: Option<SmartPlaylistRefusal>,
-    /// Why the page's enumeration of the saved lists could not be read — the
-    /// reason channel's string, kept for the left column, whose empty state
-    /// would otherwise claim the listener has no lists at all (the Custom
-    /// listing draws the same distinction for its own failed read). Written
-    /// and cleared by [`Self::reconcile`], which is also what keeps the draft
-    /// alive while the read fails: a store that could not answer has not said
-    /// the list is gone. `None` whenever the read answered.
-    pub lists_reason: Option<String>,
     /// What the live match line shows: the count of the draft's committed
     /// tree, or why no number can be shown. Written by the app's per-frame
     /// refresh through [`SessionViews::custom_list_match_count`](riff_backend::app::views::SessionViews::custom_list_match_count)
@@ -271,7 +258,6 @@ impl Default for SmartPlaylistsEditor {
             picker: None,
             pending_picker: None,
             refusal: None,
-            lists_reason: None,
             match_line: None,
         }
     }
@@ -315,11 +301,10 @@ impl SmartPlaylistsEditor {
         self.discard();
     }
 
-    /// The **single reconcile hook**: keep the draft aligned with the page and
-    /// with the saved row it was written against — dropping it when it no
-    /// longer belongs, letting it follow a rename — and tell the page when the
-    /// row could not be looked up at all. A draft belongs to the Smart
-    /// Playlists page and, when it has one, to a saved list that still exists;
+    /// The **single reconcile hook**: keep the draft aligned with the editor
+    /// and with the saved row it was written against — dropping it when it no
+    /// longer belongs, letting it follow a rename. A draft belongs to an open
+    /// editor and, when it has one, to a saved list that still exists;
     /// anything else is a draft outliving the thing it was written for, and it
     /// goes. Enforced here, not by call-site discipline — the Frame's step 9
     /// ([`crate::ui::frame::Frame::reconcile_smart_playlist_draft`]) calls
@@ -327,23 +312,20 @@ impl SmartPlaylistsEditor {
     /// re-stamps a draft itself.
     ///
     /// `stored` is the D14 enumeration's answer: `Ok` is the store naming the
-    /// saved lists, `Err` is the store saying nothing at all — the reason it
-    /// could not be read, which the left column paints in place of its "no
-    /// lists" empty state ([`Self::lists_reason`]). The two are *not* the same
-    /// fact, and reading a failed read as an empty store used to discard the
-    /// listener's unsaved work on a transient error. `stored` is ignored when
-    /// `on_page` is false: the draft is discarded before any of it matters.
+    /// saved lists, `Err` is the store saying nothing at all — it could not be
+    /// read. The two are *not* the same fact, and reading a failed read as an
+    /// empty store used to discard the listener's unsaved work on a transient
+    /// error. `stored` is ignored when `on_page` is false: the draft is
+    /// discarded before any of it matters.
     ///
     /// The cases, and what they are:
     ///
-    /// - **the page is gone** (`on_page` false: another Settings section, or
-    ///   the whole Settings view left behind): unsaved edits are discarded on
-    ///   leave, exactly as the inline tag editor discards them on a selection
-    ///   change;
+    /// - **the editor is gone** (`on_page` false: a navigation closed it):
+    ///   unsaved edits are discarded on leave, exactly as the inline tag
+    ///   editor discards them on a selection change;
     /// - **the read failed** (`Err`): the draft stays, whatever it holds —
     ///   the store could not say whether the list is there, and a guess that
-    ///   it is not costs the listener their whole rule set — and the reason is
-    ///   kept for the page to show;
+    ///   it is not costs the listener their whole rule set;
     /// - **its list is gone** (enumerated successfully, and not named among
     ///   the lists): the draft can only be written against a list that is not
     ///   there any more, so it cannot stay;
@@ -355,8 +337,8 @@ impl SmartPlaylistsEditor {
     ///   are not re-read**: a sidebar rename touches no `smart_rules` row, so
     ///   the stored tree is exactly what this draft was opened from, and
     ///   re-loading it would throw the work in progress away. A name the
-    ///   listener has typed into is left alone — that is the name the page
-    ///   shows, and Save writes what the page shows, so it must never be
+    ///   listener has typed into is left alone — that is the name the editor
+    ///   shows, and Save writes what the editor shows, so it must never be
     ///   overwritten here.
     ///
     /// Switching to another list is *not* a drop and does not belong here: it
@@ -368,14 +350,9 @@ impl SmartPlaylistsEditor {
             self.discard();
             return;
         }
-        let lists = match stored {
-            Ok(lists) => lists,
-            Err(reason) => {
-                self.lists_reason = Some(reason);
-                return;
-            }
+        let Ok(lists) = stored else {
+            return;
         };
-        self.lists_reason = None;
         let Some(id) = self.selected.as_ref() else {
             // A new, unsaved draft: it belongs to the page and to no row.
             return;
@@ -798,144 +775,6 @@ fn editor_header(
         },
     ) {
         actions.push(SettingsAction::CancelSmartPlaylist);
-    }
-}
-
-/// Draw the Smart Playlists section's pane: the listener's lists down the
-/// left, the Rules being written on the right, collapsing to one stacked
-/// column below the two-column boundary the Library pane already honors.
-///
-/// `content.custom_smart_playlists` is the frame's enumeration through the
-/// Session Views seam; `editor` is the `RiffApp`-held draft. The pane mutates
-/// only the draft's typed buffers (in place, the row's own contract) and
-/// reports every gesture as a typed [`SettingsAction`] for `RiffApp`'s apply
-/// step — Save, Cancel and their meanings included, which stay ticket 18's.
-pub fn smart_playlists_pane(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    content: &SettingsContent,
-    editor: &mut SmartPlaylistsEditor,
-    actions: &mut Vec<SettingsAction>,
-) {
-    match settings_pane_columns(ui.available_width()) {
-        LibraryPaneColumns::Stacked { width } => {
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(width, ui.available_height()),
-                    ))
-                    .id_salt("smart-playlists-column"),
-                |ui| {
-                    lists_column(ui, cache, palette, content, editor, actions);
-                    ui.add_space(SECTION_GAP);
-                    editor_column(ui, cache, palette, content.reduce_motion, editor, actions);
-                },
-            );
-        }
-        LibraryPaneColumns::TwoColumns { left, right } => {
-            ui.horizontal_top(|ui| {
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(left, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min))
-                        .id_salt(("smart-playlists-column", 0)),
-                    |ui| {
-                        lists_column(ui, cache, palette, content, editor, actions);
-                    },
-                );
-                // The left scope's used rect advances the horizontal flow, so
-                // the cursor already names the right column's left edge — the
-                // exact idiom the Library pane allocates its columns with.
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(right, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min))
-                        .id_salt(("smart-playlists-column", 1)),
-                    |ui| {
-                        editor_column(ui, cache, palette, content.reduce_motion, editor, actions);
-                    },
-                );
-            });
-        }
-    }
-}
-
-/// The left column: the listener's saved lists, and the page's own way to
-/// start one — so the listener who never finds the sidebar `+` still has a
-/// route, and the empty state is never a dead end.
-fn lists_column(
-    ui: &mut egui::Ui,
-    cache: &mut IconCache,
-    palette: &Palette,
-    content: &SettingsContent,
-    editor: &SmartPlaylistsEditor,
-    actions: &mut Vec<SettingsAction>,
-) {
-    sidebar::section_header(ui, palette, "Smart Playlists");
-    ui.add_space(theme::SPACE_SM);
-    if flow_text_button(
-        ui,
-        cache,
-        palette,
-        content.reduce_motion,
-        &FlowTextButton {
-            id: egui::Id::new("smart_playlists_new"),
-            label: "New smart playlist",
-            icon: Some(Icon::Plus),
-            small: false,
-            variant: Variant::Primary,
-            enabled: true,
-        },
-    ) {
-        actions.push(SettingsAction::NewSmartPlaylist);
-    }
-    ui.add_space(theme::SPACE_MD);
-
-    if content.custom_smart_playlists.is_empty() {
-        // The empty state is a claim — "you have no saved lists" — and a
-        // failed enumeration read cannot make it: the store said nothing, the
-        // draft was kept for the same reason, and the reason is what the
-        // column paints instead (the error treatment the Custom listing gives
-        // its own failed read). The Frame's reconcile step and
-        // `settings.rs`'s fill read the same enumeration in the same frame,
-        // so an empty column and a reason arrive together.
-        if let Some(reason) = &editor.lists_reason {
-            ui.colored_label(palette.error, reason);
-        } else {
-            browser::empty_state(
-                ui,
-                palette,
-                "No smart playlists yet",
-                "Press \"New smart playlist\" above to write the first one.",
-            );
-        }
-        return;
-    }
-
-    for list in &content.custom_smart_playlists {
-        let row = sidebar::tree_row(
-            ui,
-            cache,
-            palette,
-            content.reduce_motion,
-            TreeRow::nav(
-                list.name.as_str(),
-                Some(Icon::Sparkles),
-                None,
-                editor.selected.as_ref() == Some(&list.id),
-            ),
-        );
-        if row.response.clicked() {
-            actions.push(SettingsAction::SelectSmartPlaylist(list.id.clone()));
-        }
     }
 }
 
@@ -1918,9 +1757,7 @@ impl super::app::RiffApp {
     /// line as its reason, never as the zero beside it — a number the engine
     /// just refused is exactly what must not be drawn.
     pub fn refresh_smart_playlist_match_line(&mut self) {
-        if !self.smart_playlist_editor_open
-            && self.settings_section != crate::ui::settings::SettingsSection::SmartPlaylists
-        {
+        if !self.smart_playlist_editor_open {
             return;
         }
         let line = match self.smart_playlists_editor.committed_tree() {

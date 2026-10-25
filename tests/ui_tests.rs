@@ -5535,11 +5535,10 @@ mod tests {
 
     // --- Sectioned Settings modal + left nav (Issue 11) ------------------------
     //
-    // Settings becomes a sectioned modal with a left nav (Library, Smart
-    // Playlists, Playback, Appearance, Advanced, About) instead of one long
-    // scrolling stage. The seams: the pure `SettingsSection` type, and the
-    // headless renderer reporting `SettingsAction`s — the same shape the
-    // former stage used.
+    // Settings is a sectioned modal with a left nav (Library, Playback,
+    // Appearance, Advanced, About) instead of one long scrolling stage. The
+    // seams: the pure `SettingsSection` type, and the headless renderer
+    // reporting `SettingsAction`s — the same shape the former stage used.
 
     #[test]
     fn test_settings_sections_list_the_nav_entries_in_mockup_order() {
@@ -5548,14 +5547,7 @@ mod tests {
         let labels: Vec<&str> = SettingsSection::ALL.iter().map(|s| s.label()).collect();
         assert_eq!(
             labels,
-            vec![
-                "Library",
-                "Smart Playlists",
-                "Playback",
-                "Appearance",
-                "Advanced",
-                "About",
-            ],
+            vec!["Library", "Playback", "Appearance", "Advanced", "About"],
             "the left nav lists exactly the implemented sections in order"
         );
     }
@@ -5576,22 +5568,15 @@ mod tests {
         size: egui::Vec2,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
         use riff_gui::ui::settings::show_settings_modal;
-        use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
-        let mut editor = SmartPlaylistsEditor::default();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
             .build_ui_state(
                 move |ui, actions: &mut Vec<SettingsAction>| {
                     actions.extend(show_settings_modal(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        content,
-                        current,
-                        &mut editor,
+                        ui, &mut cache, &palette, content, current,
                     ));
                 },
                 Vec::new(),
@@ -6526,7 +6511,6 @@ mod tests {
             let content = sample_content();
             let palette = Palette::dark();
             let mut cache = icons::IconCache::new();
-            let mut editor = riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
             let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
                 egui_kittest::Harness::builder()
                     .with_size(egui::vec2(width, SHORT))
@@ -6539,7 +6523,6 @@ mod tests {
                                 &palette,
                                 &content,
                                 SettingsSection::Library,
-                                &mut editor,
                             ));
                         },
                         Vec::new(),
@@ -6828,18 +6811,6 @@ mod tests {
                 .contains(&SettingsAction::SelectSection(SettingsSection::Playback)),
             "every nav item is clickable"
         );
-
-        // The Smart Playlists entry (ticket 15) is a nav item like the rest:
-        // the label is the handle, so a golden can drive the pane by clicking
-        // it rather than by seeding a frontend-local field.
-        harness.get_by_label("Smart Playlists").click();
-        harness.run();
-        assert!(
-            harness.state().contains(&SettingsAction::SelectSection(
-                SettingsSection::SmartPlaylists
-            )),
-            "the Smart Playlists entry reports its section like the rest"
-        );
     }
 
     #[test]
@@ -6874,22 +6845,6 @@ mod tests {
             harness.query_by_label("Add Library").is_none(),
             "the Library card must not render in the Advanced pane"
         );
-
-        // Smart Playlists: the editor page replaces the library controls —
-        // its own New button and its one blank Rule row's Add control.
-        {
-            let section = SettingsSection::SmartPlaylists;
-            let mut harness = settings_modal_harness(&content, section);
-            harness.run();
-            assert!(
-                harness.query_by_label("Add rule").is_some(),
-                "the Smart Playlists pane shows the editor's own controls"
-            );
-            assert!(
-                harness.query_by_label("Add Library").is_none(),
-                "the Library card must not render in the Smart Playlists pane"
-            );
-        }
 
         // About has no existing content and shows a clear placeholder.
         {
@@ -6959,39 +6914,24 @@ mod tests {
 
     // --- Smart Playlists page (ticket 15) --------------------------------------
     //
-    // The pane's own seam: `show_settings_modal` at the Smart Playlists
-    // section, over a `SettingsContent` with staged lists, with the editor
-    // draft held as the harness state — the same one-owner draft `RiffApp`
-    // gives it. Every gesture is asserted as the typed `SettingsAction` it
-    // reports (selection, a new draft); the name typed while writing is
-    // asserted as the buffer it is, because that is what ticket 18's Save
-    // will read (the inline tag editor's own shape).
+    // The editor's own seam: `smart_playlist_editor_pane` on the stage, with
+    // the editor draft held as the harness state — the same one-owner draft
+    // `RiffApp` gives it. Every gesture is asserted as the typed
+    // `SettingsAction` it reports; the name typed while writing is asserted
+    // as the buffer it is, because that is what ticket 18's Save will read
+    // (the inline tag editor's own shape).
 
-    /// One saved-list row for the pane's left column, as the D14 read
-    /// answers it. The id comes in named because `PlaylistId::new` mints a
-    /// fresh time-suffixed id, and a test comparing intents must compare
-    /// against the exact one it staged.
-    fn custom_list(id: &PlaylistId, name: &str) -> CustomSmartPlaylist {
-        CustomSmartPlaylist {
-            id: id.clone(),
-            name: name.to_string(),
-            created_at: std::time::SystemTime::UNIX_EPOCH,
-        }
-    }
-
-    /// The sectioned modal on the Smart Playlists section, with the editor
-    /// draft kept across frames so typing lands in one draft.
-    fn smart_playlists_harness_sized(
-        content: &SettingsContent,
+    /// The stage's Smart Playlist editor, with the draft kept across frames
+    /// so typing lands in one draft.
+    fn smart_playlists_editor_harness(
         size: egui::Vec2,
     ) -> egui_kittest::Harness<
-        '_,
+        'static,
         (
             riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
             Vec<SettingsAction>,
         ),
     > {
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
         use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
 
         let palette = theme::Palette::dark();
@@ -7002,100 +6942,12 @@ mod tests {
             .build_ui_state(
                 move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
                     let (editor, actions) = state;
-                    actions.extend(show_settings_modal(
-                        ui,
-                        &mut cache,
-                        &palette,
-                        content,
-                        SettingsSection::SmartPlaylists,
-                        editor,
-                    ));
+                    riff_gui::ui::smart_playlists_page::smart_playlist_editor_pane(
+                        ui, &mut cache, &palette, false, editor, actions,
+                    );
                 },
                 (SmartPlaylistsEditor::default(), Vec::new()),
             )
-    }
-
-    /// The left column lists every saved Custom Smart Playlist the D14 read
-    /// answers, by name — the read runs through `SettingsContent`, exactly
-    /// how the app fills it.
-    #[test]
-    fn test_smart_playlists_pane_lists_every_saved_list() {
-        use egui_kittest::kittest::Queryable;
-
-        let content = SettingsContent {
-            custom_smart_playlists: vec![
-                custom_list(&PlaylistId::new("spl-morning-1"), "Morning drive"),
-                custom_list(&PlaylistId::new("spl-late-night-2"), "Late night jazz"),
-            ],
-            ..sample_content()
-        };
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
-        harness.run();
-
-        assert!(
-            harness.query_by_label("Morning drive").is_some(),
-            "the first saved list is a row in the left column"
-        );
-        assert!(
-            harness.query_by_label("Late night jazz").is_some(),
-            "the second saved list is a row in the left column"
-        );
-        assert!(
-            harness.query_by_label("No smart playlists yet").is_none(),
-            "a page with lists does not show the empty state"
-        );
-    }
-
-    /// Picking a saved list is a typed intent — `SelectSmartPlaylist` carries
-    /// the D14 id, and loading the draft is the app's apply step, not the
-    /// pane's paint.
-    #[test]
-    fn test_a_saved_list_row_reports_select_smart_playlist() {
-        use egui_kittest::kittest::Queryable;
-
-        let id = PlaylistId::new("spl-late-night-2");
-        let content = SettingsContent {
-            custom_smart_playlists: vec![custom_list(&id, "Late night jazz")],
-            ..sample_content()
-        };
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
-        harness.run();
-
-        harness.get_by_label("Late night jazz").click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .1
-                .contains(&SettingsAction::SelectSmartPlaylist(id.clone())),
-            "clicking a saved list reports its exact D14 id as the list to edit"
-        );
-    }
-
-    /// The page's own "New smart playlist" button reports the same intent the
-    /// sidebar `+` does — the route for the listener who never finds it.
-    ///
-    /// Role-scoped on purpose: the editor column's title bears the same
-    /// words, so only the control is the handle.
-    #[test]
-    fn test_the_pages_own_button_reports_new_smart_playlist() {
-        use egui_kittest::kittest::Queryable;
-
-        let content = sample_content();
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
-        harness.run();
-
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
-            .click();
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .1
-                .contains(&SettingsAction::NewSmartPlaylist),
-            "the page's own button reports the new-draft intent"
-        );
     }
 
     /// The name typed while writing lands in the draft the Save will read —
@@ -7105,8 +6957,7 @@ mod tests {
     fn test_typing_the_name_edits_the_draft_buffer() {
         use egui_kittest::kittest::Queryable;
 
-        let content = sample_content();
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
         harness
@@ -7124,102 +6975,26 @@ mod tests {
         );
     }
 
-    /// With nothing saved the page states its emptiness and still offers the
-    /// way to make the first list — the empty state is never a dead end.
+    /// The editor's Back control and its Cancel row are the same decision —
+    /// both report `CancelSmartPlaylist`, so the header's route and the
+    /// column's button cannot drift into two meanings.
     #[test]
-    fn test_the_empty_pane_offers_the_route_to_the_first_list() {
+    fn test_back_and_cancel_report_the_same_discard() {
         use egui_kittest::kittest::Queryable;
 
-        let content = sample_content();
-        assert!(
-            content.custom_smart_playlists.is_empty(),
-            "the fixture starts from no saved lists"
-        );
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
-        assert!(
-            harness.query_by_label("No smart playlists yet").is_some(),
-            "an empty page says there are none yet"
-        );
-        let new_button =
-            harness.get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist");
-        assert!(
-            new_button.rect().width() > 0.0 && new_button.rect().height() > 0.0,
-            "the route the empty state names is a real hit area, not a painted word"
-        );
-        new_button.click();
+        harness
+            .get_by_label("Back from the Smart Playlist editor")
+            .click();
         harness.run();
         assert!(
             harness
                 .state()
                 .1
-                .contains(&SettingsAction::NewSmartPlaylist),
-            "the empty state's route reports the same intent as everywhere else"
-        );
-    }
-
-    /// The pane branches with the window exactly as the Library pane does:
-    /// two columns at a wide size — the listener's lists left, the editor
-    /// right — and one stacked column below the shared
-    /// `settings_pane_columns` boundary.
-    ///
-    /// Measured through the query tree at both widths, the same geometry
-    /// probe the Library pane's own split test uses: the pane is laid out
-    /// unclipped at a probe height tall enough that no scroll position can
-    /// move a probe between reads.
-    #[test]
-    fn test_the_smart_playlists_pane_splits_wide_and_stacks_narrow() {
-        use egui_kittest::kittest::Queryable;
-
-        /// Tall enough that the whole pane lays out unclipped at either
-        /// width, so every probed widget is visible in the first frame.
-        const PANE_PROBE_H: f32 = 1600.0;
-
-        let render = |width: f32| {
-            let content = sample_content();
-            let mut harness =
-                smart_playlists_harness_sized(&content, egui::vec2(width, PANE_PROBE_H));
-            harness.run();
-            let new_button = harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
-                .rect();
-            let name = harness.get_by_role(egui::accesskit::Role::TextInput).rect();
-            let save = harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Save")
-                .rect();
-            (new_button, name, save)
-        };
-
-        // Wide: the two-column branch. The left column's button sits entirely
-        // left of the right column's name field and Save control.
-        let (new_button, name, save) = render(1280.0);
-        assert!(
-            new_button.right() < name.left(),
-            "wide: the name field must be in the right column, entirely right \
-             of the left column's button: {} vs {}",
-            new_button.right(),
-            name.left()
-        );
-        assert!(
-            new_button.right() < save.left(),
-            "wide: Save reads in the right column too"
-        );
-
-        // Narrow: below the boundary the editor stacks under the lists — the
-        // name field and Save move below the left column instead of beside
-        // it.
-        let (new_button, name, save) = render(700.0);
-        assert!(
-            name.top() >= new_button.bottom(),
-            "narrow: the editor must stack below the left column, not sit \
-             beside it: {} vs {}",
-            name.top(),
-            new_button.bottom()
-        );
-        assert!(
-            save.top() > name.top(),
-            "narrow: Save still reads inside the editor, under the name field"
+                .contains(&SettingsAction::CancelSmartPlaylist),
+            "the header's Back reports the editor's Cancel intent"
         );
     }
 
@@ -7232,21 +7007,19 @@ mod tests {
     // and every control is clicked at its real hit area through kittest's
     // pointer, never queried and assumed reachable.
 
-    /// The pane over a state-owning editor, applying the tree gestures the
-    /// way `RiffApp::apply_settings_action` does. Selection, Save and Cancel
-    /// stay reported-but-unapplied exactly as the existing pane harness
-    /// keeps them.
+    /// The stage editor over a state-owning draft, applying the tree
+    /// gestures the way `RiffApp::apply_settings_action` does. Save and
+    /// Cancel stay reported-but-unapplied exactly as the pane harness keeps
+    /// them.
     fn smart_playlists_tree_harness(
-        content: &SettingsContent,
         size: egui::Vec2,
     ) -> egui_kittest::Harness<
-        '_,
+        'static,
         (
             riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
             Vec<SettingsAction>,
         ),
     > {
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
         use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
 
         let palette = theme::Palette::dark();
@@ -7257,13 +7030,14 @@ mod tests {
             .build_ui_state(
                 move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
                     let (editor, actions) = state;
-                    let reported = show_settings_modal(
+                    let mut reported = Vec::new();
+                    riff_gui::ui::smart_playlists_page::smart_playlist_editor_pane(
                         ui,
                         &mut cache,
                         &palette,
-                        content,
-                        SettingsSection::SmartPlaylists,
+                        false,
                         editor,
+                        &mut reported,
                     );
                     for action in reported {
                         match &action {
@@ -7342,8 +7116,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::BoxPath;
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
         click_nth(&mut harness, "Add group", 0);
@@ -7398,8 +7171,7 @@ mod tests {
     fn test_a_nested_boxes_add_rule_reports_that_box_as_the_parent() {
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add group", 0);
 
@@ -7439,7 +7211,6 @@ mod tests {
         use egui_kittest::kittest::{By, Queryable as _};
         use riff_gui::ui::smart_playlists_page::SmartPlaylistMatchLine;
 
-        let content = sample_content();
         for (line, expected) in [
             (SmartPlaylistMatchLine::Matches(1), "1 song"),
             (SmartPlaylistMatchLine::Matches(7), "7 songs"),
@@ -7457,7 +7228,7 @@ mod tests {
                  no Rule, so there is nothing to match",
             ),
         ] {
-            let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+            let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
             harness.state_mut().0.match_line = Some(line);
             harness.run();
             assert!(
@@ -7469,7 +7240,7 @@ mod tests {
         // A draft whose line was never written wears the well's standing
         // sentence: no number, and no reason either — nothing has been refused,
         // the read has simply not answered for this draft yet.
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         assert!(
             harness
@@ -7483,33 +7254,6 @@ mod tests {
         );
     }
 
-    /// The page's own list column shows no count beside a row: a counted row
-    /// would wear "Name (count)", so the exact label is the assertion — the
-    /// same shape ticket 12 pins for the sidebar rows.
-    #[test]
-    fn test_the_pages_list_column_rows_carry_no_count() {
-        use egui_kittest::kittest::{By, Queryable as _};
-
-        let id = PlaylistId("spl-late-night-2".to_string());
-        let content = SettingsContent {
-            custom_smart_playlists: vec![custom_list(&id, "Late night jazz")],
-            ..sample_content()
-        };
-        let mut harness = smart_playlists_harness_sized(&content, egui::vec2(1280.0, 840.0));
-        harness.run();
-
-        assert!(
-            harness.query(By::new().label("Late night jazz")).is_some(),
-            "the exact label is what a row without a count wears"
-        );
-        assert!(
-            harness
-                .query_by_label_contains("Late night jazz (")
-                .is_none(),
-            "no count folds into the page's list column"
-        );
-    }
-
     /// Removing a Rule reports its slot and takes exactly that row, leaving
     /// its siblings' positions intact.
     #[test]
@@ -7517,8 +7261,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add rule", 0);
         assert_eq!(harness.state().0.root.children.len(), 2);
@@ -7551,8 +7294,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add group", 0);
         click_nth(&mut harness, "Add rule", 0);
@@ -7617,8 +7359,7 @@ mod tests {
             harness.run();
         }
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
         // The root's own combine can be changed first: its chip is the
@@ -7676,10 +7417,9 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::BoxPath;
 
-        let content = sample_content();
         // Tall enough that all seven levels lay out unclipped, so every
         // control probed is genuinely clickable.
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 2400.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 2400.0));
         harness.run();
 
         for expected_levels in 2..=7 {
@@ -7775,8 +7515,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_backend::domain::MatchableField;
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
         // The box that holds the two values is an any-of box.
@@ -7873,20 +7612,18 @@ mod tests {
         editor
     }
 
-    /// The pane over a caller-seeded draft, with the host applying the tree
-    /// gestures and Save/Cancel the way `RiffApp::apply_settings_action` does.
+    /// The stage editor over a caller-seeded draft, with the host applying
+    /// the tree gestures and Save/Cancel the way `RiffApp`'s apply step does.
     fn smart_playlists_draft_harness(
-        content: &SettingsContent,
         editor: SmartPlaylistsEditor,
         size: egui::Vec2,
     ) -> egui_kittest::Harness<
-        '_,
+        'static,
         (
             riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor,
             Vec<SettingsAction>,
         ),
     > {
-        use riff_gui::ui::settings::{SettingsSection, show_settings_modal};
         use riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor;
 
         let palette = theme::Palette::dark();
@@ -7897,13 +7634,14 @@ mod tests {
             .build_ui_state(
                 move |ui, state: &mut (SmartPlaylistsEditor, Vec<SettingsAction>)| {
                     let (editor, actions) = state;
-                    let reported = show_settings_modal(
+                    let mut reported = Vec::new();
+                    riff_gui::ui::smart_playlists_page::smart_playlist_editor_pane(
                         ui,
                         &mut cache,
                         &palette,
-                        content,
-                        SettingsSection::SmartPlaylists,
+                        false,
                         editor,
+                        &mut reported,
                     );
                     for action in reported {
                         match &action {
@@ -7988,9 +7726,7 @@ mod tests {
     /// on the pane's own controls — what they mean is the app's apply step.
     #[test]
     fn test_save_and_cancel_are_reported_as_typed_intents() {
-        let content = sample_content();
         let mut harness = smart_playlists_draft_harness(
-            &content,
             SmartPlaylistsEditor::default(),
             egui::vec2(1280.0, 840.0),
         );
@@ -8021,9 +7757,7 @@ mod tests {
     fn test_the_draft_survives_repaints_and_a_mid_edit_tree_change() {
         use egui_kittest::kittest::Queryable as _;
 
-        let content = sample_content();
         let mut harness = smart_playlists_draft_harness(
-            &content,
             SmartPlaylistsEditor::default(),
             egui::vec2(1280.0, 840.0),
         );
@@ -8062,7 +7796,6 @@ mod tests {
         use riff_backend::domain::MatchableField;
         use riff_gui::ui::rule_box::RuleChildDraft;
 
-        let content = sample_content();
         let mut editor = SmartPlaylistsEditor {
             name: "Late night".to_string(),
             ..SmartPlaylistsEditor::default()
@@ -8074,8 +7807,7 @@ mod tests {
             RuleChildDraft::Rule(RuleDraft::blank()),
             RuleChildDraft::Rule(whole_rule(MatchableField::Album)),
         ];
-        let mut harness =
-            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
@@ -8120,7 +7852,6 @@ mod tests {
         use riff_gui::ui::rule_box::RuleChildDraft;
         use riff_gui::ui::rule_row::{ComparisonChoice, RuleIntent, RuleValueDraft};
 
-        let content = sample_content();
         let size = egui::vec2(1280.0, 840.0);
 
         // A chosen field with no comparison.
@@ -8133,7 +7864,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
-        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
         assert!(
@@ -8157,7 +7888,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
-        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
         assert!(
@@ -8179,7 +7910,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
-        let mut harness = smart_playlists_draft_harness(&content, editor, size);
+        let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
         assert!(
@@ -8201,7 +7932,6 @@ mod tests {
         };
         use riff_gui::ui::rule_box::RuleChildDraft;
 
-        let content = sample_content();
         let root = RootBox::new(
             RuleBox::new(Combine::All).with_children(vec![RuleChild::Rule(Rule::new(
                 MatchableField::Title,
@@ -8217,11 +7947,8 @@ mod tests {
             false,
             Some("calm".to_string()),
         )]);
-        let mut harness = smart_playlists_draft_harness(
-            &content,
-            editor_holding(&tree),
-            egui::vec2(1280.0, 840.0),
-        );
+        let mut harness =
+            smart_playlists_draft_harness(editor_holding(&tree), egui::vec2(1280.0, 840.0));
         harness.run();
 
         let words = rect_of(&harness, "riff can't understand this rule");
@@ -8298,14 +8025,12 @@ mod tests {
         use riff_backend::domain::MatchableField;
         use riff_gui::ui::rule_box::RuleChildDraft;
 
-        let content = sample_content();
         let mut editor = SmartPlaylistsEditor {
             name: "  most played ".to_string(),
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
-        let mut harness =
-            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
         let name_field = harness
@@ -8337,7 +8062,6 @@ mod tests {
         use riff_backend::domain::MatchableField;
         use riff_gui::ui::rule_box::RuleChildDraft;
 
-        let content = sample_content();
         let mut editor = SmartPlaylistsEditor {
             name: "Gym".to_string(),
             ..SmartPlaylistsEditor::default()
@@ -8346,8 +8070,7 @@ mod tests {
         let store_words = "Invalid operation: store query failed: a Playlist or Custom Smart \
                            Playlist named \"Gym\" already exists";
         editor.refuse_save(store_words.to_string());
-        let mut harness =
-            smart_playlists_draft_harness(&content, editor, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
         let reason = rect_of(&harness, store_words);
@@ -8598,8 +8321,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
@@ -8655,8 +8377,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
@@ -8713,8 +8434,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
@@ -8785,8 +8505,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
@@ -8871,8 +8590,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
             RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
@@ -8943,8 +8661,7 @@ mod tests {
         use riff_backend::domain::MatchableField;
         use riff_gui::ui::rule_box::RuleChildDraft;
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
         // The blank row's field header: a click must open its list…
@@ -8986,8 +8703,7 @@ mod tests {
         use riff_gui::ui::rule_box::RuleChildDraft;
         use riff_gui::ui::rule_row::{ComparisonChoice, RuleDraft, RuleIntent, RuleValueDraft};
 
-        let content = sample_content();
-        let mut harness = smart_playlists_tree_harness(&content, egui::vec2(1280.0, 840.0));
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         // One row with a field and a comparison chosen the way the row
         // chooses them, and nothing typed: the value well is the shared text
@@ -12962,15 +12678,12 @@ mod browser_column_ui_tests {
             .build_ui_state(
                 |ui, ()| {
                     let mut cache = riff_gui_theme::icons::IconCache::new();
-                    let mut editor =
-                        riff_gui::ui::smart_playlists_page::SmartPlaylistsEditor::default();
                     show_settings_modal(
                         ui,
                         &mut cache,
                         &palette,
                         &content,
                         SettingsSection::Library,
-                        &mut editor,
                     );
                 },
                 (),
@@ -17019,15 +16732,14 @@ mod whole_frame_tests {
         );
     }
 
-    /// A real drag on the Smart Playlists page reorders the Rules, and the
-    /// next frame draws the rows in the new order. The page is reached the
-    /// way a listener reaches it — Settings, the nav item, the list's own
-    /// row — so the drag has to survive the whole frame protocol to land,
-    /// and the drop runs through the typed `SettingsAction` and the applier,
-    /// never a test-side shortcut.
+    /// A real drag on the Smart Playlist editor reorders the Rules, and the
+    /// next frame draws the rows in the new order. The editor is reached the
+    /// way a listener reaches it — the sidebar row's right-click Edit — so the
+    /// drag has to survive the whole frame protocol to land, and the drop runs
+    /// through the typed `SettingsAction` and the applier, never a test-side
+    /// shortcut.
     #[test]
     fn test_a_real_drag_reorders_rule_rows_in_a_composed_frame() {
-        use riff_backend::app::state::ViewMode;
         use riff_backend::app::store::{CustomSmartPlaylist, SmartPlaylistTree};
         use riff_backend::domain::{
             Combine, Comparison, MatchableField, PlaylistId, RootBox, Rule, RuleBox, RuleChild,
@@ -17070,28 +16782,22 @@ mod whole_frame_tests {
         let (mut shell, _transport) = recording_transport_shell(mock);
         shell.harness.step();
 
-        // Settings → Smart Playlists → the list's row, all by real clicks.
-        shell.library.lock_or_recover().view_mode = ViewMode::Settings;
-        shell.harness.step();
-        shell.harness.get_by_label("Smart Playlists").click();
-        // The nav click applies at the end of its frame; the pane paints the
-        // next one, and the list's row exists only after that.
-        shell.harness.run_steps(2);
-        // The name sits twice in the a11y tree now — the sidebar's own custom
-        // row (ticket 12) and this pane's list row — so the click is scoped
-        // to the pane: the sidebar never crosses its 280px panel edge.
+        // The sidebar row's right-click Edit, by the real gestures — the
+        // menu needs its settling frames before its rows accept a pointer.
         shell
             .harness
             .query_all_by_label("Morning drive")
-            .find(|node| node.rect().left() > 300.0)
-            .expect("the pane's list row renders on the stage")
-            .click();
+            .find(|node| node.rect().left() < riff_gui_theme::theme::SIDEBAR_W)
+            .expect("the sidebar's custom row renders")
+            .click_secondary();
+        shell.harness.run_steps(4);
+        shell.harness.get_by_label("Edit").click();
         shell.harness.run_steps(2);
 
         assert!(
             y_of(&shell.harness, "Title") < y_of(&shell.harness, "Year")
                 && y_of(&shell.harness, "Year") < y_of(&shell.harness, "Plays"),
-            "the pane renders the stored order top to bottom"
+            "the editor renders the stored order top to bottom"
         );
 
         // Drag the first row onto the third: press, move, release.
@@ -20760,66 +20466,12 @@ mod whole_frame_tests {
         assert!(lists.is_empty(), "choosing a kind writes nothing");
     }
 
-    /// The nav entry (ticket 15) selects the section by clicking its label in
-    /// a composed frame — the property that makes the pane golden-testable.
-    /// The section is frontend-local, so the click is the only honest route
-    /// in, and the assertion reads the pane's own controls rather than a
-    /// seeded field.
+    /// The row's whole loop inside a composed frame: its Edit loads the saved
+    /// name into the editor draft (through the D14 read and the ticket-11
+    /// tree read), and the SMART LISTS header's `+` returns the editor to a
+    /// new, empty draft — the same state both `+` routes open.
     #[test]
-    fn test_the_smart_playlists_nav_entry_selects_the_page_from_a_composed_frame() {
-        let mut shell = mock_shell();
-        // Opening Settings is session state; the section still has to be
-        // reached by the gesture.
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
-        shell.harness.step();
-        shell.harness.step();
-
-        assert!(
-            shell
-                .harness
-                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
-                .is_some(),
-            "the nav opens on the Library section"
-        );
-
-        shell.harness.get_by_label("Smart Playlists").click();
-        shell.harness.step();
-        shell.harness.step();
-
-        assert!(
-            shell
-                .harness
-                .query_by_role_and_label(egui::accesskit::Role::Button, "Add Library")
-                .is_none(),
-            "the Library pane is gone — the click switched the section"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
-                .is_some(),
-            "the Smart Playlists pane is drawn in the composed frame"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label("No smart playlists yet")
-                .is_some(),
-            "its empty state is what the frame really shows"
-        );
-        assert!(
-            shell.settings_calls.lock().unwrap().is_empty(),
-            "which section was last selected stays frontend-local: no write"
-        );
-    }
-
-    /// The page's whole loop inside a composed frame: a saved list's row
-    /// loads its name into the editor draft (through the D14 read and the
-    /// ticket-11 tree read), and the page's own "New smart playlist" button
-    /// returns the editor to a new, empty draft — the same state the
-    /// sidebar `+` opens.
-    #[test]
-    fn test_selecting_a_list_loads_its_name_and_the_pages_button_starts_fresh() {
+    fn test_a_rows_edit_loads_its_name_and_the_plus_starts_fresh() {
         let id = PlaylistId::new("spl-late-night-2");
         let mock = MockLibraryQueryStore {
             custom_smart_playlists: vec![CustomSmartPlaylist {
@@ -20830,31 +20482,15 @@ mod whole_frame_tests {
             ..MockLibraryQueryStore::default()
         };
         let (mut shell, _transport) = recording_transport_shell(mock);
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
         shell.harness.step();
         shell.harness.step();
 
-        shell.harness.get_by_label("Smart Playlists").click();
-        shell.harness.step();
-        shell.harness.step();
-
-        // Pick the saved list: the draft that was empty now wears its name.
+        // The row's Edit route: the draft that was empty now wears its name.
         // The value is scoped to the text input on purpose — the list's own
-        // sidebar-style row is a `Role::Label` node, whose accesskit value is
-        // its label text, so a bare value query matches two nodes here.
-        //
-        // The click is scoped to the PAGE, not the sidebar: ticket 12 put the
-        // listener's lists in the sidebar too, so this label now matches two
-        // nodes — the sidebar's own row and the page's. Both wear the same
-        // `sidebar::tree_row` primitive and the a11y tree cannot tell them
-        // apart, so the locator is geometry: the page's row sits in the
-        // stage, right of the sidebar's width.
-        let pane_row = shell
-            .harness
-            .query_all_by_label("Late night jazz")
-            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            .expect("the page's own row for the saved list");
-        pane_row.click();
+        // sidebar row is a `Role::Label` node, whose accesskit value is its
+        // label text, so a bare value query matches two nodes here.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Edit").click();
         shell.harness.step();
         shell.harness.step();
         shell.harness.step();
@@ -20877,11 +20513,8 @@ mod whole_frame_tests {
             "the editor says it is editing, not creating"
         );
 
-        // The page's own route back to a new draft.
-        shell
-            .harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "New smart playlist")
-            .click();
+        // The `+`'s route back to a new draft.
+        shell.harness.get_by_label("New Smart Playlist").click();
         shell.harness.step();
         shell.harness.step();
         shell.harness.step();
@@ -20894,7 +20527,7 @@ mod whole_frame_tests {
                         .value("Late night jazz"),
                 )
                 .is_none(),
-            "the page's button clears the draft — a new, empty, unsaved list"
+            "the + clears the draft — a new, empty, unsaved list"
         );
         assert!(
             shell
@@ -21245,7 +20878,7 @@ mod whole_frame_tests {
 
     /// The editor's Save, driven through a real Application Store in a
     /// composed frame: one click writes the name **and** the whole tree in the
-    /// store's single call (D12), the listener stays on the page, and the
+    /// store's single call (D12), the listener stays on the editor, and the
     /// sidebar's SMART LISTS section shows the list under the name that was
     /// typed — the committed write moves the Playlists generation the
     /// sidebar's own enumeration is stamped on, so the next frame reads it.
@@ -21256,10 +20889,6 @@ mod whole_frame_tests {
     #[test]
     fn saving_from_the_editor_writes_the_name_and_the_tree_and_the_sidebar_shows_the_row() {
         let (mut shell, _dir, id, mut store) = custom_list_store_shell();
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
-        shell.harness.step();
-        shell.harness.step();
-        shell.harness.get_by_label("Smart Playlists").click();
         shell.harness.step();
         shell.harness.step();
 
@@ -21273,15 +20902,9 @@ mod whole_frame_tests {
             "the sidebar lists the saved list before the save"
         );
 
-        // Load the saved list into the draft through the page's own row. The
-        // sidebar row wears the same label, so the locator is geometry: the
-        // page's row sits in the stage, right of the sidebar's width.
-        let pane_row = shell
-            .harness
-            .query_all_by_label("Late night jazz")
-            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            .expect("the page's own row for the saved list");
-        pane_row.click();
+        // Load the saved list into the draft through the row's own Edit.
+        open_custom_row_menu(&mut shell, "Late night jazz");
+        shell.harness.get_by_label("Edit").click();
         shell.harness.step();
         shell.harness.step();
 
@@ -22227,15 +21850,14 @@ mod whole_frame_tests {
         );
     }
 
-    /// An enumeration read that **fails** while the page is open is not a store
-    /// that holds no lists: the draft — the listener's name and Rules with it —
-    /// stays, and the page says why instead of claiming there are none. Only a
-    /// successful read that no longer names the draft's list drops it (pinned
-    /// in `smart_playlists_editor_tests.rs`). This is the one place in the
-    /// feature where a degraded read used to destroy the listener's work
-    /// instead of mispainting a frame.
+    /// An enumeration read that **fails** while the editor is open is not a
+    /// store that holds no lists: the draft — the listener's name and Rules
+    /// with it — stays. Only a successful read that no longer names the
+    /// draft's list drops it (pinned in `smart_playlists_editor_tests.rs`).
+    /// This is the one place in the feature where a degraded read used to
+    /// destroy the listener's work instead of mispainting a frame.
     #[test]
-    fn a_failed_enumeration_read_keeps_the_draft_and_says_why() {
+    fn a_failed_enumeration_read_keeps_the_draft() {
         let (mut shell, mock) = counting_mock_shell(MockLibraryQueryStore {
             custom_smart_playlists: vec![custom_list("spl-late-night-1", "Late night jazz")],
             smart_playlist_trees: [(PlaylistId("spl-late-night-1".to_string()), one_rule_tree())]
@@ -22292,20 +21914,6 @@ mod whole_frame_tests {
                 .query_by_role_and_label(egui::accesskit::Role::Label, "Edit smart playlist")
                 .is_some(),
             "and it is still the draft of the list it was opened on"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label_contains("custom list enumeration read boom")
-                .is_some(),
-            "the page says why the saved lists are missing — the store's own reason"
-        );
-        assert!(
-            shell
-                .harness
-                .query_by_label_contains("No smart playlists yet")
-                .is_none(),
-            "the empty state would claim an emptiness nobody measured"
         );
     }
 
@@ -23267,19 +22875,10 @@ mod whole_frame_tests {
     /// The sidebar row wears the same label, so the row locator is geometry:
     /// the page's row sits in the stage, right of the sidebar's width.
     fn open_saved_list_in_editor(shell: &mut Shell) {
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
         shell.harness.step();
         shell.harness.step();
-        shell.harness.get_by_label("Smart Playlists").click();
-        shell.harness.step();
-        shell.harness.step();
-
-        let pane_row = shell
-            .harness
-            .query_all_by_label("Late night jazz")
-            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            .expect("the page's own row for the saved list");
-        pane_row.click();
+        open_custom_row_menu(shell, "Late night jazz");
+        shell.harness.get_by_label("Edit").click();
         shell.harness.step();
         shell.harness.step();
     }
@@ -23291,14 +22890,13 @@ mod whole_frame_tests {
     #[test]
     fn the_live_match_line_counts_the_opened_list_against_the_real_store() {
         let (mut shell, _dir, _id, _store) = custom_list_store_shell();
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
         shell.harness.step();
         shell.harness.step();
-        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.get_by_label("New Smart Playlist").click();
         shell.harness.step();
         shell.harness.step();
 
-        // The page opens on a new draft holding one blank Rule row: a draft
+        // The `+` opens a new draft holding one blank Rule row: a draft
         // that cannot be counted is not counted.
         assert!(
             shell
@@ -23315,27 +22913,13 @@ mod whole_frame_tests {
             "a draft that cannot be counted reports the block, never a number"
         );
 
-        let pane_row = shell
-            .harness
-            .query_all_by_label("Late night jazz")
-            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            .expect("the page's own row for the saved list");
-        pane_row.click();
-        shell.harness.step();
-        shell.harness.step();
+        open_saved_list_in_editor(&mut shell);
 
         // The loaded Rule is `Title is "alpha"` and the store holds one
         // scanned "Alpha" among three Tracks: the line counts the real store.
         assert!(
             shell.harness.query(By::new().label("1 song")).is_some(),
             "the name well counts the loaded list's real matches"
-        );
-        assert!(
-            shell
-                .harness
-                .query_all_by_label("Late night jazz")
-                .any(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W),
-            "the list column's row is the exact label — no count folded in"
         );
     }
 
@@ -23359,10 +22943,9 @@ mod whole_frame_tests {
             ..MockLibraryQueryStore::default()
         });
 
-        shell.library.lock().unwrap().view_mode = ViewMode::Settings;
         shell.harness.step();
         shell.harness.step();
-        shell.harness.get_by_label("Smart Playlists").click();
+        shell.harness.get_by_label("New Smart Playlist").click();
         shell.harness.step();
         shell.harness.step();
         assert_eq!(
@@ -23371,14 +22954,7 @@ mod whole_frame_tests {
             "the empty-state draft's blank row is not counted, so the seam is never asked"
         );
 
-        let pane_row = shell
-            .harness
-            .query_all_by_label("Late night jazz")
-            .find(|node| node.rect().center().x > riff_gui_theme::theme::SIDEBAR_W)
-            .expect("the page's own row for the saved list");
-        pane_row.click();
-        shell.harness.step();
-        shell.harness.step();
+        open_saved_list_in_editor(&mut shell);
         assert!(
             shell.harness.query(By::new().label("3 songs")).is_some(),
             "the loaded shape's count is in the name well"

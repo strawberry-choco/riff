@@ -4,8 +4,8 @@ use riff_backend::app::replaygain_pass::PassCommand;
 use riff_backend::app::state::{
     LibrarySession, LibraryStatus, PlaybackSession, ReplayGainMode, ViewMode, WatchState,
 };
-use riff_backend::app::store::{AUDIO_EXTENSIONS, CustomSmartPlaylist, FullScanSummary};
-use riff_backend::domain::{Combine, PlaylistId};
+use riff_backend::app::store::{AUDIO_EXTENSIONS, FullScanSummary};
+use riff_backend::domain::Combine;
 use riff_gui_components::button::{self as button, TextButton, Variant};
 use riff_gui_components::prompts::{self as prompts, PromptOutcome};
 use riff_gui_theme::icons::{Icon, IconCache};
@@ -280,7 +280,6 @@ impl Readiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsSection {
     Library,
-    SmartPlaylists,
     Playback,
     Appearance,
     Advanced,
@@ -289,9 +288,8 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section in left-nav (and focus) order.
-    pub const ALL: [SettingsSection; 6] = [
+    pub const ALL: [SettingsSection; 5] = [
         Self::Library,
-        Self::SmartPlaylists,
         Self::Playback,
         Self::Appearance,
         Self::Advanced,
@@ -303,7 +301,6 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::Library => "Library",
-            Self::SmartPlaylists => "Smart Playlists",
             Self::Playback => "Playback",
             Self::Appearance => "Appearance",
             Self::Advanced => "Advanced",
@@ -495,12 +492,6 @@ pub struct SettingsContent {
     /// the seam); `Some(t)` measures from the pinned instant. Only the scan
     /// card's "Last full scan" line consumes it.
     pub now: Option<std::time::SystemTime>,
-    /// The listener's saved Custom Smart Playlists, in creation order — the
-    /// Smart Playlists page's left column. Read through the Session Views
-    /// seam like every other store-backed list, and only while the Smart
-    /// Playlists section is the current one; the six Built-ins are code and
-    /// never appear here.
-    pub custom_smart_playlists: Vec<CustomSmartPlaylist>,
 }
 
 /// What the user did to the Settings stage this frame. The app applies these
@@ -560,14 +551,6 @@ pub enum SettingsAction {
     SetCloseQuitsApp(bool),
     /// Set whether finished background work raises an OS notification.
     SetSystemNotifications(bool),
-    /// The Smart Playlists page's left column: show the saved list with this
-    /// id in the editor. Selection is frontend-local — the draft, not the
-    /// store.
-    SelectSmartPlaylist(PlaylistId),
-    /// The Smart Playlists page's own "New smart playlist" button: open a
-    /// new, empty, unsaved draft. Like the sidebar's `+`, it writes nothing;
-    /// the list appears in the sidebar only at Save.
-    NewSmartPlaylist,
     /// The editor's "Add rule" control: append one blank Rule row to the Box
     /// at `parent` — the Root Box, for a fresh draft.
     AddSmartPlaylistRule {
@@ -2646,7 +2629,6 @@ fn section_pane(
     palette: &Palette,
     content: &SettingsContent,
     current: SettingsSection,
-    editor: &mut super::smart_playlists_page::SmartPlaylistsEditor,
     actions: &mut Vec<SettingsAction>,
 ) {
     egui::ScrollArea::vertical()
@@ -2658,11 +2640,6 @@ fn section_pane(
                 .show(ui, |ui| match current {
                     SettingsSection::Library => {
                         library_pane(ui, cache, palette, content, actions);
-                    }
-                    SettingsSection::SmartPlaylists => {
-                        super::smart_playlists_page::smart_playlists_pane(
-                            ui, cache, palette, content, editor, actions,
-                        );
                     }
                     SettingsSection::Advanced => {
                         // "Quit on close" is offered only where a tray exists:
@@ -2722,7 +2699,6 @@ pub fn show_settings_modal(
     palette: &Palette,
     content: &SettingsContent,
     current: SettingsSection,
-    editor: &mut super::smart_playlists_page::SmartPlaylistsEditor,
 ) -> Vec<SettingsAction> {
     let mut actions = Vec::new();
 
@@ -2770,7 +2746,7 @@ pub fn show_settings_modal(
 
             // Current section's pane (dispatch added with the pane slices).
             ui.scope_builder(egui::UiBuilder::new().max_rect(rects.pane), |ui| {
-                section_pane(ui, cache, palette, content, current, editor, &mut actions);
+                section_pane(ui, cache, palette, content, current, &mut actions);
             });
         });
 
@@ -3150,21 +3126,7 @@ impl super::app::RiffApp {
                 self.pending_destructive =
                     Some(super::app::PendingDestructive::ClearThumbnailCache);
             }
-            // --- Smart Playlists page (ticket 15; the tree is ticket 16) ---
-            SettingsAction::SelectSmartPlaylist(id) => {
-                super::smart_playlists_page::load_saved_list(
-                    &mut self.views,
-                    &mut self.smart_playlists_editor,
-                    &id,
-                );
-            }
-            // The page's own button opens the same new, empty, unsaved draft
-            // as the sidebar's `+`; the four tree gestures below land on the
-            // box model the pane drew. Save and Cancel are ticket 18's one
-            // entry points: Save validates the draft, writes name and tree in
-            // one store call, and keeps the listener on the page; Cancel
-            // discards the draft and writes nothing.
-            SettingsAction::NewSmartPlaylist => self.smart_playlists_editor.start_new(),
+            // --- The stage editor's gestures (ticket 15; the tree is ticket 16) ---
             SettingsAction::AddSmartPlaylistRule { parent } => {
                 self.smart_playlists_editor.add_rule(&parent);
             }
@@ -3347,15 +3309,6 @@ impl super::app::RiffApp {
                 .map(crate::ui::frame::pass_outcome_line),
             last_scan: self.views.last_full_scan_summary(),
             now: self.now,
-            // The one pane that draws the lists is the only one that reads
-            // them: the D14 enumeration is deliberately uncached, so filling it
-            // for the four sections that never paint it would cost one small
-            // SELECT per frame each for nothing.
-            custom_smart_playlists: if self.settings_section == SettingsSection::SmartPlaylists {
-                self.views.custom_smart_playlists()
-            } else {
-                Vec::new()
-            },
         };
 
         let palette = self.theme.active;
@@ -3365,34 +3318,9 @@ impl super::app::RiffApp {
             &palette,
             &content,
             self.settings_section,
-            &mut self.smart_playlists_editor,
         ) {
             self.apply_settings_action(action, library, playback);
         }
-
-        // The one read the open library picker owes (ticket 14's host duty): a
-        // Rule row asks exactly once, on the frame its list opens, and the
-        // values reach the row back as a prop. Nothing on the paint path
-        // touches a store.
-        if let Some(field) = self.smart_playlists_editor.pending_picker {
-            let values = if super::smart_playlists_page::picker_is_numeric(field) {
-                super::smart_playlists_page::SmartPlaylistPickerValues::Numbers(
-                    self.views
-                        .picker_numbers(field, super::rule_row::PICKER_LIMIT),
-                )
-            } else {
-                super::smart_playlists_page::SmartPlaylistPickerValues::Texts(
-                    self.views
-                        .picker_texts(field, super::rule_row::PICKER_LIMIT),
-                )
-            };
-            self.smart_playlists_editor.picker_answered(values);
-        }
-
-        // The live match line's read, once per frame while the page is on
-        // screen: after the gestures above have landed on the draft, so the
-        // shape counted is this frame's.
-        self.refresh_smart_playlist_match_line();
 
         // Transient rows beneath the stage column.
         #[cfg(target_os = "linux")]

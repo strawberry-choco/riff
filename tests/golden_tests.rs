@@ -3475,9 +3475,9 @@ mod tests {
             RuleValueDraft::Text("electronic".to_string()),
             "the clicks, not the test, put the chosen Library value in the well"
         );
-        assert_eq!(
-            draft.open, None,
-            "the snapshot is of a settled row, not an open list"
+        assert!(
+            !draft.picker_open,
+            "the snapshot is of a settled row, not an open popup"
         );
 
         let frame = harness

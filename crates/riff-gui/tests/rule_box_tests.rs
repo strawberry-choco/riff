@@ -13,8 +13,8 @@
 use riff_backend::domain::{
     Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild, RuleValue,
 };
-use riff_gui::ui::rule_box::{BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft};
-use riff_gui::ui::rule_row::{RuleDraft, RulePanel};
+use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+use riff_gui::ui::rule_row::RuleDraft;
 
 /// One whole Rule, as a draft: a field, a comparison and a value, in the one
 /// shape [`RuleDraft::from_rule`] reads back.
@@ -354,47 +354,6 @@ fn a_tree_deeper_than_the_cap_loads_and_spells_back_untouched() {
     assert_eq!(path.level(), 9, "nine boxes on the deepest path");
     assert_eq!(draft.box_at(&path).map(RuleBoxDraft::rule_count), Some(1));
     assert_eq!(draft.to_root_box().as_ref(), Some(&stored));
-}
-
-#[test]
-fn the_picker_tidy_up_closes_every_other_rows_value_panel() {
-    let mut root = RuleBoxDraft::empty(Combine::All);
-    root.add_rule(&BoxPath::root());
-    root.add_box(&BoxPath::root());
-    let nested = BoxPath::root().child(1);
-    root.add_rule(&nested);
-
-    // Two rows (one at the root, one inside the box) hold open library
-    // pickers; the pane can only show one list's values, so opening the
-    // nested row's list must close the root row's.
-    match &mut root.children[0] {
-        RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
-            panic!("the root's first child is a Rule")
-        }
-    }
-    match &mut box_at_mut(&mut root, &[1]).children[0] {
-        RuleChildDraft::Rule(draft) => draft.open = Some(RulePanel::Value),
-        RuleChildDraft::Box(_) | RuleChildDraft::Unreadable(_) => {
-            panic!("the box's first child is a Rule")
-        }
-    }
-
-    let keep = ChildSlot::new(nested, 0);
-    root.close_value_panels_except(&keep);
-
-    let RuleChildDraft::Rule(first) = &root.children[0] else {
-        panic!("the root's first child is a Rule");
-    };
-    assert_eq!(first.open, None, "the root row's picker closed");
-    let RuleChildDraft::Rule(kept) = &box_at_mut(&mut root, &[1]).children[0] else {
-        panic!("the box's first child is a Rule");
-    };
-    assert_eq!(
-        kept.open,
-        Some(RulePanel::Value),
-        "the row that reported the picker keeps its list open"
-    );
 }
 
 /// One child spelled for comparison: a Rule by its value text, a Box by the

@@ -40,18 +40,19 @@
 //! - *Ticket 19 (reorder)* keys drags off the same row identity; ticket 14's
 //!   row hands back its response rect for exactly that.
 //!
-//! The two duties ticket 14's row cannot perform itself are performed here:
-//! an opened selector list scrolls its row into view (`scroll_to_me`, which
-//! egui 0.35 does not do for a clipped, keyboard-focused row), and the picker
-//! read is requested once per [`RuleIntent::PickerOpened`], never per frame —
-//! the answer lands through `RiffApp`'s apply step and reaches the row as the
-//! [`RulePickerValues`] prop.
+//! The one duty ticket 14's row cannot perform itself is performed here: the
+//! picker read is requested once per [`RuleIntent::PickerOpened`], never per
+//! frame — the answer lands through `RiffApp`'s apply step and reaches the row
+//! as the [`RulePickerValues`] prop. Every options list the pane offers — the
+//! combine controls' included — is a popup the control that opened it anchors,
+//! so the pane owes no list any scroll-into-view handling and keeps no
+//! open-list state of its own.
 
 use crate::ui::rule_box::{
     BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft, SpellBlock, SpellSource,
 };
 use crate::ui::rule_row::{
-    self, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, ValueGap, rule_row,
+    self, RuleDraft, RuleGap, RuleIntent, RulePickerValues, ValueGap, rule_row,
 };
 use crate::ui::settings::{LibraryPaneColumns, SettingsAction, settings_pane_columns};
 use crate::ui::sidebar;
@@ -69,7 +70,7 @@ use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
 use riff_gui_components::text_field::{TextField, TrailingText, TrailingTone, text_field};
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_box;
-use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, LIST_TOP_GAP, PART_GAP, WELL_H};
+use riff_gui_theme::theme::geometry::rule_row::{HEADER_H, PART_GAP, WELL_H};
 use riff_gui_theme::theme::geometry::settings::{PAGE_HEADER_H, PANE_PAD};
 use riff_gui_theme::theme::{self, Palette, styled_font};
 
@@ -217,10 +218,6 @@ pub struct SmartPlaylistsEditor {
     /// The state this draft was opened from — what [`Self::is_dirty`]
     /// compares against, and what a successful Save re-stamps.
     pub original: SmartPlaylistOriginal,
-    /// Which Box's combine list is open, if any. One pane-level path rather
-    /// than a flag per Box, which is what makes "one list at a time" true by
-    /// construction instead of by a walk over the tree.
-    pub open_combine: Option<BoxPath>,
     /// The values read for the currently open library picker, if one is open.
     pub picker: Option<SmartPlaylistPickerValues>,
     /// The field a row reported [`RuleIntent::PickerOpened`] for this frame
@@ -254,7 +251,6 @@ impl Default for SmartPlaylistsEditor {
                 root: root.clone(),
             },
             root,
-            open_combine: None,
             picker: None,
             pending_picker: None,
             refusal: None,
@@ -388,14 +384,6 @@ impl SmartPlaylistsEditor {
     /// everything inside it**.
     pub fn remove_child(&mut self, parent: &BoxPath, index: usize) {
         self.root.remove_child(parent, index);
-        // A combine list whose Box just left the tree has nothing left to
-        // answer for; clearing the dangling path keeps the one-list-open
-        // invariant true instead of leaving a stale path to never match.
-        if let Some(open) = &self.open_combine
-            && self.root.box_at(open).is_none()
-        {
-            self.open_combine = None;
-        }
     }
 
     /// Move the child at `parent`/`from` to position `to` in that Box's one
@@ -405,34 +393,12 @@ impl SmartPlaylistsEditor {
     /// Box holds its Rules and Boxes in one `Vec`, so the list's order *is*
     /// the shared `position` sequence Save spells.
     pub fn move_child(&mut self, parent: &BoxPath, from: usize, to: usize) {
-        let reordered = self.root.move_child(parent, from, to);
-        // A Box strictly under a reordered list answers to a different
-        // address once its siblings shift, so an open combine list down
-        // there would name whichever Box now sits at that address — close it
-        // rather than paint a different Box's list (the one-list-open
-        // invariant `remove_child` keeps for the dangling case). Only a real
-        // reorder does that: an empty gesture (the model answers `false`)
-        // renumbers nothing. The drag wiring reports a self-drop on every
-        // plain press-release of a draggable row — egui begins a drag on the
-        // press under a drag-only sense — and without this gate that empty
-        // drop would close the combine list the very same click had just
-        // opened, leaving a nested Box's control unopenable by pointer.
-        if reordered
-            && let Some(open) = &self.open_combine
-            && open != parent
-            && open.indices().starts_with(parent.indices())
-        {
-            self.open_combine = None;
-        }
+        self.root.move_child(parent, from, to);
     }
 
-    /// Choose the combine for the Box at `path` and close its list — the
-    /// choice is the decision, and the list has no more to offer once made.
+    /// Choose the combine for the Box at `path`.
     pub fn set_combine(&mut self, path: &BoxPath, combine: Combine) {
         self.root.set_combine(path, combine);
-        if self.open_combine.as_ref() == Some(path) {
-            self.open_combine = None;
-        }
     }
 
     /// Load a saved list into the editor as the draft to edit: its name, and
@@ -463,7 +429,6 @@ impl SmartPlaylistsEditor {
         if let Some(tree) = tree {
             self.root.insert_unreadable(tree.unreadable());
         }
-        self.open_combine = None;
         self.picker = None;
         self.pending_picker = None;
         self.refusal = None;
@@ -512,17 +477,12 @@ impl SmartPlaylistsEditor {
             })
     }
 
-    /// One row's library picker opened for `field` at `slot`: remember the
-    /// read the host owes (once, through [`Self::pending_picker`]) and close
-    /// every other row's picker — the pane shows one picker list at a time,
-    /// because two would answer to one shared value list of the wrong field.
-    pub fn picker_opened(&mut self, field: MatchableField, slot: &ChildSlot) {
-        self.root.close_value_panels_except(slot);
-        if let Some(boxed) = self.root.box_at_mut(&slot.parent)
-            && let Some(RuleChildDraft::Rule(draft)) = boxed.children.get_mut(slot.index)
-        {
-            draft.open = Some(RulePanel::Value);
-        }
+    /// One row's library picker opened for `field`: remember the read the
+    /// host owes (once, through [`Self::pending_picker`]). One picker at a
+    /// time is egui's own popup rule, so nothing here has to enforce it —
+    /// the row whose popup closed reports that close, and
+    /// [`Self::picker_closed`] drops the values it had read.
+    pub fn picker_opened(&mut self, field: MatchableField) {
         self.pending_picker = Some(field);
         self.picker = None;
     }
@@ -779,13 +739,11 @@ fn editor_header(
 }
 
 /// One thing a Rule row reported this frame that is the *tree's* to answer,
-/// not the row's own: a library picker opened (the pane shows one list at a
-/// time and remembers the read it owes) or closed (drop what was read).
+/// not the row's own: a library picker opened (the pane remembers the read it
+/// owes) or closed (drop what was read).
 enum PickerEvent {
-    /// The row at `slot` opened its picker for `field`.
+    /// A row opened its picker for `field`.
     Opened {
-        /// The slot of the row that reported it.
-        slot: ChildSlot,
         /// The field whose Library values to read.
         field: MatchableField,
     },
@@ -915,11 +873,9 @@ fn editor_column(
     let mut picker_events = Vec::new();
     {
         // Disjoint borrows for the walk: the tree is drawn from `root` while
-        // the picker prop, the open-combine path and the refusal travel
-        // beside it.
+        // the picker prop and the refusal travel beside it.
         let SmartPlaylistsEditor {
             root,
-            open_combine,
             picker,
             refusal,
             ..
@@ -932,18 +888,17 @@ fn editor_column(
             &BoxPath::root(),
             None,
             root,
-            open_combine,
             picker,
             refusal.as_ref(),
             &mut picker_events,
             actions,
         );
     }
-    // The picker's cross-tree duty, after the walk: one library picker list
-    // at a time, and the read is remembered once for `RiffApp`'s apply step.
+    // The picker's cross-tree duty, after the walk: the read is remembered
+    // once for `RiffApp`'s apply step.
     for event in picker_events {
         match event {
-            PickerEvent::Opened { slot, field } => editor.picker_opened(field, &slot),
+            PickerEvent::Opened { field } => editor.picker_opened(field),
             PickerEvent::Closed => editor.picker_closed(),
         }
     }
@@ -1024,14 +979,12 @@ fn draw_rule_box(
     path: &BoxPath,
     own_slot: Option<&ChildSlot>,
     boxed: &mut RuleBoxDraft,
-    open_combine: &mut Option<BoxPath>,
     picker: &mut Option<SmartPlaylistPickerValues>,
     refusal: Option<&SmartPlaylistRefusal>,
     picker_events: &mut Vec<PickerEvent>,
     actions: &mut Vec<SettingsAction>,
 ) {
     let box_id = egui::Id::new(("smart_playlist_box", path));
-    let listed = open_combine.as_ref() == Some(path);
     // A nested Box's control line is the Box's own row in its parent's
     // sibling list (ticket 19): dragging it moves the whole child — the Box
     // leaves with everything inside it, the same unit its remove control
@@ -1044,7 +997,7 @@ fn draw_rule_box(
             None,
         )
     } else {
-        draw_box_line(ui, cache, palette, box_id, boxed.combine, listed, own_slot)
+        draw_box_line(ui, cache, palette, box_id, boxed.combine, own_slot)
     };
     // A drag released over this Box's line moves the dragged sibling to this
     // Box's position; the floating copy reports nothing. A payload from
@@ -1059,13 +1012,11 @@ fn draw_rule_box(
             to: slot.index,
         });
     }
-    let mut now_listed = listed;
-    if line.combine_pressed {
-        *open_combine = if listed { None } else { Some(path.clone()) };
-        now_listed = !listed;
-        if now_listed {
-            line.response.scroll_to_me(Some(egui::Align::Center));
-        }
+    if let Some(combine) = line.combine_choice {
+        actions.push(SettingsAction::SetSmartPlaylistCombine {
+            path: path.clone(),
+            combine,
+        });
     }
     if line.remove_pressed
         && let Some(slot) = own_slot
@@ -1073,12 +1024,6 @@ fn draw_rule_box(
         actions.push(SettingsAction::RemoveSmartPlaylistChild {
             parent: slot.parent.clone(),
             index: slot.index,
-        });
-    }
-    if now_listed && let Some(combine) = draw_combine_list(ui, palette, box_id, boxed.combine) {
-        actions.push(SettingsAction::SetSmartPlaylistCombine {
-            path: path.clone(),
-            combine,
         });
     }
 
@@ -1112,7 +1057,6 @@ fn draw_rule_box(
                         &child_path,
                         Some(&slot),
                         nested,
-                        open_combine,
                         picker,
                         refusal,
                         picker_events,
@@ -1217,11 +1161,10 @@ fn draw_rule_child(
     actions: &mut Vec<SettingsAction>,
 ) {
     let row_id = egui::Id::new(("smart_playlist_rule_row", path, index));
-    let prop = if draft.open == Some(RulePanel::Value) {
-        picker.as_ref().map(SmartPlaylistPickerValues::prop)
-    } else {
-        None
-    };
+    // The picker prop goes to every row: only the row whose value popup is
+    // open ever draws one, and the values it holds are the answer to that
+    // popup's own open — so a row that did not open it never reads it.
+    let prop = picker.as_ref().map(SmartPlaylistPickerValues::prop);
     let mut remove_pressed = false;
     let drag = ui
         .horizontal_top(|ui| {
@@ -1278,30 +1221,19 @@ fn draw_rule_child(
             to: index,
         });
     }
-    let mut opened = false;
     // The floating copy takes no part in interaction, so its intents are not
     // the listener's decisions.
     if !drag.in_flight {
         for intent in &outcome.intents {
             draft.apply(intent);
             match intent {
-                RuleIntent::PanelToggled { open, .. } if *open => opened = true,
                 RuleIntent::PickerOpened { field } => {
-                    picker_events.push(PickerEvent::Opened {
-                        slot: ChildSlot::new(path.clone(), index),
-                        field: *field,
-                    });
+                    picker_events.push(PickerEvent::Opened { field: *field });
                 }
                 RuleIntent::PickerClosed => picker_events.push(PickerEvent::Closed),
                 _ => {}
             }
         }
-    }
-    // Host duty handed from ticket 14: egui 0.35 never auto-scrolls a
-    // keyboard-focused row inside this clipped pane, so the row that just
-    // opened a list scrolls itself into view here.
-    if opened {
-        outcome.response.scroll_to_me(Some(egui::Align::Center));
     }
     if remove_pressed {
         actions.push(SettingsAction::RemoveSmartPlaylistChild {
@@ -1379,13 +1311,11 @@ fn draw_unreadable_child(
 
 /// What a Box's control line reported this frame.
 struct BoxLineReport {
-    /// The combine control was pressed.
-    combine_pressed: bool,
+    /// A word was chosen from the combine popup.
+    combine_choice: Option<Combine>,
     /// The remove control was pressed — never true for the Root Box, which
     /// draws none.
     remove_pressed: bool,
-    /// The line's own response, the scroll target when the list opens.
-    response: egui::Response,
 }
 
 /// One Box's control line, wrapped in the shared row drag when the Box is a
@@ -1400,7 +1330,6 @@ fn draw_box_line(
     palette: &Palette,
     box_id: egui::Id,
     combine: Combine,
-    listed: bool,
     own_slot: Option<&ChildSlot>,
 ) -> (BoxLineReport, Option<std::sync::Arc<RuleRowDrag>>) {
     if let Some(slot) = own_slot {
@@ -1412,17 +1341,15 @@ fn draw_box_line(
             box_id.with("drag"),
             egui::vec2(ui.available_width(), HEADER_H),
             |ui| {
-                let line = box_control_line(
+                box_control_line(
                     ui,
                     cache,
                     palette,
                     box_id,
                     combine_phrase(combine),
-                    listed,
+                    combine,
                     true,
-                );
-                let response = line.response.clone();
-                (line, response)
+                )
             },
         );
         if drag.in_flight {
@@ -1438,28 +1365,35 @@ fn draw_box_line(
                 palette,
                 box_id,
                 combine_phrase(combine),
-                listed,
+                combine,
                 false,
-            ),
+            )
+            .0,
             None,
         )
     }
 }
 
 /// One Box's control line: its combine control, and — for a nested Box — the
-/// remove control that takes the whole Box, children and all, away.
+/// remove control that takes the whole Box, children and all, away. The
+/// line's own response rides along for the drag wrapper, which unions it with
+/// its hit area and needs a response of this line's layer to do that.
 fn box_control_line(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
     palette: &Palette,
     box_id: egui::Id,
     label: &str,
-    listed: bool,
+    combine: Combine,
     removable: bool,
-) -> BoxLineReport {
+) -> (BoxLineReport, egui::Response) {
+    let mut combine_choice = None;
     let mut remove_pressed = false;
     let line = ui.horizontal_top(|ui| {
-        let pressed = rule_row::header(ui, cache, palette, box_id.with("combine"), label, listed);
+        let header_id = box_id.with("combine");
+        let open = egui::Popup::is_id_open(ui.ctx(), header_id.with("popup"));
+        let response = rule_row::header(ui, cache, palette, header_id, label, open);
+        combine_choice = open_combine_popup(palette, box_id, combine, &response);
         if removable {
             ui.add_space(theme::SPACE_SM);
             remove_pressed = remove_button(
@@ -1470,13 +1404,14 @@ fn box_control_line(
                 "Remove group",
             );
         }
-        pressed
     });
-    BoxLineReport {
-        combine_pressed: line.inner,
-        remove_pressed,
-        response: line.response,
-    }
+    (
+        BoxLineReport {
+            combine_choice,
+            remove_pressed,
+        },
+        line.response,
+    )
 }
 
 /// The Root Box's line, read as the sentence its children finish: "Match songs
@@ -1495,10 +1430,11 @@ fn draw_sentence_prefix(
     box_id: egui::Id,
     combine: Combine,
 ) -> BoxLineReport {
-    let line = ui.horizontal(|ui| {
+    let mut combine_choice = None;
+    ui.horizontal(|ui| {
         ui.label(sentence_fragment(palette, "Match songs where"));
         ui.add_space(PART_GAP);
-        let pressed = rule_row::chip(
+        let response = rule_row::chip(
             ui,
             cache,
             palette,
@@ -1506,15 +1442,14 @@ fn draw_sentence_prefix(
             combine_word(combine),
             combine_phrase(combine),
         );
+        combine_choice = open_combine_popup(palette, box_id, combine, &response);
         ui.add_space(PART_GAP);
         ui.label(sentence_fragment(palette, "of the following are true"));
-        pressed
     });
+    // The Root Box has no parent to be removed from.
     BoxLineReport {
-        combine_pressed: line.inner,
-        // The Root Box has no parent to be removed from.
+        combine_choice,
         remove_pressed: false,
-        response: line.response,
     }
 }
 
@@ -1525,28 +1460,37 @@ fn sentence_fragment(palette: &Palette, words: &str) -> egui::RichText {
         .size(theme::TEXT_XS)
 }
 
-/// The two combine words, drawn inline under the control while its list is
-/// open; reports the word clicked, if any.
-fn draw_combine_list(
-    ui: &mut egui::Ui,
+/// The combine popup, opened on the control that anchors it: the two words a
+/// Box's combine choice is made of, the current one marked, reporting the word
+/// clicked. One content fn because the Root Box's chip and a nested Box's
+/// header are the same choice wearing two spellings, and two hand-written
+/// copies of the options would be free to drift.
+fn open_combine_popup(
     palette: &Palette,
     box_id: egui::Id,
     combine: Combine,
+    response: &egui::Response,
 ) -> Option<Combine> {
-    ui.add_space(LIST_TOP_GAP);
-    let options = [Combine::All, Combine::Any].map(|combine| OptionChoice {
-        key: combine,
-        label: combine_word(combine),
+    let mut chosen = None;
+    egui::Popup::menu(response).show(|ui| {
+        let options = [Combine::All, Combine::Any].map(|combine| OptionChoice {
+            key: combine,
+            label: combine_word(combine),
+        });
+        if let Some(word) = option_list(
+            ui,
+            palette,
+            &OptionList {
+                id: box_id.with("combine-list"),
+                options: &options,
+                current: Some(&combine),
+            },
+        ) {
+            ui.close();
+            chosen = Some(word);
+        }
     });
-    option_list(
-        ui,
-        palette,
-        &OptionList {
-            id: box_id.with("combine-list"),
-            options: &options,
-            current: Some(&combine),
-        },
-    )
+    chosen
 }
 
 /// The two words a Box's combine choice is made of, as its list offers them and

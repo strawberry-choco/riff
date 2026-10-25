@@ -26054,8 +26054,8 @@ mod rule_row_ui_tests {
     use riff_backend::domain::{CivilDateTime, Comparison, MatchableField, Rule, RuleValue};
     use riff_gui::ui::rule_date::RuleDateIntent;
     use riff_gui::ui::rule_row::{
-        PICKER_LIMIT, RuleDraft, RuleGap, RuleIntent, RulePanel, RulePickerValues, RuleValueDraft,
-        ValueGap, rule_row,
+        PICKER_LIMIT, RuleDraft, RuleGap, RuleIntent, RulePickerValues, RuleValueDraft, ValueGap,
+        rule_row,
     };
     use riff_gui_theme::icons::IconCache;
     use riff_gui_theme::theme::Palette;
@@ -26131,12 +26131,11 @@ mod rule_row_ui_tests {
                     ui.set_width(ui.available_width());
                     let mut drafts = self.drafts.borrow_mut();
                     for (index, draft) in drafts.iter_mut().enumerate() {
+                        // The prop goes to every row, exactly as the pane's
+                        // host hands it: only the row whose value popup is
+                        // open ever draws one.
                         let stored = self.picker.borrow();
-                        let picker = if draft.open == Some(RulePanel::Value) {
-                            stored.values()
-                        } else {
-                            None
-                        };
+                        let picker = stored.values();
                         let outcome = rule_row(
                             ui,
                             &mut self.cache.borrow_mut(),
@@ -26278,12 +26277,13 @@ mod rule_row_ui_tests {
     fn a_real_click_reaches_an_option_in_each_of_the_rows_lists() {
         let (mut harness, host, _mock) = specimen(1, genre_mock());
 
-        // The field list: the catalog's display names, and the deep tail of all
-        // sixteen rows is on the host's own scroll, not clipped away.
+        // The field popup: the catalog's display names, and the deep tail of
+        // all sixteen rows floats above the pane where a click can land.
         click(&mut harness, "Choose a field");
         assert!(
             harness.query_by_label("Lossless").is_some(),
-            "the field list must be drawn inline where a click can land, not behind a popup"
+            "the field popup must offer the catalog's whole list, its deep \
+             tail included, reachable by a real click"
         );
         click(&mut harness, "Album Artist");
         let intents = host.take_intents();
@@ -26294,13 +26294,12 @@ mod rule_row_ui_tests {
             "a click on the catalog's own name chose the field: {intents:?}"
         );
         assert_eq!(host.draft(0).field, Some(MatchableField::AlbumArtist));
-        assert_eq!(
-            host.draft(0).open,
-            None,
-            "choosing closes the list it chose from"
+        assert!(
+            harness.query_by_label("Lossless").is_none(),
+            "choosing closes the popup it chose from"
         );
 
-        // The comparison list, for the field now chosen.
+        // The comparison popup, for the field now chosen.
         click(&mut harness, "Choose a comparison");
         click(&mut harness, "contains");
         assert!(
@@ -26313,7 +26312,7 @@ mod rule_row_ui_tests {
 
         // The library picker, and the value it commits.
         click(&mut harness, "Choose…");
-        assert_eq!(host.draft(0).open, Some(RulePanel::Value));
+        assert!(host.draft(0).picker_open);
         click(&mut harness, "trip-hop");
         let intents = host.take_intents();
         assert!(
@@ -26327,13 +26326,14 @@ mod rule_row_ui_tests {
             Some(&RuleValue::Text("trip-hop".to_string()))
         );
 
-        // The yes/no list, once the row's field is one that takes it. The
-        // header and the open list's own row share the label, so the reopen is
-        // scoped to the last node.
-        click_last(&mut harness, "Album Artist");
+        // The yes/no popup, once the row's field is one that takes it: the
+        // chip wears the current answer ("No" until one is chosen), so the
+        // chip is clicked open before its option can be.
+        click(&mut harness, "Album Artist");
         click(&mut harness, "Favorite");
         click(&mut harness, "Choose a comparison");
         click(&mut harness, "is");
+        click(&mut harness, "No");
         click(&mut harness, "Yes");
         assert!(
             host.take_intents().contains(&RuleIntent::ValueCommitted {
@@ -26349,12 +26349,12 @@ mod rule_row_ui_tests {
         let (mut harness, host, _mock) = specimen(1, genre_mock());
         click(&mut harness, "Choose a field");
         click(&mut harness, "Genre");
-        // Re-open the list: the current choice must carry the a11y mark.
+        // Re-open the popup: the current choice must carry the a11y mark.
         click(&mut harness, "Genre");
         let nodes: Vec<_> = harness.query_all_by_label("Genre").collect();
         let option = nodes
             .last()
-            .expect("the open list carries its own node for the current field");
+            .expect("the open popup carries its own node for the current field");
         assert_eq!(
             option.accesskit_node().toggled(),
             Some(Toggled::True),
@@ -26599,7 +26599,9 @@ mod rule_row_ui_tests {
             "the open picker is a state, not a per-frame poll"
         );
 
-        click(&mut harness, "Hide values");
+        // The same header that opened the popup closes it, and opening it
+        // again is a second read — one per open, never a cache the row leans on.
+        click(&mut harness, "Choose…");
         click(&mut harness, "Choose…");
         assert_eq!(
             picker_reads(&mock).len(),

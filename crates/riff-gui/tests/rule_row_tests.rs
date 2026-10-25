@@ -19,7 +19,7 @@
 use riff_backend::domain::field_catalog::{ValueWidget, fields, spec};
 use riff_backend::domain::{Comparison, MatchableField, Rule, RuleValue};
 use riff_gui::ui::rule_row::{
-    ComparisonChoice, RuleDraft, RuleGap, RuleIntent, RulePanel, RuleValueDraft, ValueGap,
+    ComparisonChoice, RuleDraft, RuleGap, RuleIntent, RuleValueDraft, ValueGap,
 };
 
 /// A draft with a field and a comparison chosen the way the row chooses them,
@@ -720,7 +720,7 @@ fn a_stored_rule_round_trips_through_the_draft_unchanged() {
             "reopening a saved rule and changing nothing must not rewrite it"
         );
         assert_eq!(draft.gap(), None);
-        assert_eq!(draft.open, None);
+        assert!(!draft.picker_open);
     }
 }
 
@@ -789,33 +789,10 @@ fn choosing_a_comparison_rebuilds_the_value_when_the_date_idea_switches() {
     ));
 }
 
-// --- The row's own disclosure state --------------------------------------------
+// --- The row's picker-open memo --------------------------------------------------
 
 #[test]
-fn opening_a_panel_opens_one_and_nothing_else() {
-    let mut draft = draft_with(
-        MatchableField::Artist,
-        ComparisonChoice::Stored(Comparison::Contains),
-    );
-    draft.apply(&RuleIntent::PanelToggled {
-        panel: RulePanel::Field,
-        open: true,
-    });
-    assert_eq!(draft.open, Some(RulePanel::Field));
-    draft.apply(&RuleIntent::PanelToggled {
-        panel: RulePanel::Comparison,
-        open: true,
-    });
-    assert_eq!(draft.open, Some(RulePanel::Comparison));
-    draft.apply(&RuleIntent::PanelToggled {
-        panel: RulePanel::Comparison,
-        open: false,
-    });
-    assert_eq!(draft.open, None);
-}
-
-#[test]
-fn a_picker_open_and_close_are_the_rows_value_panel() {
+fn a_picker_open_and_close_move_the_rows_memo() {
     let mut draft = draft_with(
         MatchableField::Genre,
         ComparisonChoice::Stored(Comparison::Is),
@@ -823,13 +800,17 @@ fn a_picker_open_and_close_are_the_rows_value_panel() {
     draft.apply(&RuleIntent::PickerOpened {
         field: MatchableField::Genre,
     });
-    assert_eq!(draft.open, Some(RulePanel::Value));
+    assert!(draft.picker_open);
     draft.apply(&RuleIntent::ValueCommitted {
         value: RuleValue::Text("ambient".to_string()),
     });
     assert_eq!(draft.value, RuleValueDraft::Text("ambient".to_string()));
+    assert!(
+        draft.picker_open,
+        "a choice commits the value; the popup's own close moves the memo"
+    );
     draft.apply(&RuleIntent::PickerClosed);
-    assert_eq!(draft.open, None);
+    assert!(!draft.picker_open);
     assert_eq!(
         draft.gap(),
         None,

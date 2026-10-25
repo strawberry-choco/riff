@@ -36,7 +36,7 @@
 use riff_backend::app::store::UnreadableRule;
 use riff_backend::domain::{Combine, RootBox, Rule, RuleBox, RuleChild};
 
-use crate::ui::rule_row::{RuleDraft, RuleGap, RulePanel};
+use crate::ui::rule_row::{RuleDraft, RuleGap};
 
 /// The most Rule Boxes a path from the Root Box may hold.
 ///
@@ -544,38 +544,6 @@ impl RuleBoxDraft {
     pub fn set_combine(&mut self, path: &BoxPath, combine: Combine) {
         if let Some(boxed) = self.box_at_mut(path) {
             boxed.combine = combine;
-        }
-    }
-
-    /// Close every open value picker panel except the row at `keep` — the
-    /// pane shows one library picker list at a time, because two would answer
-    /// to one shared value list of the wrong field (ticket 14's host duty,
-    /// widened to the tree).
-    ///
-    /// Closing only, never opening: the row that reported the picker has
-    /// already opened its own panel through [`RuleDraft::apply`].
-    pub fn close_value_panels_except(&mut self, keep: &ChildSlot) {
-        self.close_value_panels(&BoxPath::root(), keep);
-    }
-
-    /// The walk behind [`Self::close_value_panels_except`].
-    fn close_value_panels(&mut self, path: &BoxPath, keep: &ChildSlot) {
-        for (index, child) in self.children.iter_mut().enumerate() {
-            match child {
-                RuleChildDraft::Rule(draft) => {
-                    if path == &keep.parent && index == keep.index {
-                        continue;
-                    }
-                    if draft.open == Some(RulePanel::Value) {
-                        draft.open = None;
-                    }
-                }
-                RuleChildDraft::Box(nested) => {
-                    nested.close_value_panels(&path.child(index), keep);
-                }
-                // An Unreadable Rule has no panel to close.
-                RuleChildDraft::Unreadable(_) => {}
-            }
         }
     }
 }

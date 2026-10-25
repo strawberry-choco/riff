@@ -1293,9 +1293,6 @@ pub mod geometry {
         pub const DURATION_PART_W: f32 = 64.0;
         /// Gap between the duration's three wells.
         pub const DURATION_PART_GAP: f32 = 4.0;
-        /// Vertical gap between a disclosure header's line and the inline
-        /// list it opens.
-        pub const LIST_TOP_GAP: f32 = 6.0;
         /// Vertical gap the row leaves under itself, so two sibling rows do
         /// not print against each other.
         pub const ROW_BOTTOM_GAP: f32 = 10.0;

@@ -17,6 +17,17 @@
 //! [`toggle_switch`]) may not know what a Rule means, so a widget that had to
 //! would live here instead (ADR 0018).
 //!
+//! **Every options list the row offers is a popup** ([`egui::Popup::menu`],
+//! anchored below the control that opened it): the field list, the comparison
+//! list, the yes/no answer, and the Library-value picker. egui owns each
+//! popup's open state — one at a time app-wide, closed by a choice, a click
+//! outside, or Escape — so the row holds no open-list state of its own. The
+//! one bit it does keep ([`RuleDraft::picker_open`]) is a last-frame memo, so
+//! the row can report the value popup's open/close transitions the host's
+//! picker read hangs on. A popup floats above a scrolled pane's clip rect,
+//! which is why no host owes this row any scroll-into-view handling and every
+//! option is reachable exactly where it opened.
+//!
 //! **The row's contract is the crate's standing one: props in, typed intents
 //! out.** [`rule_row`] performs no effect — no store read, no service call, no
 //! session write — and mutates only the draft's *typed buffers*, which is what
@@ -36,12 +47,9 @@
 //!   calls [`riff_backend::app::views::SessionViews::picker_texts`] or
 //!   [`riff_backend::app::views::SessionViews::picker_numbers`] once per
 //!   intent, keyed on the field it names, and hands the answer back as the
-//!   prop. Painting the row a hundred frames reads nothing: the row holds no
-//!   port, so it cannot.
-//! - *Scrolling an opened list into view.* egui 0.35 does not auto-scroll a
-//!   keyboard-focused row inside a clipped pane, so a host in a `ScrollArea`
-//!   must call `scroll_to_me` on the outcome's response when `draft.open`
-//!   changes.
+//!   prop — to every row, which is safe because only the row whose popup is
+//!   open ever draws one. Painting the row a hundred frames reads nothing:
+//!   the row holds no port, so it cannot.
 //! - *Naming a half-formed row.* [`RuleDraft::gap`] says which of field,
 //!   comparison or value is missing, so ticket 18's Save refusal can point at
 //!   the offending row. The row paints no reason line of its own: the tag
@@ -54,14 +62,14 @@
 use eframe::egui;
 use riff_backend::domain::field_catalog::{ValueWidget, spec};
 use riff_backend::domain::{Comparison, MatchableField, Rule, RuleValue};
-use riff_gui_components::button::{TextButton, Variant, text_button, text_button_size};
+use riff_gui_components::button::{TextButton, Variant, text_button_response, text_button_size};
 use riff_gui_components::option_list::{OptionChoice, OptionList, option_list};
 use riff_gui_components::text_field::{TextField, text_field};
 use riff_gui_components::toggle_switch::toggle_switch;
 use riff_gui_theme::icons::{Icon, IconCache};
 use riff_gui_theme::theme::geometry::rule_row::{
-    DURATION_PART_GAP, DURATION_PART_W, HEADER_H, HEADER_LABEL_PAD, LIST_TOP_GAP, NUMBER_W,
-    PART_GAP, ROW_BOTTOM_GAP, TEXT_VALUE_W, WELL_H,
+    DURATION_PART_GAP, DURATION_PART_W, HEADER_H, HEADER_LABEL_PAD, NUMBER_W, PART_GAP,
+    ROW_BOTTOM_GAP, TEXT_VALUE_W, WELL_H,
 };
 use riff_gui_theme::theme::{self, Palette};
 
@@ -88,19 +96,6 @@ pub enum ComparisonChoice {
     Stored(Comparison),
     /// The negated spelling of [`Comparison::IsMissing`].
     IsNotMissing,
-}
-
-/// Which of the row's inline lists is open. One at a time: a Rule row lives in
-/// a scrolling pane, and three open lists at once would push the next row off
-/// the stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RulePanel {
-    /// The Matchable Field list.
-    Field,
-    /// The selected field's comparison list.
-    Comparison,
-    /// The library-value picker for a pickable field.
-    Value,
 }
 
 /// Why the value half is not an answer yet.
@@ -150,31 +145,23 @@ pub enum RuleIntent {
         /// The state the control was set to.
         negated: bool,
     },
-    /// One of the row's two structural lists opened or closed. The library
-    /// picker has its own two intents instead, because opening it is a *read*.
-    PanelToggled {
-        /// Which list.
-        panel: RulePanel,
-        /// `true` when the list is now open.
-        open: bool,
-    },
-    /// A value was accepted — on Enter, on blur, from the library picker, or
-    /// from the yes/no list. The row parsed it against the field's own type,
-    /// so an unparseable buffer never reaches this intent: [`RuleDraft::gap`]
+    /// A value was accepted — on Enter, on blur, or from the yes/no or library
+    /// popup. The row parsed it against the field's own type, so an
+    /// unparseable buffer never reaches this intent: [`RuleDraft::gap`]
     /// reports it as [`ValueGap::Unparseable`] instead.
     ValueCommitted {
         /// The typed answer.
         value: RuleValue,
     },
-    /// The listener opened the library picker for `field`. **The host reads
-    /// the picker's values in answer to this intent and only to this intent** —
+    /// The listener opened the value popup for `field`. **The host reads the
+    /// popup's values in answer to this intent and only to this intent** —
     /// once per open.
     PickerOpened {
         /// The field whose values to read.
         field: MatchableField,
     },
-    /// The listener closed the library picker, or chose from it. The host may
-    /// drop the values it read for it.
+    /// The value popup closed — by a choice from it, a click outside it, or
+    /// Escape. The host may drop the values it read for it.
     PickerClosed,
     /// One of ticket 20's date controls reported an edit. Carried through the
     /// row so that completing the date widgets adds no variant here.
@@ -413,9 +400,14 @@ pub struct RuleDraft {
     pub negated: bool,
     /// The value half, as the catalog's widget ideas shape it.
     pub value: RuleValueDraft,
-    /// Which inline list is open, if any. Presentation state that travels with
-    /// the row it belongs to, so a host needs only one draft per row.
-    pub open: Option<RulePanel>,
+    /// Whether the value popup was open last frame — a memo, not a control.
+    ///
+    /// egui owns the popup's open state; this bit only lets the row report
+    /// the open/close *transitions* the host's picker read hangs on, so it
+    /// never decides anything itself and is updated only by
+    /// [`RuleDraft::apply`] landing [`RuleIntent::PickerOpened`] or
+    /// [`RuleIntent::PickerClosed`].
+    pub picker_open: bool,
     /// The value the draft last landed, maintained by [`RuleDraft::apply`].
     ///
     /// Held so the row can keep its half of the selector's deduplication rule:
@@ -436,7 +428,7 @@ impl RuleDraft {
             comparison: None,
             negated: false,
             value: RuleValueDraft::NoValue,
-            open: None,
+            picker_open: false,
             committed: None,
         }
     }
@@ -455,7 +447,7 @@ impl RuleDraft {
             comparison: Some(rule.comparison()),
             negated: rule.is_negated(),
             value,
-            open: None,
+            picker_open: false,
             committed: rule.value().cloned(),
         }
     }
@@ -645,17 +637,8 @@ impl RuleDraft {
             RuleIntent::FieldChosen { field } => self.choose_field(*field),
             RuleIntent::ComparisonChosen { choice } => self.choose_comparison(*choice),
             RuleIntent::NegationToggled { negated } => self.negated = *negated,
-            RuleIntent::PanelToggled { panel, open } => {
-                if *panel != RulePanel::Value {
-                    self.open = if *open { Some(*panel) } else { None };
-                }
-            }
-            RuleIntent::PickerOpened { .. } => self.open = Some(RulePanel::Value),
-            RuleIntent::PickerClosed => {
-                if self.open == Some(RulePanel::Value) {
-                    self.open = None;
-                }
-            }
+            RuleIntent::PickerOpened { .. } => self.picker_open = true,
+            RuleIntent::PickerClosed => self.picker_open = false,
             RuleIntent::ValueCommitted { value } => {
                 let widgets = self.value_widgets();
                 if widgets.is_empty() {
@@ -706,7 +689,6 @@ impl RuleDraft {
         }
         let before = self.value_widgets();
         self.field = Some(field);
-        self.open = None;
         if !self
             .comparison
             .is_some_and(|comparison| spec(field).permits(comparison))
@@ -741,7 +723,6 @@ impl RuleDraft {
         if comparison == Comparison::IsMissing {
             self.negated = negated;
         }
-        self.open = None;
         let after = self.value_widgets();
         if before != after {
             self.value = RuleValueDraft::for_widgets(after);
@@ -777,15 +758,15 @@ pub struct RuleRowOutcome {
 /// reporting every other change as an intent.
 ///
 /// `id` is this row's identity and every widget id derives from it, so a pane
-/// of sibling rows cannot collide even when two rows show the same field or the
-/// same Library value. `picker` is what the host read for this row's open
-/// picker, `None` while none is open or the read has not come back.
+/// of sibling rows cannot collide even when two rows show the same field or
+/// the same Library value. `picker` is what the host read for this row's open
+/// value popup, `None` while none is open or the read has not come back.
 ///
-/// The three lists are the component library's inline selector, one instance
-/// per part with its own derived id. Field and comparison are chips — the
-/// current answer's own word on a filled button, no chevron — so the row reads
-/// left to right as one sentence; every part is a real button, so each is
-/// reachable by a click, by the keyboard and by the a11y tree.
+/// Every selector is a chip or header that opens an [`egui::Popup::menu`] of
+/// [`option_list`] rows anchored below itself — field, comparison, yes/no and
+/// Library values alike, so the row reads left to right as one sentence and
+/// every part is a real button, reachable by a click, by the keyboard and by
+/// the a11y tree.
 #[must_use = "a row's output is what the listener just decided; dropping it                 loses the choice"]
 pub fn rule_row(
     ui: &mut egui::Ui,
@@ -818,9 +799,8 @@ pub fn rule_row(
             });
         }
         ui.add_space(PART_GAP);
-        draw_value(ui, cache, palette, id, draft, &mut intents);
+        draw_value(ui, cache, palette, id, draft, picker, &mut intents);
     });
-    draw_open_list(ui, palette, id, draft, picker, &mut intents);
     ui.add_space(ROW_BOTTOM_GAP);
     RuleRowOutcome {
         intents,
@@ -828,7 +808,7 @@ pub fn rule_row(
     }
 }
 
-/// The field chip: the catalog's display name, and the list it opens.
+/// The field chip: the catalog's display name, and the popup it opens.
 fn draw_field_chip(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -837,18 +817,33 @@ fn draw_field_chip(
     draft: &mut RuleDraft,
     intents: &mut Vec<RuleIntent>,
 ) {
-    let open = draft.open == Some(RulePanel::Field);
     let label = draft.field_label();
-    let pressed = chip(ui, cache, palette, id.with(("field", "chip")), label, label);
-    if pressed {
-        intents.push(RuleIntent::PanelToggled {
-            panel: RulePanel::Field,
-            open: !open,
-        });
-    }
+    let response = chip(ui, cache, palette, id.with(("field", "chip")), label, label);
+    egui::Popup::menu(&response).show(|ui| {
+        let options: Vec<OptionChoice<'_, MatchableField>> = MatchableField::ALL
+            .iter()
+            .map(|field| OptionChoice {
+                key: *field,
+                label: spec(*field).display_name(),
+            })
+            .collect();
+        if let Some(field) = option_list(
+            ui,
+            palette,
+            &OptionList {
+                id: id.with("field-list"),
+                options: &options,
+                current: draft.field.as_ref(),
+            },
+        ) {
+            ui.close();
+            intents.push(RuleIntent::FieldChosen { field });
+        }
+    });
 }
 
-/// The comparison chip: this module's word for the catalog's chosen id.
+/// The comparison chip: this module's word for the catalog's chosen id, and
+/// the popup it opens.
 fn draw_comparison_chip(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -857,9 +852,8 @@ fn draw_comparison_chip(
     draft: &mut RuleDraft,
     intents: &mut Vec<RuleIntent>,
 ) {
-    let open = draft.open == Some(RulePanel::Comparison);
     let label = draft.current_comparison_label();
-    let pressed = chip(
+    let response = chip(
         ui,
         cache,
         palette,
@@ -867,20 +861,38 @@ fn draw_comparison_chip(
         label,
         label,
     );
-    if pressed {
-        intents.push(RuleIntent::PanelToggled {
-            panel: RulePanel::Comparison,
-            open: !open,
-        });
-    }
+    egui::Popup::menu(&response).show(|ui| {
+        let choices = draft.comparison_choices();
+        let current = draft.comparison_choice();
+        let options: Vec<OptionChoice<'_, ComparisonChoice>> = choices
+            .iter()
+            .map(|choice| OptionChoice {
+                key: *choice,
+                label: choice.label(),
+            })
+            .collect();
+        if let Some(choice) = option_list(
+            ui,
+            palette,
+            &OptionList {
+                id: id.with("comparison-list"),
+                options: &options,
+                current: current.as_ref(),
+            },
+        ) {
+            ui.close();
+            intents.push(RuleIntent::ComparisonChosen { choice });
+        }
+    });
 }
 
 /// One chip: the current choice's own word as a filled button, with no
 /// disclosure glyph. The row reads as a sentence because each part wears the
-/// word it currently holds, and the word is the whole answer — a chevron would
-/// only say "there is a list behind this", which the list itself says better
-/// the moment it opens below. A real button, because a painted rectangle senses
-/// nothing: pointer, keyboard and the a11y tree all reach the part through it.
+/// word it currently holds, and the word is the whole answer — the popup it
+/// opens is what says "there is a list behind this" the moment it appears
+/// below. A real button, because a painted rectangle senses nothing: pointer,
+/// keyboard and the a11y tree all reach the part through it, and its response
+/// is what the popup anchors on.
 ///
 /// `a11y` is the name the control answers to, which is the label itself on the
 /// row's own chips and a full clause on the combine chip the Smart Playlists
@@ -893,12 +905,12 @@ pub(crate) fn chip(
     id: egui::Id,
     label: &str,
     a11y: &str,
-) -> bool {
+) -> egui::Response {
     let width = text_button_size(ui, palette, label, true)
         .x
         .min(ui.available_width().max(0.0));
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
-    text_button(
+    text_button_response(
         ui,
         cache,
         palette,
@@ -917,15 +929,17 @@ pub(crate) fn chip(
     )
 }
 
-/// One disclosure header, and whether it was pressed this frame. A real
-/// button, because a painted rectangle senses nothing.
+/// One disclosure header, answering its response so the popup it opens can
+/// anchor on it. A real button, because a painted rectangle senses nothing.
 ///
-/// The library-picker toggle is the row's last part still wearing a chevron.
-/// It is the one part whose label is not the current answer — "Choose…" says
-/// what the click does, not what the Rule holds — and the chevron is what keeps
-/// it distinguishable from the two chips, whose word *is* their state. The
-/// Smart Playlists pane borrows it for a nested Box's combine control, whose
-/// header is the same shape.
+/// `open` is the popup's own open state, read by the caller from the same egui
+/// memory the popup keeps it in, so the chevron wears what the popup is about
+/// to do. The library-picker toggle is the row's last part still wearing a
+/// chevron. It is the one part whose label is not the current answer —
+/// "Choose…" says what the click does, not what the Rule holds — and the
+/// chevron is what keeps it distinguishable from the chips, whose word *is*
+/// their state. The Smart Playlists pane borrows it for a nested Box's combine
+/// control, whose header is the same shape.
 pub(crate) fn header(
     ui: &mut egui::Ui,
     cache: &mut IconCache,
@@ -933,10 +947,10 @@ pub(crate) fn header(
     id: egui::Id,
     label: &str,
     open: bool,
-) -> bool {
+) -> egui::Response {
     let width = header_width(ui, palette, label);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
-    text_button(
+    text_button_response(
         ui,
         cache,
         palette,
@@ -978,85 +992,101 @@ fn draw_value(
     palette: &Palette,
     id: egui::Id,
     draft: &mut RuleDraft,
+    picker: Option<&RulePickerValues<'_>>,
     intents: &mut Vec<RuleIntent>,
 ) {
     let widgets = draft.value_widgets();
-    if widgets.is_empty() {
-        return;
-    }
-    if widgets.contains(&ValueWidget::YesNo) {
-        draw_yes_no(ui, palette, id, draft, intents);
-    } else if widgets.contains(&ValueWidget::DateWindow) || widgets.contains(&ValueWidget::DateTime)
-    {
-        draw_date(ui, cache, palette, id, draft, intents);
-    } else {
-        let numeric = widgets.contains(&ValueWidget::Number);
-        let hint = if numeric { "0" } else { "value" };
-        let width = if numeric { NUMBER_W } else { TEXT_VALUE_W };
-        let mut commit = false;
-        match draft.value.buffers_mut() {
-            Buffers::One(buffer) => {
-                commit = typed_well(
-                    ui,
-                    cache,
-                    palette,
-                    id.with(("value", 0)),
-                    buffer,
-                    hint,
-                    width,
-                );
-            }
-            Buffers::Duration {
-                hours,
-                minutes,
-                seconds,
-            } => {
-                for (slot, (buffer, box_hint)) in
-                    [(hours, "hh"), (minutes, "mm"), (seconds, "ss.mmm")]
-                        .into_iter()
-                        .enumerate()
-                {
-                    if slot > 0 {
-                        ui.add_space(DURATION_PART_GAP);
-                    }
-                    commit |= typed_well(
+    if !widgets.is_empty() {
+        if widgets.contains(&ValueWidget::YesNo) {
+            draw_yes_no(ui, cache, palette, id, draft, intents);
+        } else if widgets.contains(&ValueWidget::DateWindow)
+            || widgets.contains(&ValueWidget::DateTime)
+        {
+            draw_date(ui, cache, palette, id, draft, intents);
+        } else {
+            let numeric = widgets.contains(&ValueWidget::Number);
+            let hint = if numeric { "0" } else { "value" };
+            let width = if numeric { NUMBER_W } else { TEXT_VALUE_W };
+            let mut commit = false;
+            match draft.value.buffers_mut() {
+                Buffers::One(buffer) => {
+                    commit = typed_well(
                         ui,
                         cache,
                         palette,
-                        id.with(("value", slot)),
+                        id.with(("value", 0)),
                         buffer,
-                        box_hint,
-                        DURATION_PART_W,
+                        hint,
+                        width,
                     );
                 }
+                Buffers::Duration {
+                    hours,
+                    minutes,
+                    seconds,
+                } => {
+                    for (slot, (buffer, box_hint)) in
+                        [(hours, "hh"), (minutes, "mm"), (seconds, "ss.mmm")]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if slot > 0 {
+                            ui.add_space(DURATION_PART_GAP);
+                        }
+                        commit |= typed_well(
+                            ui,
+                            cache,
+                            palette,
+                            id.with(("value", slot)),
+                            buffer,
+                            box_hint,
+                            DURATION_PART_W,
+                        );
+                    }
+                }
+                Buffers::None | Buffers::Choice => {}
             }
-            Buffers::None | Buffers::Choice => {}
-        }
-        if commit {
-            commit_value(draft, intents);
+            if commit {
+                commit_value(draft, intents);
+            }
         }
     }
-    if draft.takes_library_values() {
+    if draft.takes_library_values() && draft.field.is_some() {
         ui.add_space(PART_GAP);
-        let open = draft.open == Some(RulePanel::Value);
-        let pressed = header(
-            ui,
-            cache,
-            palette,
-            id.with(("picker", "header")),
-            if open { "Hide values" } else { "Choose…" },
-            open,
-        );
-        if pressed {
-            intents.push(if open {
-                RuleIntent::PickerClosed
-            } else {
-                match draft.field {
-                    Some(field) => RuleIntent::PickerOpened { field },
-                    None => RuleIntent::PickerClosed,
-                }
-            });
+        draw_picker_toggle(ui, cache, palette, id, draft, picker, intents);
+    }
+}
+
+/// The library-picker toggle — the "Choose…" header — and the value popup it
+/// opens. The open/close transitions are reported here, by comparing the
+/// popup's own open state against the draft's last-frame memo, because opening
+/// this popup is the one *read* the host owes: a rising edge is
+/// [`RuleIntent::PickerOpened`], a falling one [`RuleIntent::PickerClosed`],
+/// and nothing else moves the memo.
+fn draw_picker_toggle(
+    ui: &mut egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    id: egui::Id,
+    draft: &mut RuleDraft,
+    picker: Option<&RulePickerValues<'_>>,
+    intents: &mut Vec<RuleIntent>,
+) {
+    let header_id = id.with(("picker", "header"));
+    let open = egui::Popup::is_id_open(ui.ctx(), header_id.with("popup"));
+    let response = header(ui, cache, palette, header_id, "Choose…", open);
+    egui::Popup::menu(&response).show(|ui| {
+        draw_picker_list(ui, palette, id, draft, picker, intents);
+    });
+    let now_open = egui::Popup::is_id_open(ui.ctx(), header_id.with("popup"));
+    match (draft.picker_open, now_open) {
+        (false, true) => {
+            if let Some(field) = draft.field {
+                intents.push(RuleIntent::PickerOpened { field });
+            }
         }
+        (true, false) => intents.push(RuleIntent::PickerClosed),
+        _ => {}
     }
 }
 
@@ -1116,11 +1146,13 @@ fn typed_well(
     enter || response.lost_focus()
 }
 
-/// The yes/no answer: the catalog's `Yes/No` idea drawn as the selector's two
-/// options. A toggle would hide one half of the answer behind a word that is
-/// not the answer.
+/// The yes/no answer: the catalog's `Yes/No` idea as a chip wearing the
+/// current answer, opening the popup that offers both halves. A toggle would
+/// hide one half of the answer behind a word that is not the answer, and an
+/// always-open list would break the row's one-line sentence.
 fn draw_yes_no(
     ui: &mut egui::Ui,
+    cache: &mut IconCache,
     palette: &Palette,
     id: egui::Id,
     draft: &mut RuleDraft,
@@ -1130,18 +1162,33 @@ fn draw_yes_no(
         RuleValueDraft::YesNo(yes) => Some(RuleValue::YesNo(*yes)),
         _ => None,
     };
-    let options = [yes_no_choice(true), yes_no_choice(false)];
-    if let Some(value) = option_list(
+    let label = current.as_ref().map_or("No", |value| match value {
+        RuleValue::YesNo(true) => "Yes",
+        _ => "No",
+    });
+    let response = chip(
         ui,
+        cache,
         palette,
-        &OptionList {
-            id: id.with("yes-no"),
-            options: &options,
-            current: current.as_ref(),
-        },
-    ) {
-        report_value(draft, value, intents);
-    }
+        id.with(("yes-no", "chip")),
+        label,
+        label,
+    );
+    egui::Popup::menu(&response).show(|ui| {
+        let options = [yes_no_choice(true), yes_no_choice(false)];
+        if let Some(value) = option_list(
+            ui,
+            palette,
+            &OptionList {
+                id: id.with("yes-no"),
+                options: &options,
+                current: current.as_ref(),
+            },
+        ) {
+            ui.close();
+            report_value(draft, value, intents);
+        }
+    });
 }
 
 /// One option of the yes/no control.
@@ -1169,71 +1216,16 @@ fn draw_date(
     }
 }
 
-/// The one list this row has open, drawn inline at the pane's full width —
-/// which is what keeps every option reachable: nothing here is a popup, so no
-/// parent clip rect can silently exclude a choice.
-fn draw_open_list(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    id: egui::Id,
-    draft: &mut RuleDraft,
-    picker: Option<&RulePickerValues<'_>>,
-    intents: &mut Vec<RuleIntent>,
-) {
-    let Some(panel) = draft.open else {
-        return;
-    };
-    ui.add_space(LIST_TOP_GAP);
-    match panel {
-        RulePanel::Field => {
-            let options: Vec<OptionChoice<'_, MatchableField>> = MatchableField::ALL
-                .iter()
-                .map(|field| OptionChoice {
-                    key: *field,
-                    label: spec(*field).display_name(),
-                })
-                .collect();
-            if let Some(field) = option_list(
-                ui,
-                palette,
-                &OptionList {
-                    id: id.with("field-list"),
-                    options: &options,
-                    current: draft.field.as_ref(),
-                },
-            ) {
-                intents.push(RuleIntent::FieldChosen { field });
-            }
-        }
-        RulePanel::Comparison => {
-            let choices = draft.comparison_choices();
-            let current = draft.comparison_choice();
-            let options: Vec<OptionChoice<'_, ComparisonChoice>> = choices
-                .iter()
-                .map(|choice| OptionChoice {
-                    key: *choice,
-                    label: choice.label(),
-                })
-                .collect();
-            if let Some(choice) = option_list(
-                ui,
-                palette,
-                &OptionList {
-                    id: id.with("comparison-list"),
-                    options: &options,
-                    current: current.as_ref(),
-                },
-            ) {
-                intents.push(RuleIntent::ComparisonChosen { choice });
-            }
-        }
-        RulePanel::Value => draw_picker_list(ui, palette, id, draft, picker, intents),
-    }
-}
-
 /// The open library picker. Absent values are the Library's to exclude
 /// (`picker_texts` drops a NULL or all-whitespace tag), so what is listed is
 /// what the Library actually holds — and typing remains open either way.
+///
+/// The values arrive one frame after the popup opens (the host reads them in
+/// answer to [`RuleIntent::PickerOpened`]); that one frame wears the inert
+/// sentence below rather than an empty popup. A choice commits the value and
+/// closes the popup through [`egui::Ui::close`] — the close intent itself
+/// comes from the popup's falling edge, one frame later, like every other way
+/// it closes.
 fn draw_picker_list(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1243,6 +1235,11 @@ fn draw_picker_list(
     intents: &mut Vec<RuleIntent>,
 ) {
     let Some(picker) = picker else {
+        ui.label(
+            egui::RichText::new("Reading values…")
+                .text_style(egui::TextStyle::Small)
+                .color(palette.ink_3),
+        );
         return;
     };
     let (values, labels) = picker_payload(picker);
@@ -1268,8 +1265,8 @@ fn draw_picker_list(
             current: current.as_ref(),
         },
     ) {
+        ui.close();
         report_value(draft, value, intents);
-        intents.push(RuleIntent::PickerClosed);
     }
 }
 

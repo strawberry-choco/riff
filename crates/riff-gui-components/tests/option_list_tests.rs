@@ -2,12 +2,13 @@
 //!
 //! The selector is the component library's one generic single-choice control:
 //! fed `(label, key)` pairs, the current key and an identity, it draws its
-//! options **inline in the pane's own layout flow** — no popup, no new layer —
-//! and reports the clicked key to the caller. These probes are the typed-intent
-//! seam: every test clicks a real option through the a11y label and asserts the
-//! key that arrives in the caller's buffer, never a pixel. The golden that
-//! proves the same click through a composed frame lives in the root
-//! `riff-tests` crate (`golden_tests::…::option_list_after_click_dark`).
+//! options inline in whatever Ui it is handed — a pane's own flow here, a
+//! popup's in the rule editor — and reports the clicked key to the caller.
+//! These probes are the typed-intent seam: every test clicks a real option
+//! through the a11y label and asserts the key that arrives in the caller's
+//! buffer, never a pixel. The golden that proves the same click through a
+//! composed frame lives in the root `riff-tests` crate
+//! (`golden_tests::…::option_list_after_click_dark`).
 //!
 //! Moved here from the root suite's pattern, per the widgetry split: the
 //! primitive lives in this crate, so its probes do too.
@@ -83,7 +84,7 @@ fn test_clicking_an_option_reports_its_key_and_a_later_click_moves_the_choice() 
     assert_eq!(
         harness.state().as_deref(),
         Some("two"),
-        "a real click on an inline option reports its key"
+        "a real click on a drawn option reports its key"
     );
 
     harness.get_by_label("Three").click();
@@ -91,7 +92,7 @@ fn test_clicking_an_option_reports_its_key_and_a_later_click_moves_the_choice() 
     assert_eq!(
         harness.state().as_deref(),
         Some("three"),
-        "the choice moves on the next click, inline, with no popup to open first"
+        "the choice moves on the next click, with no opening gesture in between"
     );
 }
 

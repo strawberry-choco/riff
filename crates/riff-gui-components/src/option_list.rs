@@ -2,14 +2,15 @@
 //! single-choice control (Smart Playlists ticket 06, ADR 0018).
 //!
 //! Fed `(label, key)` pairs, the current key and an identity, it draws every
-//! option **inline, in the pane's own layout flow**, and reports the clicked
-//! key to the caller. There is no popup, no new layer and no floating widget:
-//! an inline list is reachable by a real click with the pane's actual hit
-//! areas *and* by the headless kittest harness, and this project's golden
-//! suite has twice pinned a control a real user could not reach — a popup's
-//! interactivity in that harness has never been demonstrated here, so the
-//! field, comparison and value picks the rule editor (tickets 14/15/20)
-//! builds on this primitive would be untestable behind one.
+//! option inline, in whatever Ui it is handed, and reports the clicked key to
+//! the caller. A host pane draws it in its own layout flow; the rule editor
+//! draws it inside an `egui::Popup::menu`, which is how the row's field,
+//! comparison, yes/no and Library-value choices float beside the chips that
+//! open them — the very pattern the track-sort control in [`crate::menu`]
+//! ships, and one this project's test suites click through with real
+//! pointers (`tests/ui_tests.rs`: the sort control, the date picker, and the
+//! rule row's own lists), so a popup-hosted list is held to the same
+//! reachability as an inline one.
 //!
 //! The contract is the crate's standing props-in / typed-response-out one:
 //! [`option_list`] mutates nothing — not the palette, not the options, not
@@ -19,11 +20,11 @@
 //! prop.
 //!
 //! Overflow is defined here rather than discovered in the field: a row is
-//! exactly the pane's available width and a too-long label is truncated to
-//! the row's text budget, so nothing escapes the pane horizontally; the
-//! list's vertical growth belongs to the host pane's own scroll, and a deep
-//! list's tail stays reachable through it (pinned by the crate's probe
-//! suite, `tests/option_list_tests.rs`).
+//! exactly the width its host gives it and a too-long label is truncated to
+//! the row's text budget, so nothing escapes the host horizontally; a deep
+//! list's vertical growth belongs to the host — a pane's own scroll, or the
+//! popup's — and a deep tail stays reachable through it (pinned by the
+//! crate's probe suite, `tests/option_list_tests.rs`).
 
 use egui;
 

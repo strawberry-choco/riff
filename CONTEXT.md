@@ -5,8 +5,12 @@ riff is an offline-first desktop music player. This context covers the language 
 ## Language
 
 **View**:
-One of the primary content areas selectable from the shared chrome — Library, Folders, or Settings; exactly one is visible at a time.
-_Avoid_: page, stage, screen, tab
+One of the primary content modes selectable from the shared chrome — Library, Folders, or Settings; exactly one is active at a time.
+_Avoid_: page, screen, tab
+
+**Stage**:
+The region of the shared chrome where the active View renders — right of the sidebar, between the titlebar and the player bar. It hosts exactly one occupant at a time: the active View's content, or a surface opened in its place, such as the Smart Playlist editor. A View is what shows; the Stage is where it shows.
+_Avoid_: content area, main pane, canvas, page
 
 **Section**:
 One of the Library browse sections selectable from the sidebar; exactly one is active at a time, and each keeps its own Scroll Memory while the app runs.

@@ -27,58 +27,19 @@ mod tests {
         assert_settled_on_both_slots, distinct_colors, inter_only_font_definitions,
         pin_settled_time,
     };
+    use crate::harness_gate::harness_slot;
     use crate::mocks::{MockLibraryQueryStore, MockPlaylistStore, MockSettingsStore};
     use riff_backend::app::state::{LibrarySession, PlaybackSession};
     use riff_gui_theme::fonts;
     use riff_gui_theme::theme::{self, Palette};
 
     // --- Harness plumbing ------------------------------------------------------
-
-    /// How many golden harnesses may be alive at once.
-    ///
-    /// Every harness brings up its own wgpu device, and this machine's driver
-    /// does not survive seventy of them arriving together: a full
-    /// `cargo test --all-targets` died twice with `STATUS_ACCESS_VIOLATION`
-    /// (0xc0000005) part-way through the golden block — no failing test, no
-    /// diff, green on the next run. Capping the concurrency keeps the suite
-    /// reliable while still using several cores; the render work is ~1-2 s per
-    /// golden either way.
-    const MAX_CONCURRENT_HARNESSES: usize = 4;
-
-    static HARNESSES_IN_FLIGHT: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
-    static HARNESS_SLOT_RELEASED: std::sync::Condvar = std::sync::Condvar::new();
-
-    /// A reserved harness slot; released on drop, panics included.
-    struct HarnessSlot;
-
-    impl Drop for HarnessSlot {
-        fn drop(&mut self) {
-            let mut in_flight = lock_harness_slots();
-            *in_flight -= 1;
-            HARNESS_SLOT_RELEASED.notify_one();
-        }
-    }
-
-    /// Poisoning is tolerated on purpose: one failing golden must not cascade
-    /// into every later one.
-    fn lock_harness_slots() -> std::sync::MutexGuard<'static, usize> {
-        HARNESSES_IN_FLIGHT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Block until fewer than [`MAX_CONCURRENT_HARNESSES`] harnesses are in
-    /// flight, then reserve one.
-    fn harness_slot() -> HarnessSlot {
-        let mut in_flight = lock_harness_slots();
-        while *in_flight >= MAX_CONCURRENT_HARNESSES {
-            in_flight = HARNESS_SLOT_RELEASED
-                .wait(in_flight)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        *in_flight += 1;
-        HarnessSlot
-    }
+    //
+    // The concurrency cap itself — why at most a few harnesses may be alive at
+    // once, and why a slot is reserved before every build — lives at the crate
+    // root in `crate::harness_gate`, shared with `ui_tests` and the composed
+    // shells. This suite only takes a slot per harness: `harness_slot()` at
+    // the top of every golden that renders.
 
     // --- Composed-golden harness (Issue 05) -------------------------------------
     //

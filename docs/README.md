@@ -81,7 +81,7 @@ How to work on riff correctly.
 - [Commit conventions](engineering/commit-conventions.md) — the commit-message profile the validator enforces, the type-to-section-to-bump table from `cliff.toml`, and the three enforcement points.
 - [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
-- [Access-violation flake](engineering/access-violation-flake.md) — the open `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: hypotheses ruled in and out, and the next move.
+- [Access-violation flake](engineering/access-violation-flake.md) — the closed `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: the harness-concurrency cap that now covers every suite, and the evidence that closed it.
 - [Release and packaging](engineering/release-and-packaging.md) — the tag-triggered release pipeline in `.github/workflows/release.yml` (version guard, four-platform build matrix, artifact packaging, pre-release publish) and how to cut a release.
 
 ### Reference

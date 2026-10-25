@@ -445,6 +445,7 @@ mod tests {
         let (runtime, mut lifecycle) =
             AppRuntime::spawn(&db_path).expect("the runtime spawns over the seeded store");
         let traffic = Arc::new(AtomicUsize::new(0));
+        let _slot = crate::harness_gate::harness_slot();
         let (mut harness, playback, library) = build_shell(runtime, traffic.clone());
 
         let album = |name: &str| -> Vec<&DemoTrack> {

@@ -1,6 +1,7 @@
 // Bring the crate-root prelude (re-exported types) into this module so the
 // inner `use super::*` can see the bare type names used in the tests.
 use super::*;
+use crate::harness_gate::harness_slot;
 
 #[cfg(test)]
 mod tests {
@@ -1322,6 +1323,7 @@ mod tests {
         palette: &theme::Palette,
         build: impl Fn(&mut egui::Ui, &theme::Palette),
     ) -> image::RgbaImage {
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(canvas)
             .with_pixels_per_point(1.0)
@@ -1542,6 +1544,7 @@ mod tests {
         use riff_gui_theme::theme::Palette;
 
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 88.0))
             .with_pixels_per_point(1.0)
@@ -2681,6 +2684,7 @@ mod tests {
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
         let mut widget_actions = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, 56.0))
             .with_pixels_per_point(1.0)
@@ -2777,6 +2781,7 @@ mod tests {
         let palette = theme::Palette::dark();
         let mut cache = IconCache::new();
         let mut widget_actions = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, 56.0))
             .with_pixels_per_point(1.0)
@@ -3133,6 +3138,7 @@ mod tests {
         let flag = std::rc::Rc::new(std::cell::Cell::new(playing));
         let seen = std::rc::Rc::clone(&flag);
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 48.0))
             .with_pixels_per_point(1.0)
@@ -3343,6 +3349,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 48.0))
             .with_pixels_per_point(1.0)
@@ -3390,6 +3397,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 48.0))
             .with_pixels_per_point(1.0)
@@ -3456,6 +3464,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -3610,6 +3619,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -3648,6 +3658,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -3676,6 +3687,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(theme::SIDEBAR_W - 24.0, 48.0))
             .with_pixels_per_point(1.0)
@@ -4111,6 +4123,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
         let mut buf = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
@@ -4138,6 +4151,7 @@ mod tests {
         let mut cache = icons::IconCache::new();
         let mut readouts = riff_gui::ui::playerbar::SeekReadouts::default();
         let mut buf = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
@@ -4505,6 +4519,7 @@ mod tests {
         step: impl FnOnce(&mut egui_kittest::Harness<'_, Vec<riff_gui::ui::playerbar::PlayerBarAction>>),
     ) {
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, 400.0))
             .with_pixels_per_point(1.0)
@@ -5201,6 +5216,7 @@ mod tests {
             total: Some(std::time::Duration::from_mins(4)),
             up_next: Vec::new().into(),
         };
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(520.0, 456.0))
             .with_pixels_per_point(1.0)
@@ -5258,6 +5274,7 @@ mod tests {
             ]
             .into(),
         };
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             // Tall enough that both Up Next rows fit below the fixed cover +
             // copy block without scrolling (the min-window stage would clip
@@ -5558,6 +5575,7 @@ mod tests {
         content: &SettingsContent,
         current: riff_gui::ui::settings::SettingsSection,
     ) -> egui_kittest::Harness<'_, Vec<SettingsAction>> {
+        let _slot = harness_slot();
         settings_modal_harness_sized(content, current, egui::vec2(800.0, 720.0))
     }
 
@@ -5570,6 +5588,7 @@ mod tests {
         use riff_gui::ui::settings::show_settings_modal;
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
@@ -5663,6 +5682,7 @@ mod tests {
         let content = sample_content();
         // Appearance is the one section that is a single card, so the card's
         // own edge is separable from every other thing in the frame.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
         harness.run();
         let frame = harness
@@ -5776,6 +5796,7 @@ mod tests {
 
         // The Library pane scrolls, so each row is scrolled into view
         // before its click (see [`click_into_view`]).
+        let _slot = harness_slot();
         let harness = click_into_view("Watch for changes", &content);
         assert!(
             harness
@@ -5784,6 +5805,7 @@ mod tests {
             "the Watch for changes toggle reports the watcher-wide commit"
         );
 
+        let _slot = harness_slot();
         let harness = click_into_view("Skip hidden files", &content);
         assert!(
             harness
@@ -5792,6 +5814,7 @@ mod tests {
             "the Skip hidden files toggle reports the scan-preference commit"
         );
 
+        let _slot = harness_slot();
         let harness = click_into_view("Read embedded artwork", &content);
         assert!(
             harness
@@ -5814,6 +5837,7 @@ mod tests {
                 .collect(),
             ..sample_content()
         };
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
         harness.get_by_label("Index flac files").click();
@@ -5830,6 +5854,7 @@ mod tests {
     fn test_rescan_now_and_footer_actions_report_their_intents() {
         let content = SettingsContent { ..sample_content() };
 
+        let _slot = harness_slot();
         let harness = click_into_view("Rescan now", &content);
         assert!(
             harness.state().contains(&SettingsAction::ScanAll),
@@ -5837,6 +5862,7 @@ mod tests {
         );
         // Done closes Settings — the same intent as the header's back arrow.
 
+        let _slot = harness_slot();
         let harness = click_into_view("Done", &content);
         assert!(
             harness.state().contains(&SettingsAction::Back),
@@ -5855,6 +5881,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         use riff_gui::ui::settings::SettingsSection;
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(content, SettingsSection::Library);
         harness.run();
         harness.get_by_label(label).scroll_to_me();
@@ -5985,6 +6012,7 @@ mod tests {
 
         let walk_order = |width: f32| {
             let content = sample_content();
+            let _slot = harness_slot();
             let mut harness = settings_modal_harness_sized(
                 &content,
                 SettingsSection::Library,
@@ -6097,6 +6125,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness =
             settings_modal_harness_sized(&content, SettingsSection::Library, MIN_STAGE_SIZE);
         harness.run();
@@ -6420,6 +6449,7 @@ mod tests {
 
         let render = |width: f32| {
             let content = sample_content();
+            let _slot = harness_slot();
             let mut harness = settings_modal_harness_sized(
                 &content,
                 SettingsSection::Library,
@@ -6511,6 +6541,7 @@ mod tests {
             let content = sample_content();
             let palette = Palette::dark();
             let mut cache = icons::IconCache::new();
+            let _slot = harness_slot();
             let mut harness: egui_kittest::Harness<'_, Vec<SettingsAction>> =
                 egui_kittest::Harness::builder()
                     .with_size(egui::vec2(width, SHORT))
@@ -6574,6 +6605,7 @@ mod tests {
         use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness_sized(
             &content,
             SettingsSection::Library,
@@ -6688,6 +6720,7 @@ mod tests {
                 last_scan: Some(summary(errors)),
                 ..sample_content()
             };
+            let _slot = harness_slot();
             let mut harness = settings_modal_harness_sized(
                 &content,
                 SettingsSection::Library,
@@ -6736,6 +6769,7 @@ mod tests {
 
         for section in SettingsSection::ALL {
             let content = sample_content();
+            let _slot = harness_slot();
             let mut harness =
                 settings_modal_harness_sized(&content, section, egui::vec2(1280.0, 840.0));
             harness.run();
@@ -6768,6 +6802,7 @@ mod tests {
 
         for size in [egui::vec2(1280.0, 840.0), egui::vec2(920.0, 840.0)] {
             let content = sample_content();
+            let _slot = harness_slot();
             let mut harness =
                 settings_modal_harness_sized(&content, SettingsSection::Library, size);
             harness.run();
@@ -6791,6 +6826,7 @@ mod tests {
         use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
 
@@ -6822,6 +6858,7 @@ mod tests {
 
         // Library: the working library controls are on stage, and no other
         // section's content bleeds into the pane.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
         assert!(
@@ -6835,6 +6872,7 @@ mod tests {
 
         // Advanced: the section's existing content (Advanced mode preference
         // and platform info) replaces the library controls entirely.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         assert!(
@@ -6849,6 +6887,7 @@ mod tests {
         // About has no existing content and shows a clear placeholder.
         {
             let section = SettingsSection::About;
+            let _slot = harness_slot();
             let mut harness = settings_modal_harness(&content, section);
             harness.run();
             let expected = format!("{} settings are not implemented yet.", section.label());
@@ -6871,6 +6910,7 @@ mod tests {
         use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
 
@@ -6936,6 +6976,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
@@ -6957,6 +6998,7 @@ mod tests {
     fn test_typing_the_name_edits_the_draft_buffer() {
         use egui_kittest::kittest::Queryable;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -6982,6 +7024,7 @@ mod tests {
     fn test_back_and_cancel_report_the_same_discard() {
         use egui_kittest::kittest::Queryable;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -7024,6 +7067,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
@@ -7116,6 +7160,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::BoxPath;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -7171,6 +7216,7 @@ mod tests {
     fn test_a_nested_boxes_add_rule_reports_that_box_as_the_parent() {
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add group", 0);
@@ -7228,6 +7274,7 @@ mod tests {
                  no Rule, so there is nothing to match",
             ),
         ] {
+            let _slot = harness_slot();
             let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
             harness.state_mut().0.match_line = Some(line);
             harness.run();
@@ -7240,6 +7287,7 @@ mod tests {
         // A draft whose line was never written wears the well's standing
         // sentence: no number, and no reason either — nothing has been refused,
         // the read has simply not answered for this draft yet.
+        let _slot = harness_slot();
         let mut harness = smart_playlists_editor_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         assert!(
@@ -7261,6 +7309,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add rule", 0);
@@ -7294,6 +7343,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         click_nth(&mut harness, "Add group", 0);
@@ -7359,6 +7409,7 @@ mod tests {
             harness.run();
         }
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -7419,6 +7470,7 @@ mod tests {
 
         // Tall enough that all seven levels lay out unclipped, so every
         // control probed is genuinely clickable.
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 2400.0));
         harness.run();
 
@@ -7515,6 +7567,7 @@ mod tests {
         use egui_kittest::kittest::Queryable as _;
         use riff_backend::domain::MatchableField;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -7628,6 +7681,7 @@ mod tests {
 
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
@@ -7726,6 +7780,7 @@ mod tests {
     /// on the pane's own controls — what they mean is the app's apply step.
     #[test]
     fn test_save_and_cancel_are_reported_as_typed_intents() {
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(
             SmartPlaylistsEditor::default(),
             egui::vec2(1280.0, 840.0),
@@ -7757,6 +7812,7 @@ mod tests {
     fn test_the_draft_survives_repaints_and_a_mid_edit_tree_change() {
         use egui_kittest::kittest::Queryable as _;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(
             SmartPlaylistsEditor::default(),
             egui::vec2(1280.0, 840.0),
@@ -7807,6 +7863,7 @@ mod tests {
             RuleChildDraft::Rule(RuleDraft::blank()),
             RuleChildDraft::Rule(whole_rule(MatchableField::Album)),
         ];
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -7864,6 +7921,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
@@ -7888,6 +7946,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
@@ -7910,6 +7969,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(draft)];
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, size);
         harness.run();
         click_control(&mut harness, egui::accesskit::Role::Button, "Save");
@@ -7947,6 +8007,7 @@ mod tests {
             false,
             Some("calm".to_string()),
         )]);
+        let _slot = harness_slot();
         let mut harness =
             smart_playlists_draft_harness(editor_holding(&tree), egui::vec2(1280.0, 840.0));
         harness.run();
@@ -8030,6 +8091,7 @@ mod tests {
             ..SmartPlaylistsEditor::default()
         };
         editor.root.children = vec![RuleChildDraft::Rule(whole_rule(MatchableField::Album))];
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -8070,6 +8132,7 @@ mod tests {
         let store_words = "Invalid operation: store query failed: a Playlist or Custom Smart \
                            Playlist named \"Gym\" already exists";
         editor.refuse_save(store_words.to_string());
+        let _slot = harness_slot();
         let mut harness = smart_playlists_draft_harness(editor, egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -8321,6 +8384,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
@@ -8377,6 +8441,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
@@ -8434,6 +8499,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
@@ -8505,6 +8571,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
@@ -8590,6 +8657,7 @@ mod tests {
         use riff_backend::domain::{Combine, MatchableField};
         use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         harness.state_mut().0.root.children = vec![
@@ -8661,6 +8729,7 @@ mod tests {
         use riff_backend::domain::MatchableField;
         use riff_gui::ui::rule_box::RuleChildDraft;
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
 
@@ -8703,6 +8772,7 @@ mod tests {
         use riff_gui::ui::rule_box::RuleChildDraft;
         use riff_gui::ui::rule_row::{ComparisonChoice, RuleDraft, RuleIntent, RuleValueDraft};
 
+        let _slot = harness_slot();
         let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
         harness.run();
         // One row with a field and a comparison chosen the way the row
@@ -8771,6 +8841,7 @@ mod tests {
 
         let content = sample_content();
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         harness.get_by_label("Track values").click();
@@ -8816,6 +8887,7 @@ mod tests {
         content.pass_running = true;
         content.pass_progress = (3, 10);
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         // The button reads as in-progress and is disabled: clicking it
@@ -8854,6 +8926,7 @@ mod tests {
         let mut content = sample_content();
         content.pass_outcome = Some("Measured 10 tracks (2 were already measured)".to_string());
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         harness.get_by_label("Measured 10 tracks (2 were already measured)");
@@ -8871,6 +8944,7 @@ mod tests {
 
         // The Playback pane carries the Mode choice beside the master toggle:
         // clicking Album reports the Album mode, and Track reports Track.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
         harness.run();
         harness.get_by_label("Album").click();
@@ -8882,6 +8956,7 @@ mod tests {
             "the Mode choice reports the chosen ReplayGain Mode"
         );
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
         harness.run();
         harness.get_by_label("Track").click();
@@ -8903,6 +8978,7 @@ mod tests {
 
         // Advanced mode starts ON (mockup shows it checked) and lives in the
         // Advanced pane; clicking the switch must report turning it OFF.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         harness.get_by_label("Advanced mode").click();
@@ -8915,6 +8991,7 @@ mod tests {
         );
 
         // ReplayGain starts OFF in the Playback pane...
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Playback);
         harness.run();
         harness.get_by_label("ReplayGain").click();
@@ -8927,6 +9004,7 @@ mod tests {
         );
 
         // ...and High contrast starts OFF in the Appearance pane.
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
         harness.run();
         harness.get_by_label("High contrast").click();
@@ -8950,6 +9028,7 @@ mod tests {
 
         let content = sample_content();
 
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Appearance);
         harness.run();
         harness.get_by_label("Reduce motion").click();
@@ -8973,6 +9052,7 @@ mod tests {
         let ring = theme::focus_ring_stroke(&palette, true)
             .expect("a focused control has a ring")
             .color;
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(80.0, 40.0))
             .with_pixels_per_point(1.0)
@@ -9049,6 +9129,7 @@ mod tests {
         // only where a tray exists, so clicking it must report opting into
         // quitting. (On Linux the pane omits the row entirely — decision 002.)
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Advanced);
         harness.run();
         harness.get_by_label("Quit on close").click();
@@ -9067,6 +9148,7 @@ mod tests {
         use riff_gui::ui::settings::SettingsSection;
 
         let content = sample_content();
+        let _slot = harness_slot();
         let mut harness = settings_modal_harness(&content, SettingsSection::Library);
         harness.run();
 
@@ -9195,6 +9277,7 @@ mod tests {
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
         let labels = ["Alpha", "Beta", "Gamma"];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 3.0))
             .with_pixels_per_point(1.0)
@@ -9301,6 +9384,7 @@ mod tests {
         let attached = row_track.clone();
         let palette = theme::Palette::dark();
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(256.0, theme::geometry::sidebar::ROW_H * 2.0))
             .with_pixels_per_point(1.0)
@@ -9404,6 +9488,7 @@ mod tests {
         let shuffle_id = egui::Id::new("playerbar_shuffle");
         let play_id = egui::Id::new("playerbar_play");
         let mut cache = icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, theme::PLAYERBAR_H))
             .with_pixels_per_point(1.0)
@@ -9480,6 +9565,7 @@ mod tests {
 
         #[expect(clippy::cast_precision_loss)]
         let view_h = VIEW_ROWS as f32 * theme::geometry::sidebar::ROW_H;
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, view_h))
             .with_pixels_per_point(1.0)
@@ -10826,6 +10912,7 @@ mod playback_notice_ui_tests {
 
 #[cfg(test)]
 mod titlebar_search_ui_tests {
+    use crate::harness_gate::harness_slot;
     // --- Titlebar search (shared chrome) -----------------------------------------
     //
     // The global "Search or jump to…" field lives in the titlebar — shared
@@ -10847,6 +10934,7 @@ mod titlebar_search_ui_tests {
 
         let palette = riff_gui_theme::theme::Palette::dark();
         let mut cache = riff_gui_theme::icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
@@ -10882,6 +10970,7 @@ mod titlebar_search_ui_tests {
 
         let palette = riff_gui_theme::theme::Palette::dark();
         let mut cache = riff_gui_theme::icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
@@ -10922,6 +11011,7 @@ mod titlebar_search_ui_tests {
 
         let palette = riff_gui_theme::theme::Palette::dark();
         let mut cache = riff_gui_theme::icons::IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(800.0, riff_gui_theme::theme::TITLEBAR_H))
             .with_pixels_per_point(1.0)
@@ -11023,6 +11113,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let items = fixture_items();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11094,6 +11185,7 @@ mod browser_column_ui_tests {
                 now_playing: false,
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -11156,6 +11248,7 @@ mod browser_column_ui_tests {
                 now_playing: false,
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(220.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11211,6 +11304,7 @@ mod browser_column_ui_tests {
             selected: false,
             now_playing: false,
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 240.0))
             .with_pixels_per_point(1.0)
@@ -11247,6 +11341,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let items = fixture_items();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11290,6 +11385,7 @@ mod browser_column_ui_tests {
             let palette = Palette::dark();
             let mut cache = IconCache::new();
             let items = fixture_items();
+            let _slot = harness_slot();
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(320.0, 300.0))
                 .with_pixels_per_point(1.0)
@@ -11344,6 +11440,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let items = fixture_items();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11387,6 +11484,7 @@ mod browser_column_ui_tests {
         let mut cache = IconCache::new();
         let total = 200usize;
         let calls: std::rc::Rc<std::cell::RefCell<Vec<usize>>> = Default::default();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11570,6 +11668,7 @@ mod browser_column_ui_tests {
                 now_playing: false,
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11648,6 +11747,7 @@ mod browser_column_ui_tests {
             selected: false,
             now_playing: false,
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11741,6 +11841,7 @@ mod browser_column_ui_tests {
         // as the same per-row factory the app hands over, reading the row's own
         // Favourite flag.
         let playlists = [(PlaylistKey("pl-1".to_string()), "Gym".to_string())];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11864,6 +11965,7 @@ mod browser_column_ui_tests {
             row("plain", "Not A Favorite", false),
             row("loved", "Loved", true),
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -11987,6 +12089,7 @@ mod browser_column_ui_tests {
                 now_playing: false,
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -12381,6 +12484,7 @@ mod browser_column_ui_tests {
 
         let slots: Rc<RefCell<Vec<(usize, egui::Rect)>>> = Rc::new(RefCell::new(Vec::new()));
         let capture = Rc::clone(&slots);
+        let _slot = harness_slot();
         let harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(available, 600.0))
             .with_pixels_per_point(1.0)
@@ -12672,6 +12776,7 @@ mod browser_column_ui_tests {
         };
         let palette = Palette::dark();
 
+        let _slot = harness_slot();
         let mut harness: egui_kittest::Harness<'_, ()> = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1280.0, 840.0))
             .with_pixels_per_point(1.0)
@@ -12772,6 +12877,7 @@ mod browser_column_ui_tests {
         use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         let id = egui::Id::new("test_row_band");
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -12814,6 +12920,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let items = fixture_items();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -13101,6 +13208,7 @@ mod browser_column_ui_tests {
         use riff_gui_components::row::paint_row_band;
         use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -13189,6 +13297,7 @@ mod browser_column_ui_tests {
         /// asserted over a run and not over one frame.
         const SETTLED_PASSES: usize = 4;
 
+        let _slot = harness_slot();
         let mut harness = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_frame_loop"), false);
 
         // One pass with the row idle. This seeds the tween at `0.0`, which is
@@ -13288,6 +13397,7 @@ mod browser_column_ui_tests {
         // The settled hover tint under the default tempo: hovered, stepped past
         // MOTION_HOVER so the fade completes, is the reference both bands land
         // on.
+        let _slot = harness_slot();
         let mut moving = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_moving"), false);
         *moving.state_mut() = true;
         for _ in 0..PASSES {
@@ -13297,6 +13407,7 @@ mod browser_column_ui_tests {
 
         // The reduce-motion band: idle first (the tween rests at 0.0), then
         // hovered — with no pass ever asking for a frame.
+        let _slot = harness_slot();
         let mut reduced = row_band_frame_loop(STEP_DT, egui::Id::new("row_band_reduced"), true);
         reduced.step();
         assert!(
@@ -13333,6 +13444,7 @@ mod browser_column_ui_tests {
         use riff_gui_theme::theme::Palette;
         let palette = Palette::dark();
         let id = egui::Id::new("test_icon_button");
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(80.0, 80.0))
             .with_pixels_per_point(1.0)
@@ -13401,6 +13513,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let id = egui::Id::new("test_text_button");
         let mut cache = IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(160.0, 44.0))
             .with_pixels_per_point(1.0)
@@ -13443,6 +13556,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let id = egui::Id::new("test_primary_button");
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(200.0, 104.0))
             .with_pixels_per_point(1.0)
@@ -13658,6 +13772,7 @@ mod browser_column_ui_tests {
         let _ = IconCache::new();
         let palette = Palette::dark();
         let rect = egui::Rect::from_min_size(egui::pos2(30.0, 30.0), egui::vec2(60.0, 40.0));
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(120.0, 100.0))
             .with_pixels_per_point(1.0)
@@ -13846,6 +13961,7 @@ mod browser_column_ui_tests {
         let id = egui::Id::new("render_accent_button");
         let palette = Palette::dark();
         let mut cache = IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(200.0, 104.0))
             .with_pixels_per_point(1.0)
@@ -14033,6 +14149,7 @@ mod browser_column_ui_tests {
         let id = egui::Id::new("test_linear");
         let track = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(160.0, TRACK_H));
         let hit = track.expand2(egui::vec2(0.0, 12.0));
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(200.0, 48.0))
             .with_pixels_per_point(1.0)
@@ -14113,6 +14230,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
 
         // Flowing Ui path: title and hint are present as readable labels.
+        let _slot = harness_slot();
         let mut ui_h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(300.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -14128,6 +14246,7 @@ mod browser_column_ui_tests {
         );
 
         // Painter/rect path: it paints ink into the rect (distinct from blank).
+        let _slot = harness_slot();
         let mut rect_h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(300.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -14341,6 +14460,7 @@ mod browser_column_ui_tests {
             cache: IconCache::new(),
             actions: Vec::new(),
         };
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(640.0, 480.0))
             .with_pixels_per_point(1.0)
@@ -14453,6 +14573,7 @@ mod browser_column_ui_tests {
                 value: "8 \u{b7} 27:16".to_string(),
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 640.0))
             .with_pixels_per_point(1.0)
@@ -14547,6 +14668,7 @@ mod browser_column_ui_tests {
         // rows leave the details grid below the fold.
         const VIEW_H: f32 = 320.0;
 
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, VIEW_H))
             .with_pixels_per_point(1.0)
@@ -14598,6 +14720,7 @@ mod browser_column_ui_tests {
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 640.0))
             .with_pixels_per_point(1.0)
@@ -14666,6 +14789,7 @@ mod browser_column_ui_tests {
                 originals: vec![None],
             },
         ];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 640.0))
             .with_pixels_per_point(1.0)
@@ -14759,6 +14883,7 @@ mod browser_column_ui_tests {
             "a fresh draft is never dirty by construction"
         );
 
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 900.0))
             .with_pixels_per_point(1.0)
@@ -14841,6 +14966,7 @@ mod browser_column_ui_tests {
             PathBuf::from("t1.mp3"),
             &tags,
         );
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 900.0))
             .with_pixels_per_point(1.0)
@@ -14914,6 +15040,7 @@ mod browser_column_ui_tests {
             &tags,
         );
         draft.saving = true;
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 900.0))
             .with_pixels_per_point(1.0)
@@ -14981,6 +15108,7 @@ mod browser_column_ui_tests {
         });
         draft.saving = false;
 
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 900.0))
             .with_pixels_per_point(1.0)
@@ -15024,6 +15152,7 @@ mod browser_column_ui_tests {
             text: "Tag Title".to_string(),
             originals: vec![Some("Tag Title".to_string())],
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 640.0))
             .with_pixels_per_point(1.0)
@@ -15070,6 +15199,7 @@ mod browser_column_ui_tests {
 
         let palette = Palette::dark();
         let mut cache = IconCache::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 640.0))
             .with_pixels_per_point(1.0)
@@ -15731,6 +15861,7 @@ mod browser_column_ui_tests {
         let palette = Palette::dark();
         let mut cache = IconCache::new();
         let items = fixture_items();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -15800,6 +15931,7 @@ mod browser_column_ui_tests {
             selected: false,
             now_playing: false,
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -15904,6 +16036,7 @@ mod browser_column_ui_tests {
             now_playing: false,
         }];
 
+        let _slot = harness_slot();
         egui_kittest::Harness::builder()
             .with_size(egui::vec2(1400.0, 600.0))
             .with_pixels_per_point(1.0)
@@ -15996,6 +16129,7 @@ mod browser_column_ui_tests {
     fn test_tab_walks_the_titlebar_search_then_all_three_panes() {
         use egui_kittest::kittest::Queryable;
 
+        let _slot = harness_slot();
         let mut harness = walk_fixture();
         harness.run();
 
@@ -16034,6 +16168,7 @@ mod browser_column_ui_tests {
     fn test_shift_tab_walks_home_and_tab_wraps_with_no_focus_trap() {
         use egui_kittest::kittest::Queryable;
 
+        let _slot = harness_slot();
         let mut harness = walk_fixture();
         harness.run();
         tab_until_search_focused(&mut harness);
@@ -16135,6 +16270,7 @@ mod browser_column_ui_tests {
 /// it is what the titlebar renders verbatim.
 #[cfg(test)]
 mod whole_frame_tests {
+    use crate::harness_gate::harness_slot;
     use egui_kittest::kittest::{By, NodeT as _, Queryable};
     use riff_backend::app::MutexExt;
     use riff_backend::app::cover_service::{ClearCacheOutcome, Covers};
@@ -19604,6 +19740,7 @@ mod whole_frame_tests {
         };
 
         let palette = riff_gui_theme::theme::Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 88.0))
             .with_pixels_per_point(1.0)
@@ -19653,6 +19790,7 @@ mod whole_frame_tests {
         };
 
         let palette = riff_gui_theme::theme::Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 88.0))
             .with_pixels_per_point(1.0)
@@ -19726,6 +19864,7 @@ mod whole_frame_tests {
         let library_id = egui::Id::new("clear_library_confirm_action");
         let thumbnail_id = egui::Id::new("clear_thumbnail_cache_confirm_action");
 
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(420.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -22030,6 +22169,7 @@ mod whole_frame_tests {
             custom_list("spl-deep-focus-1", "Deep focus"),
         ];
         let mut rename = None;
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, 120.0))
             .with_pixels_per_point(1.0)
@@ -22801,6 +22941,7 @@ mod whole_frame_tests {
         let mut cache = IconCache::new();
         let lists = vec![custom_list("spl-late-night-1", "Late night jazz")];
         let mut rename = None;
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(280.0, 160.0))
             .with_pixels_per_point(1.0)
@@ -23090,6 +23231,7 @@ mod whole_frame_tests {
 
 #[cfg(test)]
 mod context_menu_ui_tests {
+    use crate::harness_gate::harness_slot;
     use crate::mocks::RecordingPasses;
     use egui_kittest::kittest::{NodeT, Queryable};
     use riff_backend::app::pass_service::Passes;
@@ -23124,6 +23266,7 @@ mod context_menu_ui_tests {
     /// the intents it emitted.
     fn track_menu_intents(props: &TrackMenu<'_>, clicks: &[&str]) -> Vec<TrackMenuIntent> {
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 240.0))
             .with_pixels_per_point(1.0)
@@ -23143,6 +23286,7 @@ mod context_menu_ui_tests {
 
     fn list_menu_intents(clicks: &[&str]) -> Vec<ListMenuIntent> {
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 120.0))
             .with_pixels_per_point(1.0)
@@ -23165,6 +23309,7 @@ mod context_menu_ui_tests {
     /// always denotes a set of Tracks, so it has nothing to be told.
     fn collection_menu_intents(clicks: &[&str]) -> Vec<ListMenuIntent> {
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 120.0))
             .with_pixels_per_point(1.0)
@@ -23185,6 +23330,7 @@ mod context_menu_ui_tests {
     /// The menu rows a renderer painted, in the accessibility tree's reading
     /// order. Reading order is the menu's own sequence, not a pixel measurement.
     fn menu_rows(render: impl Fn(&mut egui::Ui, &Palette) + 'static) -> Vec<String> {
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -23440,6 +23586,7 @@ mod context_menu_ui_tests {
             remove_from_playlist: true,
         };
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 120.0))
             .with_pixels_per_point(1.0)
@@ -23608,6 +23755,7 @@ mod context_menu_ui_tests {
     #[test]
     fn test_the_list_menu_carries_its_four_items_in_the_fixed_order() {
         let palette = Palette::dark();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 120.0))
             .with_pixels_per_point(1.0)
@@ -23869,6 +24017,7 @@ mod context_menu_ui_tests {
             selected: false,
             now_playing: false,
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -23946,6 +24095,7 @@ mod context_menu_ui_tests {
             selected: false,
             now_playing: false,
         }];
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(320.0, 300.0))
             .with_pixels_per_point(1.0)
@@ -24604,6 +24754,7 @@ mod context_menu_ui_tests {
         );
         let palette = Palette::dark();
         let render = |state: ItemState| {
+            let _slot = harness_slot();
             egui_kittest::Harness::builder()
                 .with_size(egui::vec2(220.0, 64.0))
                 .with_pixels_per_point(1.0)
@@ -24663,6 +24814,7 @@ mod context_menu_ui_tests {
             (playlist_id_to_key(&second), "Focus".to_string()),
         ];
 
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(220.0, 160.0))
             .with_pixels_per_point(1.0)
@@ -24686,6 +24838,7 @@ mod context_menu_ui_tests {
         );
 
         let empty: Vec<(PlaylistKey, String)> = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(220.0, 64.0))
             .with_pixels_per_point(1.0)
@@ -25189,6 +25342,7 @@ mod context_menu_ui_tests {
             playlists: &options,
             remove_from_playlist: false,
         };
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(240.0, 200.0))
             .with_pixels_per_point(1.0)
@@ -25225,6 +25379,7 @@ mod context_menu_ui_tests {
 
 #[cfg(test)]
 mod library_path_ui_tests {
+    use crate::harness_gate::harness_slot;
     use egui_kittest::kittest::Queryable;
     use riff_backend::app::state::{LibrarySession, LibraryStatus};
     use riff_gui::ui::app::register_library_path;
@@ -25245,6 +25400,7 @@ mod library_path_ui_tests {
         let palette = Palette::dark();
         let suggestions = suggestions.to_vec();
         let error = error.map(str::to_owned);
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(520.0, 160.0))
             .with_pixels_per_point(1.0)
@@ -25301,6 +25457,7 @@ mod library_path_ui_tests {
         let palette = Palette::dark();
         let mut text = String::from("/music");
         let suggestions: Vec<PathBuf> = Vec::new();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(520.0, 96.0))
             .with_pixels_per_point(1.0)
@@ -25888,6 +26045,7 @@ mod component_boundary_tests {
 /// not have — reading the Library's picker values, once per picker-open.
 #[cfg(test)]
 mod rule_row_ui_tests {
+    use crate::harness_gate::harness_slot;
     use crate::mocks::{LibraryQueryCall, MockLibraryQueryStore, MockPlaylistStore};
     use egui::accesskit::Toggled;
     use egui_kittest::kittest::{NodeT as _, Queryable};
@@ -26039,6 +26197,7 @@ mod rule_row_ui_tests {
     ) {
         let (host, mock) = RuleRowHost::new(rows, mock);
         let drawn = host.clone();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(560.0, 1_200.0))
             .with_pixels_per_point(1.0)
@@ -26524,6 +26683,7 @@ mod rule_row_ui_tests {
     ) {
         let (host, mock) = RuleRowHost::new(rows, genre_mock());
         let drawn = host.clone();
+        let _slot = harness_slot();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(920.0, 1_000.0))
             .with_pixels_per_point(1.0)

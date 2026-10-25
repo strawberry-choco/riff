@@ -138,6 +138,95 @@ pub(crate) mod determinism {
     }
 }
 
+// --- Harness concurrency gate ---------------------------------------------------
+//
+// The ONE home for the cap on live kittest harnesses, shared by every suite
+// in this crate that renders a frame. Each harness brings up its own wgpu
+// device, and a driver does not survive a full parallel `cargo test
+// --all-targets` worth of them arriving together: the suite has died with
+// `STATUS_ACCESS_VIOLATION` (0xc0000005) part-way through the render-heavy
+// region — no failing test, no diff, green on the next run. The cap was born
+// in `golden_tests.rs` and covered only the goldens; the uncapped `ui_tests`
+// harnesses crashed the same way, so the gate moved here and now admits every
+// harness this crate builds. `docs/engineering/golden-image-testing.md`
+// carries the workflow-facing half of this story.
+pub(crate) mod harness_gate {
+    use std::cell::Cell;
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    /// How many harnesses may be alive at once. The render work is ~1-2 s per
+    /// golden either way, so four keeps several cores busy without asking a
+    /// driver to hold more devices at once than the golden block was
+    /// stabilized on.
+    const MAX_CONCURRENT_HARNESSES: usize = 4;
+
+    static HARNESSES_IN_FLIGHT: Mutex<usize> = Mutex::new(0);
+    static HARNESS_SLOT_RELEASED: Condvar = Condvar::new();
+
+    thread_local! {
+        /// Whether THIS thread already holds a counted slot, which makes
+        /// nested [`harness_slot`] calls no-ops.
+        static SLOT_HELD: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// A reserved harness slot; released on drop, panics included.
+    pub(crate) struct HarnessSlot {
+        /// Whether this guard owns one of the [`MAX_CONCURRENT_HARNESSES`]
+        /// slots. `false` for a nested acquisition by a thread that already
+        /// holds one: that guard waits for nothing and releases nothing.
+        counted: bool,
+    }
+
+    impl Drop for HarnessSlot {
+        fn drop(&mut self) {
+            if !self.counted {
+                return;
+            }
+            SLOT_HELD.with(|held| held.set(false));
+            let mut in_flight = lock_harness_slots();
+            *in_flight -= 1;
+            HARNESS_SLOT_RELEASED.notify_one();
+        }
+    }
+
+    /// Poisoning is tolerated on purpose: one failing render test must not
+    /// cascade into every later one.
+    fn lock_harness_slots() -> MutexGuard<'static, usize> {
+        HARNESSES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Block until fewer than [`MAX_CONCURRENT_HARNESSES`] harnesses are in
+    /// flight, then reserve one.
+    ///
+    /// Reentrant per thread: a call from a thread that already holds a slot
+    /// returns a guard that neither waits nor counts. That is what makes the
+    /// slot safe to install at every harness creation point — a composed
+    /// shell built under its test's own slot, a helper's harness built under
+    /// its caller's — without those nestings deadlocking against the cap: a
+    /// thread only ever waits while holding nothing. The cost is that a scope
+    /// keeping two harnesses alive at once counts once, an accepted
+    /// under-count orders of magnitude below the concurrency the crash was
+    /// measured at.
+    #[must_use]
+    pub(crate) fn harness_slot() -> HarnessSlot {
+        if SLOT_HELD.with(Cell::get) {
+            return HarnessSlot { counted: false };
+        }
+        let mut in_flight = lock_harness_slots();
+        while *in_flight >= MAX_CONCURRENT_HARNESSES {
+            in_flight = HARNESS_SLOT_RELEASED
+                .wait(in_flight)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *in_flight += 1;
+        drop(in_flight);
+        SLOT_HELD.with(|held| held.set(true));
+        HarnessSlot { counted: true }
+    }
+}
+
 // --- The composed-shell fixture -----------------------------------------------
 //
 // The ONE home for building the real `RiffApp` over the mock port kit. The
@@ -244,6 +333,12 @@ pub(crate) mod composed_shell {
         pub settings_calls: Arc<Mutex<Vec<SettingsCall>>>,
         /// Every folder cover request the app sent, in order.
         pub folder_covers: Arc<Mutex<Vec<(TrackId, RequestedSize)>>>,
+        /// The concurrency-gate slot this shell's harness was admitted
+        /// under. Declared last so it drops after `harness`: the shell counts
+        /// against [`crate::harness_gate`] for exactly the harness's life. A
+        /// shell built by a caller that already holds a slot carries the
+        /// nested no-op guard instead — see `harness_gate::harness_slot`.
+        _harness_slot: crate::harness_gate::HarnessSlot,
     }
 
     /// Build the real `RiffApp` over `shell`'s ports — the ONE composed-shell
@@ -275,6 +370,9 @@ pub(crate) mod composed_shell {
 
         let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
 
+        // The shell's harness is admitted under the concurrency gate here, so
+        // a composed consumer never has to remember the slot itself.
+        let harness_slot = crate::harness_gate::harness_slot();
         let harness = egui_kittest::Harness::builder()
             .with_size(size)
             .with_pixels_per_point(1.0)
@@ -358,6 +456,7 @@ pub(crate) mod composed_shell {
             scans,
             settings_calls,
             folder_covers,
+            _harness_slot: harness_slot,
         }
     }
 

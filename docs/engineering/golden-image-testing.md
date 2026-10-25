@@ -253,10 +253,15 @@ run. The harness enforces several rules; keep them when adding goldens:
   is asserted as unit data on every CI leg, and the placement of the buttons
   themselves is asserted by no test at all — only by a human looking at a window,
   which is the same instrument that closed ADR 0005's spike gate.
-- **Harness concurrency is capped.** `tests/golden_tests.rs` runs at most
-  `MAX_CONCURRENT_HARNESSES` harnesses at a time, because every harness brings
-  up its own wgpu device. A wgpu `STATUS_ACCESS_VIOLATION` flake in the golden
-  block is open — see
+- **Harness concurrency is capped, crate-wide.** Every suite in the
+  integration crate that renders a frame — the goldens, `ui_tests`, the
+  composed shells, the README generator — reserves a slot from the
+  `harness_gate` at the crate root (`tests/mod.rs`) before building its
+  harness, because every harness brings up its own wgpu device and a driver
+  does not survive a full parallel run's worth of them arriving together. The
+  cap used to live in `tests/golden_tests.rs` and cover only the goldens; the
+  uncapped `ui_tests` harnesses crashed the same way, which is why the gate
+  moved. A wgpu `STATUS_ACCESS_VIOLATION` flake is tracked in
   [./access-violation-flake.md](./access-violation-flake.md). If it recurs,
   lower the cap rather than chasing pixels.
 - **Baselines are machine-local, and macOS owns them.** wgpu picks different

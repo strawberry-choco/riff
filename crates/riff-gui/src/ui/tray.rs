@@ -6,8 +6,18 @@
 //! [`window_visibility::VisibilityTx`](super::window_visibility::VisibilityTx)
 //! channel that the UI thread drains on every logic tick. Playback intents
 //! (Play/Pause, Next, Previous, Stop) go through the tray transport's
-//! [`Transport`] port exactly like the mouse and keyboard paths, so every tray
-//! dispatch is recorded onto the shared event inbox too.
+//! [`app::transport::Transport`](riff_backend::app::transport::Transport) port
+//! exactly like the mouse and keyboard paths, so every tray dispatch is
+//! recorded onto the shared event inbox too.
+//!
+//! Both links spell their targets out, and their labels deliberately start
+//! with a path segment this module never has in scope. `Transport` is
+//! imported under the tray's non-Linux gate, so a bare backticked Transport
+//! label resolves only where that gate opens — an unresolved link on the
+//! Linux doc leg, and a redundant-explicit-link error anywhere the import
+//! exists. A label whose first segment (`app::`, `window_visibility::`) is
+//! not in scope resolves on no platform, which leaves the explicit target as
+//! the one resolution path everywhere.
 
 #[cfg(not(target_os = "linux"))]
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};

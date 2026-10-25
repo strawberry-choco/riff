@@ -10,7 +10,12 @@
 //! condition the app should surface twice — the status line already carries
 //! the same text in-app.
 
-use riff_backend::app::events::{NoticePayload, NoticeSource};
+use riff_backend::app::events::NoticePayload;
+// `NoticeSource` names the dedupe key and the title registry's input — both
+// non-Linux items, so the import rides their gate (on Linux the stub's only
+// type is `NoticePayload`, and an ungated import would be unused there).
+#[cfg(not(target_os = "linux"))]
+use riff_backend::app::events::NoticeSource;
 
 /// Raise `notice` as an OS notification, dropping it when it is identical to
 /// the immediately preceding one (a failing autoplay queue would otherwise
@@ -56,6 +61,10 @@ fn title_for(source: &NoticeSource) -> &'static str {
 /// The dedupe decision, pure so it is assertable with no OS involved: a
 /// notice that repeats the immediately preceding one is swallowed; anything
 /// else becomes the new preceding one.
+///
+/// Gated with its only caller: on Linux `show` is the no-op stub, so an
+/// ungated helper is dead code there and fails the Linux clippy leg.
+#[cfg(not(target_os = "linux"))]
 fn supersedes_last_shown(
     last: &mut Option<(NoticeSource, String)>,
     source: &NoticeSource,
@@ -72,7 +81,7 @@ fn supersedes_last_shown(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::supersedes_last_shown;
     use riff_backend::app::events::NoticeSource;

@@ -283,6 +283,20 @@ pub fn text_button(
     reduce_motion: bool,
     btn: &TextButton,
 ) -> bool {
+    let response = text_button_response(ui, cache, palette, reduce_motion, btn);
+    btn.enabled && response.clicked()
+}
+
+/// The same shared semantic text button, answering its interaction response —
+/// for the caller that needs more than the activation: a selector that opens a
+/// popup on the button anchors it on the button's own response.
+pub fn text_button_response(
+    ui: &egui::Ui,
+    cache: &mut IconCache,
+    palette: &Palette,
+    reduce_motion: bool,
+    btn: &TextButton,
+) -> egui::Response {
     let sense = if btn.enabled {
         egui::Sense::click()
     } else {
@@ -311,7 +325,7 @@ pub fn text_button(
     if let Some(tooltip) = btn.tooltip {
         response.clone().on_hover_text(tooltip);
     }
-    btn.enabled && response.clicked()
+    response
 }
 
 /// A flow-placed text button's inputs: everything [`TextButton`] carries except

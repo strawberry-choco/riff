@@ -8347,15 +8347,27 @@ mod tests {
         draft.field.expect("the fixture rows are whole Rules")
     }
 
-    /// Drag one node's centre onto another's: press, move, release — one
-    /// real pointer gesture per frame, the playlist-reorder recipe.
+    /// Drag one node's centre onto another's: press, hold a second, move,
+    /// release, one real pointer gesture per frame, the playlist-reorder
+    /// recipe plus the rule tree's own gate.
     fn drag_rects(harness: &mut TreeHarness<'_>, from: egui::Rect, to: egui::Rect) {
         harness.drag_at(from.center());
         harness.run();
+        hold_for_a_second(harness);
         harness.hover_at(to.center());
         harness.run();
         harness.drop_at(to.center());
         harness.run();
+    }
+
+    /// Hold the press for one whole second of simulated time: the gate the
+    /// rule tree's drag waits on. The jump is exact so the recipe never
+    /// depends on how many frames a `run` happens to take.
+    fn hold_for_a_second(harness: &mut TreeHarness<'_>) {
+        let now = harness.ctx.input(|input| input.time);
+        harness.input_mut().time = Some(now + 1.0);
+        harness.run();
+        harness.input_mut().time = None;
     }
 
     /// The rect of the `nth` node labeled `label` in the last frame, failing
@@ -8429,6 +8441,129 @@ mod tests {
         assert!(
             rect_of_nth(&harness, "Title", 0).top() > rect_of_nth(&harness, "Album", 0).top(),
             "the next frame redraws the moved row at its new position"
+        );
+    }
+
+    /// A rule-tree row only lifts after the pointer has rested on it for the
+    /// tree's one-second gate: the same press, move, and release that moves
+    /// the row when held leaves the draft exactly as the fixture spelled it
+    /// when it is not. Pinned as the typed intent and as the resulting order.
+    #[test]
+    fn test_a_rule_row_only_lifts_after_the_press_has_rested() {
+        use riff_backend::domain::{Combine, MatchableField};
+        use riff_gui::ui::rule_box::{BoxPath, RuleBoxDraft, RuleChildDraft};
+
+        let _slot = harness_slot();
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Title, "alpha")),
+            RuleChildDraft::Box(RuleBoxDraft {
+                combine: Combine::All,
+                children: vec![RuleChildDraft::Rule(filled_rule_row(
+                    MatchableField::Artist,
+                    "beta",
+                ))],
+            }),
+            RuleChildDraft::Rule(filled_rule_row(MatchableField::Album, "gamma")),
+        ];
+        harness.run();
+
+        // The whole gesture with the clock pinned: no time at all passes
+        // between the press and the move, so the row never lifts. Pinning is
+        // what keeps it under a second, since a `run` may step as many
+        // frames as the pane's animations ask for.
+        let now = harness.ctx.input(|input| input.time);
+        harness.input_mut().time = Some(now);
+        let from = rect_of_nth(&harness, "Title", 0);
+        let to = rect_of_nth(&harness, "Album", 0);
+        harness.drag_at(from.center());
+        harness.run();
+        harness.hover_at(to.center());
+        harness.run();
+        harness.drop_at(to.center());
+        harness.run();
+        harness.input_mut().time = None;
+
+        assert!(
+            harness.state().1.iter().all(|action| !matches!(
+                action,
+                SettingsAction::MoveSmartPlaylistChild { from, to, .. } if from != to
+            )),
+            "a press that never rested reports no move"
+        );
+        let root = &harness.state().0.root;
+        assert_eq!(
+            child_field(root, 0),
+            MatchableField::Title,
+            "the fixture's first row still sits first"
+        );
+        assert!(matches!(&root.children[1], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 2), MatchableField::Album);
+
+        // The same gesture, held for the full gate: the row lifts and the
+        // move lands.
+        let from = rect_of_nth(&harness, "Title", 0);
+        let to = rect_of_nth(&harness, "Album", 0);
+        drag_rects(&mut harness, from, to);
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 2,
+                }),
+            "the held gesture reports the move the same shape makes"
+        );
+        let root = &harness.state().0.root;
+        assert!(matches!(&root.children[0], RuleChildDraft::Box(_)));
+        assert_eq!(child_field(root, 1), MatchableField::Album);
+        assert_eq!(child_field(root, 2), MatchableField::Title);
+    }
+
+    /// The gate opens on time, not on movement: a press that rests for the
+    /// second and is released where it started carries a payload, which the
+    /// row reports as its own drop. A payload can only exist if the row
+    /// lifted while the pointer sat still, so this is the frame the waiting
+    /// clock asked for, seen from outside.
+    #[test]
+    fn test_a_rested_press_lifts_the_row_before_the_pointer_moves() {
+        use riff_backend::domain::MatchableField;
+        use riff_gui::ui::rule_box::{BoxPath, RuleChildDraft};
+
+        let _slot = harness_slot();
+        let mut harness = smart_playlists_tree_harness(egui::vec2(1280.0, 840.0));
+        harness.run();
+        harness.state_mut().0.root.children = vec![RuleChildDraft::Rule(filled_rule_row(
+            MatchableField::Title,
+            "alpha",
+        ))];
+        harness.run();
+
+        let row = rect_of_nth(&harness, "Title", 0);
+        harness.drag_at(row.center());
+        harness.run();
+        hold_for_a_second(&mut harness);
+        harness.drop_at(row.center());
+        harness.run();
+
+        assert!(
+            harness
+                .state()
+                .1
+                .contains(&SettingsAction::MoveSmartPlaylistChild {
+                    parent: BoxPath::root(),
+                    from: 0,
+                    to: 0,
+                }),
+            "the rested press lifted the row and reported the drop it made"
+        );
+        assert_eq!(
+            child_field(&harness.state().0.root, 0),
+            MatchableField::Title,
+            "a self-drop reorders nothing"
         );
     }
 
@@ -8515,12 +8650,13 @@ mod tests {
         ];
         harness.run();
 
-        // A real drag released back over its own row (press on Title, move
-        // to Album so the drag genuinely starts, back to Title, release).
+        // A real drag released back over its own row (press on Title, hold
+        // so the row lifts, move to Album, back to Title, release).
         let row = rect_of_nth(&harness, "Title", 0);
         let away = rect_of_nth(&harness, "Album", 0);
         harness.drag_at(row.center());
         harness.run();
+        hold_for_a_second(&mut harness);
         harness.hover_at(away.center());
         harness.run();
         harness.hover_at(row.center());
@@ -16936,11 +17072,16 @@ mod whole_frame_tests {
             "the editor renders the stored order top to bottom"
         );
 
-        // Drag the first row onto the third: press, move, release.
+        // Drag the first row onto the third: press, hold the rule tree's
+        // gate, move, release.
         let src = shell.harness.get_by_label("Title").rect();
         let dst = shell.harness.get_by_label("Plays").rect();
         shell.harness.drag_at(src.center());
         shell.harness.step();
+        let now = shell.harness.ctx.input(|input| input.time);
+        shell.harness.input_mut().time = Some(now + 1.0);
+        shell.harness.step();
+        shell.harness.input_mut().time = None;
         shell.harness.hover_at(dst.center());
         shell.harness.step();
         shell.harness.drop_at(dst.center());

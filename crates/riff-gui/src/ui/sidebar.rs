@@ -966,6 +966,15 @@ pub fn section_header(ui: &mut egui::Ui, palette: &Palette, text: &str) -> egui:
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowDrag(usize);
 
+/// How a row's drag gesture begins.
+#[derive(Clone, Copy)]
+pub(crate) enum DragStart {
+    /// A press picks the row up at once, egui's own drag start.
+    Immediate,
+    /// The pointer must rest on the row this long before a move carries it.
+    Hold(Duration),
+}
+
 /// What one drag-reorderable row reported this frame.
 pub struct ReorderableRow {
     /// Union response of the wrapped row: clicks, double-clicks, hover, and
@@ -1000,6 +1009,47 @@ pub(crate) struct DragRow<T, R> {
     pub in_flight: bool,
 }
 
+/// Where a press on one row stands this frame, against the hold its
+/// [`DragStart`] asked for. One value, so "still waiting" and "may move"
+/// cannot be read as two booleans that disagree.
+enum HoldState {
+    /// No press is being held on the row.
+    Idle,
+    /// A press has been held for less than the delay; the remainder is how
+    /// much longer it needs.
+    Waiting(Duration),
+    /// The press has lasted the delay; a move now carries the row.
+    Armed,
+}
+
+/// Where the press on `id` stands against `hold`, reading and writing the
+/// one clock the answer rests on.
+///
+/// egui marks a drag-only hit-area dragged on the press frame itself, before
+/// the pointer has moved and without consulting the click/drag threshold, so
+/// `is_being_dragged` spans exactly the press's lifetime: true from the press
+/// frame through the frame before release, false on the release frame. That
+/// makes it the clock to hold against. The deadline sits under a temp key
+/// derived from `id`, so it belongs to this row's drag alone: another row's
+/// press starts its own clock, and the key is dropped with the gesture.
+fn hold_state(ctx: &egui::Context, id: egui::Id, hold: Duration) -> HoldState {
+    if !ctx.is_being_dragged(id) {
+        ctx.data_mut(|data| {
+            data.remove_temp::<f64>(id.with("drag_armed_at"));
+        });
+        return HoldState::Idle;
+    }
+    let now = ctx.input(|input| input.time);
+    let deadline = ctx.data_mut(|data| {
+        *data.get_temp_mut_or_insert_with(id.with("drag_armed_at"), || now + hold.as_secs_f64())
+    });
+    if now >= deadline {
+        HoldState::Armed
+    } else {
+        HoldState::Waiting(Duration::from_secs_f64(deadline - now))
+    }
+}
+
 /// One row's drag-and-drop scaffolding, for every draggable row in the app:
 /// reserve the layout slot, register the drag hit-area BEFORE the row paints,
 /// float the row after the pointer while it is in flight, and decode the
@@ -1015,13 +1065,18 @@ pub(crate) struct DragRow<T, R> {
 /// Registering the hit-area first (below the row) leaves the row's own
 /// widgets as the click candidates while the drag candidate stays the
 /// hit-area: a plain click lands on the control under the pointer, and a
-/// press-and-move from anywhere on the slot starts the drag. Which of the
-/// two answers is decided by egui's own click/drag threshold, not by this
-/// code.
+/// press anywhere on the slot becomes the drag. A drag-only hit-area is
+/// picked up on the press frame itself, before the pointer moves and
+/// without the click/drag threshold a hit-area sensing both would wait
+/// for, so `start` is what decides whether that press carries the row at
+/// once or only after it has rested.
 ///
 /// `id` is the row's drag identity, `slot_size` the layout slot the row
 /// reserves while it paints into it or floats away, and `payload` what the
-/// row sets while it is the one in flight. `accepts` decides whether a
+/// row sets while it is the one in flight. `start` decides when a press
+/// turns into a drag. Under a hold the payload and the floating copy both
+/// wait out the delay, so a press that ends first is only ever a click -
+/// nothing is lifted and nothing can be dropped. `accepts` decides whether a
 /// payload in flight may be dropped on this row — the seam that scopes a
 /// drag to one list: a payload it refuses is neither ringed as a drop target
 /// nor taken on release, so a gesture from another list fails safe (nothing
@@ -1030,11 +1085,16 @@ pub(crate) struct DragRow<T, R> {
 /// response** — the one clicks land on, which the returned response unions
 /// with the hit-area. A scope's response is hover-only and must not stand in
 /// for it: unioning that would drop every click on the row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one row's identity, geometry, and policy"
+)]
 pub(crate) fn drag_row<T, R>(
     ui: &mut egui::Ui,
     id: egui::Id,
     slot_size: egui::Vec2,
     palette: &Palette,
+    start: DragStart,
     payload: T,
     accepts: impl Fn(&T) -> bool,
     paint: impl FnOnce(&mut egui::Ui) -> (R, egui::Response),
@@ -1057,7 +1117,15 @@ where
     // whether the row paints in place or floats after the pointer.
     let (slot_rect, slot_response) = ui.allocate_exact_size(slot_size, egui::Sense::hover());
 
-    let in_flight = ui.ctx().is_being_dragged(id);
+    let hold = match start {
+        DragStart::Immediate => HoldState::Armed,
+        DragStart::Hold(delay) => hold_state(ui.ctx(), id, delay),
+    };
+    if let HoldState::Waiting(remaining) = hold {
+        // The lift must land on time even if the pointer never moves again.
+        ui.ctx().request_repaint_after(remaining);
+    }
+    let in_flight = ui.ctx().is_being_dragged(id) && matches!(hold, HoldState::Armed);
     let (inner, response) = if in_flight {
         // This row is in flight: carry the payload and paint it into a
         // floating tooltip layer that follows the pointer (what
@@ -1151,6 +1219,7 @@ pub fn reorderable_row(
         id,
         egui::vec2(ui.available_width(), ROW_H),
         palette,
+        DragStart::Immediate,
         RowDrag(index),
         |_| true,
         |ui| {

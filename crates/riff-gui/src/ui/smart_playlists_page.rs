@@ -48,6 +48,8 @@
 //! so the pane owes no list any scroll-into-view handling and keeps no
 //! open-list state of its own.
 
+use std::time::Duration;
+
 use crate::ui::rule_box::{
     BoxPath, ChildSlot, RuleBoxDraft, RuleChildDraft, SpellBlock, SpellSource,
 };
@@ -590,6 +592,15 @@ impl SmartPlaylistsEditor {
     }
 }
 
+/// How long the pointer must rest on a rule-tree row before a move carries
+/// it. A row here is a strip of chips and text wells, so a press that drifts
+/// while the listener means to click one of them must not pick the row up;
+/// one second is long enough to read as a hold and short enough that a
+/// deliberate drag does not feel stuck. One gate serves the whole tree,
+/// Rules and Boxes alike, so no row shape drags differently from its
+/// neighbour.
+const RULE_DRAG_HOLD: Duration = Duration::from_secs(1);
+
 /// The words a row this build cannot read wears, and the reason Save gives
 /// for refusing while one is in the tree. The row's own label is the spec's
 /// copy; the reason opens with the same words so the pointing is unambiguous,
@@ -778,9 +789,11 @@ struct RuleRowDrag {
 /// The scoping is the point: the wrapper constructs the payload from `list`
 /// and accepts a payload only from the same `list`, so a drag can never move
 /// a child across a Box boundary, and nothing at a call site can forget the
-/// check. Everything else — the hit-area registered before the row paints,
-/// the floating copy, the stale-payload cleanup — is the shared mechanism;
-/// see its doc for why the ordering cannot be reversed.
+/// check. The drag starts only after [`RULE_DRAG_HOLD`], so a press that
+/// drifts across a chip stays a click instead of picking the whole row up.
+/// Everything else — the hit-area registered before the row paints, the
+/// floating copy, the stale-payload cleanup — is the shared mechanism; see
+/// its doc for why the ordering cannot be reversed.
 fn draggable_rule_row<R>(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -800,6 +813,7 @@ fn draggable_rule_row<R>(
         id,
         slot_size,
         palette,
+        sidebar::DragStart::Hold(RULE_DRAG_HOLD),
         payload,
         move |incoming: &RuleRowDrag| incoming.list == held_list,
         paint,
@@ -1144,7 +1158,9 @@ fn draw_box_add_controls(
 /// The row drags up and down among its parent Box's siblings (ticket 19)
 /// through [`draggable_rule_row`], whose hit-area registration happens
 /// BEFORE the row paints — the one ordering that keeps the row's controls
-/// clickable, the shared text field included. The drag's one order is the
+/// clickable, the shared text field included. A press alone does not pick
+/// the row up: it rests there for [`RULE_DRAG_HOLD`] first, so a click that
+/// drifts across a chip stays a click. The drag's one order is the
 /// canonical one, so unlike a Playlist's entries the drag is always enabled;
 /// there is no sorted view here to disable it for.
 #[expect(clippy::too_many_arguments, reason = "one row in a threaded tree walk")]

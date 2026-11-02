@@ -22,7 +22,7 @@ publish = false
 egui.workspace = true
 
 # Lucide icon glyph rasterization for the tinted icon textures
-resvg = "0.48"
+resvg = "0.49"
 
 # Structured logging from the system-CJK font scan and the icon rasterizer
 tracing = "0.1"

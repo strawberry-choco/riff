@@ -41,7 +41,7 @@ symphonia-adapter-libopus = "0.3"
 cpal = "0.18"
 
 # Lock-free SPSC ring buffer between the decoder thread and the cpal callback
-ringbuf = "0.5"
+ringbuf = "0.6"
 
 # Metadata reading/writing
 lofty = "0.25.4"
@@ -54,7 +54,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 walkdir = "2"
 
 # SQLite Application Store
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 # Content digest over each migration's own SQL, so a migration's expected
 # checksum is derived from its SQL rather than typed beside it.

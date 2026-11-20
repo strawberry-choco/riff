@@ -1,0 +1,9 @@
+FMT OK
+    Checking riff-tests v0.2.0 (C:\projects\riff\tests)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 4.19s
+CLIPPY OK
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.97s
+   Generated C:\projects\riff\target\doc\riff_backend\index.html and 10 other files
+DOC OK
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.87s
+LINK OK

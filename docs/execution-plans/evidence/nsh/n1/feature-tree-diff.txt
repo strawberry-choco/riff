@@ -1,0 +1,28 @@
+riff-gui DIFFERS
+riff-gui-components IDENTICAL
+riff-gui-theme IDENTICAL
+riff-tests DIFFERS
+
+Feature-axis check (cargo tree --locked -e features, before vs after):
+--- riff-gui
+2022c2022
+< 10cc v1.4.4
+---
+> 10cc v1.11.3
+2024c2024
+< 12find-msvc-tools v0.1.11
+---
+> 12find-msvc-tools v0.1.15
+--- riff-gui-components
+--- riff-gui-theme
+--- riff-tests
+1784c1784
+< 10cc v1.4.4
+---
+> 10cc v1.11.3
+1786c1786
+< 12find-msvc-tools v0.1.11
+---
+> 12find-msvc-tools v0.1.15
+
+Cause of the six replacements: unattributed. toml_datetime 0.6.3 and find-msvc-tools 0.1.11 are not yanked; cc's dependents are unchanged riff crates. None of the six is in the golden render path. Remedy if a golden fails: cargo update -p <crate> --precise <old version>, a reviewed hold, not a re-baseline.

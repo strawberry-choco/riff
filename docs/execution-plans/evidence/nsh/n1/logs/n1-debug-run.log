@@ -1,0 +1,10 @@
+debug riff-nsh window_ms=606 title='riff' pid=9872
+PE subsystem=3 (3 = Windows console; debug keeps the console)
+shot=C:\projects\riff\docs\execution-plans\evidence\nsh\n1\shots\n1-window.png
+top-level windows owned by the process:
+class='NshWindow' title='riff' visible=True
+class='OleDdeWndClass' title='DDE Server Window' visible=False
+class='MSCTFIME UI' title='MSCTFIME UI' visible=False
+class='IME' title='Default IME' visible=False
+--- stderr (tracing) ---
+

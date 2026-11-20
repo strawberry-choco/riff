@@ -1,0 +1,11 @@
+release riff-nsh opened a GUI window with NO console window.
+window_ms=230 title='riff' pid=34744
+PE subsystem=2 (2 = Windows GUI; the loader allocates no console for a GUI image)
+debug PE subsystem=3 (3 = console); the windows_subsystem attribute is release-only
+console window owned by the release process: False
+top-level windows owned by the release process:
+class='NshWindow' title='riff' visible=True
+class='OleDdeWndClass' title='DDE Server Window' visible=False
+class='MSCTFIME UI' title='MSCTFIME UI' visible=False
+class='IME' title='Default IME' visible=False
+N1 opens no store and reads no music; the app was launched with no library argument.

@@ -1,0 +1,13 @@
+before=658 after=798
+added=115 removed=0 duplicates=24 replaced=6
+golden-relevant replacements: NONE
+duplicates (old version survives): ['base64', 'cairo-rs', 'cairo-sys-rs', 'cfg-expr', 'fontdb', 'gdk-pixbuf', 'gdk-pixbuf-sys', 'gio', 'gio-sys', 'glib', 'glib-macros', 'glib-sys', 'gobject-sys', 'imagesize', 'itertools', 'pango', 'pango-sys', 'png', 'resvg', 'system-deps', 'target-lexicon', 'toml_edit', 'usvg', 'winnow']
+  REPLACED cc: lost ['1.4.4'] now ['1.11.3']
+  REPLACED find-msvc-tools: lost ['0.1.11'] now ['0.1.15']
+  REPLACED objc2: lost ['0.6.4'] now ['0.5.2', '0.6.5']
+  REPLACED proc-macro-crate: lost ['2.0.2'] now ['1.3.1', '2.0.0', '3.5.0']
+  REPLACED toml: lost ['0.8.2'] now ['0.8.23', '1.1.4+spec-1.1.0']
+  REPLACED toml_datetime: lost ['0.6.3'] now ['0.6.11', '1.1.1+spec-1.1.0']
+removed: NONE
+REVIEW: non-render crates were replaced; explain each before merging
+PASS: golden render path untouched

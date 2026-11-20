@@ -1,0 +1,9 @@
+✓ built the Rust crate nsh-app-riff-spike (4m 21s)
+warn app id `com.example.riffspike` is a placeholder: give the app an id under a domain you own before releasing it, as apps with one id share their data
+✓ built the Windows runner of nsh-app-riff-spike (8m 0s)
+✓ packaged .nsh\out\riff-spike and .nsh\out\riff-spike.zip (1.2s)
+warn wrote .nsh\out\riff-spike.iss but not the installer: install Inno Setup 6 (https://jrsoftware.org/isinfo.php, or `winget install JRSoftware.InnoSetup`) and package again, or run ISCC.exe on it
+
+real	12m48.030s
+user	0m0.015s
+sys	0m0.000s

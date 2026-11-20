@@ -1,0 +1,287 @@
+    Updating crates.io index
+     Locking 77 packages to latest Rust 1.97 compatible versions
+      Adding alsa v0.11.0
+      Adding alsa-sys v0.4.0
+      Adding byteorder v1.5.0
+      Adding cmake v0.1.58
+      Adding coreaudio-rs v0.14.2
+      Adding cpal v0.18.2
+      Adding dasp_frame v0.11.0
+      Adding dasp_sample v0.11.0
+      Adding directories v6.0.0
+      Adding dirs-sys v0.5.0
+      Adding ebur128 v0.1.11
+      Adding extended v0.1.0
+      Adding fallible-iterator v0.3.0
+      Adding fallible-streaming-iterator v0.1.9
+      Adding file-id v0.2.3
+      Adding hashlink v0.12.2
+      Adding inotify v0.11.5
+      Adding inotify-sys v0.1.8
+      Adding kqueue v1.2.1
+      Adding kqueue-sys v1.1.2
+      Adding lazy_static v1.5.1
+      Adding libredox v0.1.25
+      Adding libsqlite3-sys v0.38.2
+      Adding lofty v0.25.5
+      Adding lofty_attr v0.13.0
+      Adding mach2 v0.6.0
+      Adding ndk v0.9.0
+      Adding ndk-context v0.1.1
+      Adding notify v8.2.2
+      Adding notify-debouncer-full v0.7.0
+      Adding notify-types v2.3.1
+      Adding num-complex v0.4.6
+      Adding num-derive v0.4.2
+      Adding num_enum v0.7.6
+      Adding num_enum_derive v0.7.6
+      Adding objc2-audio-toolbox v0.3.2
+      Adding objc2-avf-audio v0.3.2
+      Adding objc2-core-audio v0.3.2
+      Adding objc2-core-audio-types v0.3.2
+      Adding objc2-core-services v0.3.2
+      Adding ogg_pager v0.8.0
+      Adding option-ext v0.2.0
+      Adding opusic-sys v0.7.7
+      Adding paste v1.0.15
+      Adding primal-check v0.3.4
+      Adding redox_users v0.5.3
+      Adding riff-backend v0.2.0 (C:\projects\riff\crates\riff-backend)
+      Adding riff-infra v0.2.0 (C:\projects\riff\crates\riff-infra)
+      Adding riff-library v0.2.0 (C:\projects\riff\crates\riff-library)
+      Adding riff-persistence v0.2.0 (C:\projects\riff\crates\riff-persistence)
+      Adding riff-playback v0.2.0 (C:\projects\riff\crates\riff-playback)
+      Adding ringbuf v0.5.3
+      Adding rsqlite-vfs v0.1.1
+      Adding rusqlite v0.40.2
+      Adding rustfft v6.4.1
+      Adding sqlite-wasm-rs v0.5.5
+      Adding strength_reduce v0.2.4
+      Adding symphonia v0.6.1
+      Adding symphonia-adapter-libopus v0.3.0
+      Adding symphonia-bundle-flac v0.6.1
+      Adding symphonia-bundle-mp3 v0.6.1
+      Adding symphonia-codec-aac v0.6.1
+      Adding symphonia-codec-adpcm v0.6.1
+      Adding symphonia-codec-alac v0.6.1
+      Adding symphonia-codec-pcm v0.6.1
+      Adding symphonia-codec-vorbis v0.6.1
+      Adding symphonia-common v0.6.1
+      Adding symphonia-core v0.6.1
+      Adding symphonia-format-caf v0.6.1
+      Adding symphonia-format-isomp4 v0.6.1
+      Adding symphonia-format-mkv v0.6.1
+      Adding symphonia-format-ogg v0.6.1
+      Adding symphonia-format-riff v0.6.1
+      Adding symphonia-metadata v0.6.1
+      Adding tracing-attributes v0.1.31
+      Adding transpose v0.2.3
+      Adding vcpkg v0.2.15
+ Downloading crates ...
+  Downloaded lazy_static v1.5.1
+  Downloaded ogg_pager v0.8.0
+  Downloaded hashlink v0.12.2
+  Downloaded notify-types v2.3.1
+  Downloaded notify v8.2.2
+  Downloaded portable-atomic-util v0.2.8
+  Downloaded ebur128 v0.1.11
+  Downloaded ringbuf v0.5.3
+  Downloaded lofty v0.25.5
+  Downloaded opusic-sys v0.7.7
+   Compiling num-traits v0.2.19
+   Compiling windows-sys v0.61.2
+   Compiling strength_reduce v0.2.4
+   Compiling lazy_static v1.5.1
+   Compiling windows-sys v0.60.2
+   Compiling windows v0.62.2
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling cmake v0.1.58
+   Compiling vcpkg v0.2.15
+   Compiling paste v1.0.15
+   Compiling dasp_sample v0.11.0
+   Compiling notify-types v2.3.1
+   Compiling ebur128 v0.1.11
+   Compiling byteorder v1.5.0
+   Compiling riff-persistence v0.2.0 (C:\projects\riff\crates\riff-persistence)
+   Compiling option-ext v0.2.0
+   Compiling opusic-sys v0.7.7
+   Compiling cpal v0.18.2
+   Compiling extended v0.1.0
+   Compiling ogg_pager v0.8.0
+   Compiling dasp_frame v0.11.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling hashlink v0.12.2
+   Compiling lofty_attr v0.13.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling crypto-bigint v0.7.11
+   Compiling half v2.7.1
+   Compiling transpose v0.2.3
+   Compiling primal-check v0.3.4
+   Compiling ordered-float v5.5.1
+   Compiling io-extras v0.19.0
+   Compiling rustfft v6.4.1
+   Compiling naga v29.0.4
+   Compiling tracing v0.1.44
+   Compiling chrono v0.4.45
+   Compiling float-cmp v0.10.0
+   Compiling quickjs-jit-core v0.14.2
+   Compiling value-trait v0.12.3
+   Compiling moxcms v0.8.1
+   Compiling file-id v0.2.3
+   Compiling fallible-iterator v0.3.0
+   Compiling simd-json v0.18.1
+   Compiling fastrand v2.5.0
+   Compiling riff-playback v0.2.0 (C:\projects\riff\crates\riff-playback)
+   Compiling riff-library v0.2.0 (C:\projects\riff\crates\riff-library)
+   Compiling lofty v0.25.5
+   Compiling quickjs-jit v0.14.2
+   Compiling rusqlite v0.40.2
+   Compiling symphonia-core v0.6.1
+   Compiling primefield v0.14.0
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.5
+   Compiling winapi-util v0.1.11
+   Compiling elliptic-curve v0.14.3
+   Compiling wnaf v0.14.1
+   Compiling tokio v1.54.1
+   Compiling same-file v1.0.6
+   Compiling rfc6979 v0.6.0
+   Compiling primeorder v0.14.0
+   Compiling ecdsa v0.17.0
+   Compiling walkdir v2.5.0
+   Compiling cap-primitives v4.0.3
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling zip v9.8.1
+   Compiling crypto-primes v0.7.2
+   Compiling symphonia-metadata v0.6.1
+   Compiling ureq v3.5.2
+   Compiling symphonia-common v0.6.1
+   Compiling cap-std v4.0.3
+   Compiling rsa v0.10.0-rc.19
+   Compiling nsh-updater v0.6.1
+   Compiling wgpu-naga-bridge v29.0.4
+   Compiling p256 v0.14.0
+   Compiling p384 v0.14.0
+   Compiling p521 v0.14.0
+   Compiling symphonia-codec-alac v0.6.1
+   Compiling tokio-rustls v0.26.6
+   Compiling symphonia-format-caf v0.6.1
+   Compiling tokio-tungstenite v0.28.0
+   Compiling symphonia-format-mkv v0.6.1
+   Compiling symphonia-format-ogg v0.6.1
+   Compiling symphonia-codec-aac v0.6.1
+   Compiling symphonia-codec-vorbis v0.6.1
+   Compiling nsh-core v0.6.1
+   Compiling symphonia-bundle-flac v0.6.1
+   Compiling symphonia-format-isomp4 v0.6.1
+   Compiling symphonia-format-riff v0.6.1
+   Compiling symphonia-codec-pcm v0.6.1
+   Compiling symphonia-codec-adpcm v0.6.1
+   Compiling symphonia-bundle-mp3 v0.6.1
+   Compiling syntect v5.3.0
+   Compiling notify v8.2.2
+   Compiling dirs-sys v0.5.0
+   Compiling image v0.25.10
+   Compiling quickjs-jit-stdlib v0.14.2
+   Compiling notify-debouncer-full v0.7.0
+   Compiling symphonia v0.6.1
+   Compiling two-face v0.4.5
+   Compiling directories v6.0.0
+   Compiling anstyle-wincon v3.0.11
+   Compiling anstyle-query v1.1.5
+   Compiling ringbuf v0.5.3
+   Compiling anstream v1.0.0
+   Compiling env_logger v0.11.11
+   Compiling symphonia-adapter-libopus v0.3.0
+   Compiling nsh-package v0.6.1
+   Compiling nsh-js v0.6.1
+   Compiling nsh-base v0.6.1
+   Compiling gpu-allocator v0.28.0
+   Compiling webview2-com-sys v0.39.1
+   Compiling wgpu-hal v29.0.4
+   Compiling riff-infra v0.2.0 (C:\projects\riff\crates\riff-infra)
+   Compiling riff-backend v0.2.0 (C:\projects\riff\crates\riff-backend)
+   Compiling webview2-com v0.39.1
+   Compiling wgpu-core-deps-windows-linux-android v29.0.4
+   Compiling wgpu-core v29.0.4
+   Compiling wgpu v29.0.4
+   Compiling nsh-engine v0.6.1
+   Compiling nsh-platform-windows v0.6.1
+   Compiling nsh-testing v0.6.1
+   Compiling riff-gui-nsh-spike v0.0.0 (C:\projects\riff\docs\execution-plans\evidence\nsh\p0\spike)
+error[E0603]: enum `PlaybackState` is private
+  --> examples\bridge.rs:48:40
+   |
+48 |             riff_playback::app::state::PlaybackState::Playing => "playing",
+   |                                        ^^^^^^^^^^^^^  ------- unit variant `Playing` is not publicly re-exported
+   |                                        |
+   |                                        private enum
+   |
+note: the enum `PlaybackState` is defined here
+  --> C:\projects\riff\crates\riff-playback\src\app\state.rs:1:54
+   |
+ 1 | use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState};
+   |                                                      ^^^^^^^^^^^^^
+
+error[E0603]: enum `PlaybackState` is private
+  --> examples\bridge.rs:49:40
+   |
+49 |             riff_playback::app::state::PlaybackState::Paused => "paused",
+   |                                        ^^^^^^^^^^^^^  ------ unit variant `Paused` is not publicly re-exported
+   |                                        |
+   |                                        private enum
+   |
+note: the enum `PlaybackState` is defined here
+  --> C:\projects\riff\crates\riff-playback\src\app\state.rs:1:54
+   |
+ 1 | use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState};
+   |                                                      ^^^^^^^^^^^^^
+
+error[E0603]: enum `PlaybackState` is private
+  --> examples\bridge.rs:50:40
+   |
+50 |             riff_playback::app::state::PlaybackState::Stopped => "stopped",
+   |                                        ^^^^^^^^^^^^^  ------- unit variant `Stopped` is not publicly re-exported
+   |                                        |
+   |                                        private enum
+   |
+note: the enum `PlaybackState` is defined here
+  --> C:\projects\riff\crates\riff-playback\src\app\state.rs:1:54
+   |
+ 1 | use crate::domain::{PlaybackPosition, PlaybackQueue, PlaybackState};
+   |                                                      ^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `button` in this scope
+   --> examples\bridge.rs:108:24
+    |
+108 | ...   .child(button().test_id("play").on_press(move || play.with(|m| m.rt.ui_transport.play_random())).child(text("Play random")))
+    |              ^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `button` in this scope
+   --> examples\bridge.rs:109:24
+    |
+109 | ...   .child(button().test_id("playpause").on_press(move || pause.with(|m| { let s = m.rt.playback.lock_or_recover(); m.rt.ui_trans...
+    |              ^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `button` in this scope
+   --> examples\bridge.rs:110:24
+    |
+110 |                 .child(button().test_id("next").on_press(move || next.with(|m| m.rt.ui_transport.next())).child(text("Next")))
+    |                        ^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `button` in this scope
+   --> examples\bridge.rs:111:24
+    |
+111 | ...   .child(button().test_id("seek").on_press(move || seek.with(|m| { let s = m.rt.playback.lock_or_recover(); m.rt.ui_transport.s...
+    |              ^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0603.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `riff-gui-nsh-spike` (example "bridge") due to 7 previous errors
+
+real	3m22.186s
+user	0m0.000s
+sys	0m0.000s

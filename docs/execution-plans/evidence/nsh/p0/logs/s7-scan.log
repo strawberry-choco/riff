@@ -1,0 +1,6 @@
+progress files_found=10000 elapsed_ms=49072
+progress files_found=20000 elapsed_ms=173429
+progress files_found=30000 elapsed_ms=256011
+progress files_found=40000 elapsed_ms=344085
+progress files_found=50000 elapsed_ms=546556
+SCAN COMPLETE total_files=50000 indexed_tracks=50000 elapsed_ms=546571

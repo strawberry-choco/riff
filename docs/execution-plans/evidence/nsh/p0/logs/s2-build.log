@@ -1,0 +1,11 @@
+ Downloading crates ...
+  Downloaded nsh-testing v0.6.1
+   Compiling nsh-engine v0.6.1
+   Compiling nsh-platform-windows v0.6.1
+   Compiling nsh-testing v0.6.1
+   Compiling riff-gui-nsh-spike v0.0.0 (C:\projects\riff\docs\execution-plans\evidence\nsh\p0\spike)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.20s
+
+real	0m48.305s
+user	0m0.000s
+sys	0m0.015s

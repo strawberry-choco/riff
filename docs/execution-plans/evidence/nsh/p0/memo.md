@@ -2,7 +2,7 @@
 
 Branch `p0/nsh-feasibility`. Started 2026-11-20. Machine: Windows 11 22631, x64, 12 logical cores, rustc 1.98.1 MSVC.
 
-Status: in progress. Verdicts below are filled as each proof lands. Nothing here is an operator decision; the plan says the program is operator reviewed.
+Status: complete. Verdict is a conditional go; the conditions are listed under Go / no-go. Every verdict carries an artifact under `logs/`, `shots/` or `spike/tests/`. A cross-model review of the trail ran and its flags are addressed in the trail's superseding rows and in this memo.
 
 Two evidence levels are used and kept apart. **Compiled** means the spike built or ran against the claim on this machine. **Researched** means a subagent read the nsh.dev docs and the tagged source at `v0.6.1` (`2f51d86`) and reported it, but the spike has not yet exercised it. A researched claim is not a pass.
 
@@ -12,9 +12,9 @@ Two evidence levels are used and kept apart. **Compiled** means the spike built 
 | --- | --- | --- |
 | Install the nsh CLI, record the version on Windows | VERIFIED | `nsh 0.6.1 (2f51d86)`, release zip SHA256 `7952c84b…aff4be` verified before extract |
 | `nsh init --template rust`, `cargo run`, `nsh run` | VERIFIED for init and cargo run | init generated the template; stock `cargo build` 6m31s, window at 1384 ms, `shots/s1-spike.png`. `nsh run` not separately exercised; `nsh package` proven instead |
-| Prove the bridge | VERIFIED | `cargo test --test bridge` green: play, pause, resume, seek over the real 50k-store runtime |
+| Prove the bridge | VERIFIED | `cargo test --test bridge` green: play, pause, resume, seek-to-1s asserted on the position readout, next asserted to advance the queue index, over the real 50k-store runtime |
 | Idle CPU, playback CPU, cold start, RSS | VERIFIED | see Measurements; sampler self-tested, 12 cores |
-| Prove the list at 50k rows | VERIFIED functionally, perf NOT in budget | 57 visible rows, jump to 40000, selection; scroll ~3086 ms/step headless, limiter named in correction 22 |
+| Prove the list at 50k rows | VERIFIED functionally, perf is an N6 gate | 57 visible rows, jump to 40000, selection; scattered reads ~10.6 ms/call over 5 runs; prefetch mitigation not yet built |
 | Prove covers at 500 | VERIFIED | `shots/s9-covers.png` 500 tiles, `load_ms Some(1037)` warm, RSS 90.49 MB |
 | Prove chrome | VERIFIED | `shots/s3-chrome.png`, widths top 56 left 0 right 138; custom Close click exited the process |
 | Prove the tray | PARTIAL | icon created in the overflow; close quits (no close-to-hide); on_click INCONCLUSIVE |
@@ -84,7 +84,7 @@ The plan's risk section says "nsh's desktop docs list no tray API" and asks the 
 
 ### 8. The desktop backend is not GPUI
 
-Researched against `nsh.dev/docs/windows.md`, `/docs/macos.md`, `/docs/linux.md`, `/docs/gpui.md`. Windows renders with Win32 and Direct2D, macOS with AppKit, Linux with GTK 4. GPUI is a separate opt-in `--target gpui`. This changes the platform floors and the CI package list, and it means the Linux leg needs GTK 4.14 rather than a GPUI stack.
+Researched against `nsh.dev/docs/windows.md`, `/docs/macos.md`, `/docs/linux.md`, `/docs/gpui.md`, then refined by compiled dep trees. Windows renders with Win32 and Direct2D, macOS with AppKit, Linux with GTK 4. GPUI is a separate opt-in `--target gpui`. This changes the platform floors and the CI package list, and it means the Linux leg needs GTK 4.14 rather than a GPUI stack. Note wgpu is still a hard dependency of `nsh-engine` on Windows in both the default and minimal feature graphs (`logs/s1-deptree-default.log`, `logs/s5-deptree-minimal.log`), so the renderer is not purely Direct2D and trimming features does not remove wgpu.
 
 ### 9. Signals are `!Send` and engine-thread-only
 
@@ -106,7 +106,7 @@ Researched against `nsh-core/src/element/element_ref.rs:299`. The signature is `
 
 Researched against `nsh-core/src/element/virtual_list.rs:210` and `nsh.dev/docs/lists.md`. The plan's `virtual_list(move || total, move |at| track_row(at))` is correct. The row function runs once per cell, not per frame or per item. Cell reuse changes `at.index()`, and only bindings that read it re-run. Copying the index out at the top of the row function freezes it.
 
-The bound is `+ 'static` only, with no `Clone` and no `Send`. Capturing `Rc` is the documented idiom, and a `RefCell` or `stored` capture is safe on the single engine thread. This resolves the plan's "windowed reads in a recycled list" risk in favour of the direct pattern, so the bounded prefetch fallback is not needed yet. `estimated_item_size` is a trait method on `ListLayout` and defaults to 50 points.
+The bound is `+ 'static` only, with no `Clone` and no `Send`. Capturing `Rc` is the documented idiom, and a `RefCell` or `stored` capture is safe on the single engine thread. This resolves the plan's "windowed reads in a recycled list" risk in favour of the direct pattern for correctness, but NOT for speed: correction 22 shows the direct per-row read is too slow to scroll, so the bounded prefetch window is required. `estimated_item_size` is a trait method on `ListLayout` and defaults to 50 points.
 
 ### 13. Headless defaults to a phone, and cannot load images
 
@@ -138,11 +138,11 @@ Researched against `nsh.dev/docs/fonts.md` and `nsh-core/src/element/ambient.rs:
 
 ### 18. Build weight is far above the docs' estimate
 
-Compiled. `cargo generate-lockfile` on the spike resolved 637 packages in 7.2 s. The Rust doc says the first build compiles "about 60 crates". The lock includes `nsh-js`, `nsh-package`, `nsh-i18n` and `rsa v0.10.0-rc.19`. Whether `nsh-js` links into a Rust-only binary is still open, and it matters because the plan's Rust-only decision rests on shipping no JavaScript VM.
+Compiled. `cargo generate-lockfile` on the default-feature spike resolved 637 packages in 7.2 s, against the Rust doc's "about 60 crates". The lock includes `nsh-js`, `nsh-package`, `nsh-i18n` and `rsa v0.10.0-rc.19`. Dep trees settle the JavaScript question: `nsh-js` is present via `nsh-engine` with default features and absent with the generated minimal feature list, so a Rust-only app ships no JavaScript VM only when features are trimmed.
 
 ### 19. The platform crates must disable default features
 
-Compiled. `nsh init --template rust` generates platform dependencies with `default-features = false` and an explicit feature list (`shader`, `editor`, `emoji-picker`, `highlight`, `math`, `plot`, `rich-editor`, `term`, `websocket`, `updater`, `svg`, `net`, and `sound` on Linux). The spike's first manifest enabled defaults and resolved 637 packages including wgpu, webview2 and QuickJS. N1 should copy the generated feature list and trim it to what riff uses, then re-measure the lock and the binary. Whether QuickJS still links with defaults off is being checked against the package build log.
+Compiled. `nsh init --template rust` generates platform dependencies with `default-features = false` and an explicit feature list (`shader`, `editor`, `emoji-picker`, `highlight`, `math`, `plot`, `rich-editor`, `term`, `websocket`, `updater`, `svg`, `net`, and `sound` on Linux). The spike's first manifest enabled defaults and resolved 637 packages including QuickJS. N1 should copy the generated feature list and trim it to what riff uses, then re-measure the lock and the binary. Trimming removes QuickJS but not wgpu (correction 8).
 
 The generated `src/main.rs` also carries a `compile_error!` for non-desktop targets and sets `windows_subsystem = "windows"`. The spike omits the subsystem attribute so `cargo run` keeps stdout; N1 must decide which it wants, because a GUI-subsystem binary writes no console logs.
 
@@ -168,21 +168,24 @@ Compiled. First cold run reached 24 covers in 20 s; a second run reached 443 in 
 
 ## Measurements
 
-All numbers are from this Windows machine, 12 logical cores, debug builds unless stated. CPU is percent of one core. The sampler reads `Get-Process` counters every 250 ms; it was self-tested against an idle process (0% CPU, 10.19 MB, 15 samples). Run counts and ranges are in the CSVs under `logs/`.
+All numbers are from this Windows machine, 12 logical cores, debug builds unless stated. CPU is percent of one core. The sampler reads `Get-Process` counters every 250 ms and was self-tested against an idle process (0% CPU, 10.19 MB, 15 samples). Every row's CSV is under `logs/`; medians and ranges below are recomputed from those CSVs.
 
-| Scenario | Cold start to window | Idle CPU median (range) | Working set median / peak | Samples |
+"Cold start" here means process start to first visible window, NOT to interactive. No in-app interactive marker was instrumented, so treat these as window-appearance times.
+
+| Scenario | Start to window | CPU median (range) | WS median / max | Samples |
 | --- | --- | --- | --- | --- |
-| s1 spike, empty store | 1384 ms | 0 (0..0) | 62.79 / 62.79 MB | 44 |
-| s3 chrome | 964 ms first, 128 ms warm | 0 (0..0) | 47.6 MB | 18-29 |
-| s7 bridge, 50k store, pump running | 4758 ms | 15.65 (5.22..36.79) | 78.04 / 78.0 MB | 27 |
-| s9 covers, 500 held | 964 ms | 0 (0..5.77) after load | 90.49 / 90.46 MB | 220 |
-| s5 packaged release exe | 626 ms | 0 (0..0) | 42.25 / 42.25 MB | 18 |
+| s1 spike, empty store | 1200-1384 ms | idle 0 (0..0) | 45.78 / 45.78 MB | 29 |
+| s3 chrome | 964 ms first, 128 ms warm | idle 0 (0..0) | 47.60 / 47.60 MB | 18 |
+| s7 bridge, 50k store, pump running, stopped | 4758 ms | 15.65 (5.22..36.79) | 78.03 / 78.06 MB | 27 |
+| s7 bridge, playing | same process | 28.84 (17.05..57.78) | 93.39 / 95.89 MB | 29 |
+| s9 covers, 500 held, warm | 964 ms | 0 (0..5.77) after load | 90.49 / 95.71 MB | 220 |
+| s5 packaged RELEASE, empty template | 626 ms | 0 (0..0) | 42.25 / 42.25 MB | 18 |
 
-The bridge's 15.65% idle is the 16 ms pump polling the session every tick even when stopped. That is a standing cost N3 should reduce by sleeping when nothing changed. The covers run's CPU median of 0 with a range to 88 in the first cold run shows the decode worker, not the render loop, is the limiter during load.
+Read these with three caveats. The s5 row is the generated Count/Tap template, not the backend spike, so it bounds the framework floor only and must not be compared against the riff rows. The covers are 56x56 thumbnails only; hero-size cover memory (correction 10) is unmeasured. The bridge's 15.65% idle is not just polling: `src/bridge.rs` clones the entire 50k-track queue every 16 ms tick, so sleeping when unchanged would not remove that cost. N3 must drop the per-tick full clone as well as add change detection.
 
-Build weight: debug spike 88.1 MB exe, 491 crates compiled in 6m31s with default features; the generated minimal-feature template packaged to a 29.5 MB release exe in 12m48s and compiled no QuickJS. The 637-package lock was the default-feature spike; N1 should re-measure with the trimmed feature list.
+Build weight: debug spike 88.1 MB exe, 491 crates in 6m31s with default features. The generated minimal-feature template packaged to a 29.5 MB release exe in 12m48s. `logs/s5-deptree-minimal.log` shows `nsh-js` absent from the minimal graph and `logs/s1-deptree-default.log` shows it present via `nsh-engine` with defaults, so QuickJS is feature-gated. wgpu is NOT feature-gated: it is a hard dependency of `nsh-engine` on Windows in both graphs, so trimming features does not remove it.
 
-Scroll: 20 headless steps of 2000 pt over 50k rows, 61712 ms total, 3086 ms/step, limiter scattered `track_row` at ~10 ms/call (correction 22). This is NOT within an interactive budget and is the single most important perf finding of P0.
+Scroll: `logs/s8-projection-cost-5runs.log` gives five runs of 200 reads each. Scattered `track_row` 10321.9-11083.0 µs/call (median ~10577), sequential 124.9-157.7 µs/call, same-index 220.0-243.1 µs/call, `track_count` 6705-9724 µs cold. One 20-step headless scroll of 2000 pt over 50k rows took 61712 ms (~3086 ms/step); that is a single run and an upper bound including layout passes. The prefetch-window mitigation is recommended but NOT built or measured here, so closing the scroll budget is an N6 gate, not a P0 pass.
 
 ## Method
 
@@ -209,12 +212,18 @@ Windowed shots and CPU/RSS sampling use `tools/run-proof.ps1 -Exe <path> -Tag <n
 
 ## Go / no-go
 
-Go, with three plan edits before N1. The framework builds, runs, packages and tests on Windows; the bridge, list, covers, chrome, keyboard, palette and drop all work against the real backend. The tray exists natively, so the plan's tray-gap gate is removed.
+Conditional go. The framework builds, runs, packages and tests on Windows; the bridge, list virtualization, covers, chrome, keyboard, palette and folder drop all work against the real backend, and the tray exists natively so the plan's tray-gap premise is removed. But three conditions must close before the downstream units rely on P0, and two gate items are answered only partially.
 
-The three edits that change downstream work:
-1. N3's pump must poll `PlaybackSession`, call `sync_playback`, and write signals outside the `stored` borrow (corrections 1, 2, 20).
-2. N6 must use a prefetch window for row reads and keep its own cover eviction (corrections 10, 22, 24). The direct per-row pattern does not meet an interactive scroll budget.
-3. N1 should pin all seven crates at `=0.6.1` and copy the generated minimal platform feature list, then re-measure build weight (corrections 18, 19).
+Conditions before N1:
+1. N3's pump must poll `PlaybackSession`, call `sync_playback`, write signals outside the `stored` borrow, and drop the per-tick full queue clone (corrections 1, 2, 20 and the Measurements idle-limiter note).
+2. N6 must build and MEASURE the prefetch window for row reads and keep its own cover eviction (corrections 10, 22, 24). P0 proved the direct per-row pattern misses the scroll budget by roughly 35-200x per frame; the mitigation is recommended, not proven. Treat closing the scroll budget as an N6 gate.
+3. N1 pins all seven crates at `=0.6.1` and copies the generated minimal platform feature list, then re-measures build weight knowing wgpu stays (corrections 8, 18, 19).
+
+Gate items answered only partially, to close at N4/N14 rather than assume:
+- Tray: icon creation proven, but `on_click` is INCONCLUSIVE and close-to-hide is not the default. Close-to-hide is the reason riff has a tray, so this is a real gate, not a nicety.
+- Chrome: hidden bar and custom controls proven, but the system caption buttons still draw and suppression is unknown.
+
+The egui trunk baseline (S6) and Linux (S13) remain open with concrete blockers; the perf protocol's "record trunk and head" is therefore only half satisfied this run.
 
 ## Still open
 

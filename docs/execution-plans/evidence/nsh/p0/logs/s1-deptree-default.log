@@ -1,0 +1,9 @@
+nsh-js v0.6.1
+└── nsh-engine v0.6.1
+    ├── nsh-platform-windows v0.6.1
+    │   └── riff-gui-nsh-spike v0.0.0 (C:\projects\riff\docs\execution-plans\evidence\nsh\p0\spike)
+    └── nsh-testing v0.6.1
+        [dev-dependencies]
+        └── riff-gui-nsh-spike v0.0.0 (C:\projects\riff\docs\execution-plans\evidence\nsh\p0\spike)
+    [dev-dependencies]
+    └── riff-gui-nsh-spike v0.0.0 (C:\projects\riff\docs\execution-plans\evidence\nsh\p0\spike)

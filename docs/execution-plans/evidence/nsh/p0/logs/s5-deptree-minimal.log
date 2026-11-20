@@ -1,0 +1,8 @@
+error: package ID specification `nsh-js` did not match any packages
+
+help: a package with a similar name exists: `nsh-base`
+---wgpu---
+wgpu v29.0.4
+└── nsh-engine v0.6.1
+    └── nsh-platform-windows v0.6.1
+        └── nsh-app-riff-spike v0.1.0 (C:\projects\riff\.scratch\nsh-p0\riff-spike)

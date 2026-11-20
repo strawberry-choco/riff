@@ -1,0 +1,20 @@
+track_count=50000 in 9724 us
+sequential track_row: 157.7 us/call
+scattered track_row: 11083.0 us/call
+repeated same-index track_row: 243.1 us/call
+track_count=50000 in 8610 us
+sequential track_row: 149.8 us/call
+scattered track_row: 10982.1 us/call
+repeated same-index track_row: 233.2 us/call
+track_count=50000 in 9491 us
+sequential track_row: 145.0 us/call
+scattered track_row: 10577.0 us/call
+repeated same-index track_row: 220.0 us/call
+track_count=50000 in 6705 us
+sequential track_row: 124.9 us/call
+scattered track_row: 10428.3 us/call
+repeated same-index track_row: 238.4 us/call
+track_count=50000 in 8755 us
+sequential track_row: 140.5 us/call
+scattered track_row: 10321.9 us/call
+repeated same-index track_row: 240.1 us/call

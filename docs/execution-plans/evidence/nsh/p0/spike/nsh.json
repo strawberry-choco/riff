@@ -1,0 +1,9 @@
+{
+  "name": "riff",
+  "id": "io.github.strawberry-choco.riff",
+  "version": "0.2.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "appearance": "system"
+}

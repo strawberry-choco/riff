@@ -1,0 +1,16 @@
+   Compiling riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+   Compiling riff-tests v0.2.0 (C:\projects\riff\tests)
+    Finished `test` profile [optimized + debuginfo] target(s) in 19.45s
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 6 tests
+test nsh_bridge_tests::notices_reach_the_signal ... ok
+test nsh_bridge_tests::a_play_command_changes_the_playback_view_within_one_pump_tick ... ok
+test nsh_bridge_tests::a_volume_write_round_trips_to_the_store_through_commit_if_changed ... ok
+test nsh_bridge_tests::library_and_playlist_revisions_move_with_their_generations ... ok
+test nsh_bridge_tests::a_queue_change_from_the_engine_lands_in_the_signal ... ok
+test nsh_bridge_tests::pause_resume_seek_round_trip_through_the_pump ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 869 filtered out; finished in 0.52s
+
+exit=0

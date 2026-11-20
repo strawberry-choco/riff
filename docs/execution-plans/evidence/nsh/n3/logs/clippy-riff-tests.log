@@ -1,0 +1,12 @@
+    Checking riff-playback v0.2.0 (C:\projects\riff\crates\riff-playback)
+    Checking riff-library v0.2.0 (C:\projects\riff\crates\riff-library)
+    Checking riff-gui-theme v0.2.0 (C:\projects\riff\crates\riff-gui-theme)
+    Checking nsh-testing v0.6.1
+    Checking riff-infra v0.2.0 (C:\projects\riff\crates\riff-infra)
+    Checking riff-gui-components v0.2.0 (C:\projects\riff\crates\riff-gui-components)
+    Checking riff-backend v0.2.0 (C:\projects\riff\crates\riff-backend)
+    Checking riff-gui v0.2.0 (C:\projects\riff\crates\riff-gui)
+    Checking riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+    Checking riff-tests v0.2.0 (C:\projects\riff\tests)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 31.62s
+clippy-riff-tests exit=0

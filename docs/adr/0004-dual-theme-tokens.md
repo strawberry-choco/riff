@@ -116,7 +116,10 @@ draws beside them, and it does not read that store.
 
 The decision above stands; the coexistence amendment's promised naming lands.
 From N2 the nsh frontend's one authoritative theme store is the
-`Signal<Palette>` the app owns (`crates/riff-gui-nsh/src/app.rs`), holding the
+`Signal<Palette>` the app owns (created in `crates/riff-gui-nsh/src/app.rs` at
+N2; N3 moved the handle into the bridge's `UiState`,
+`crates/riff-gui-nsh/src/bridge/state.rs`, and nothing about the store
+changed), holding the
 palette ported verbatim from `crates/riff-gui-theme/src/theme.rs` into
 `crates/riff-gui-nsh/src/theme/` (`palette.rs` the 18 color slots and the four
 variants, `tokens.rs` the type scale, radii, spacing, motion, chrome

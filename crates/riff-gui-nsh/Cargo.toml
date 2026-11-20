@@ -4,9 +4,9 @@
 #
 # Membership criterion: rendering, input and platform integration on nsh.
 # It names no egui crate and no `riff-gui-*` crate — the theme is ported, not
-# shared. The only `riff-*` edge it may ever name is `riff-backend`, and it
-# names none today: nothing here reads the backend yet. N3 adds that edge in
-# the same commit as the first `use riff_backend::`.
+# shared. The only `riff-*` edge it may ever name is `riff-backend`, which N3
+# added below with the first `use riff_backend::` (the bridge); the scaffold
+# test's allowlist already carried that one edge.
 # `tests/scaffold_tests.rs` fails the build if the manifest drifts.
 #
 # No `[profile.*]` table here. The workspace owns LTO, codegen-units and
@@ -44,6 +44,12 @@ path = "src/main.rs"
 nsh-core.workspace = true
 nsh-base.workspace = true
 nsh-engine.workspace = true
+
+# The backend edge, added at N3: the bridge (`src/bridge`) owns an
+# `AppRuntime` from the Composition Root and reads the sessions, the event
+# inbox and the Cover service through it. The same single edge `riff-gui`
+# declares — no feature set to choose between.
+riff-backend = { path = "../riff-backend" }
 
 # Logging. riff's one convention is `tracing`
 # (docs/technical/architecture.md, Logging). nsh logs through `log`, and

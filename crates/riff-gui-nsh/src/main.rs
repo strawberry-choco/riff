@@ -1,6 +1,7 @@
 //! The `riff-nsh` binary: mounts the Rust UI set on the machine's native nsh
-//! backend. A thin composition — at N1 it opens no store and spawns no
-//! runtime workers.
+//! backend. A thin composition over the bridge — at N3 the app component
+//! spawns the backend runtime over the synthetic N3 store resolved below;
+//! the live data-local store the egui binary uses is never touched.
 
 // Stops a console window flashing on Windows release builds; debug builds
 // keep the console so logs stay visible. This must be an INNER (crate-level)
@@ -29,6 +30,28 @@ fn main() -> impl std::process::Termination {
     // records reach the same subscriber. A second `LogTracer::init()` panics
     // at startup.
     tracing_subscriber::fmt::init();
+
+    // Resolve the synthetic store before anything opens it, and create its
+    // directory: the app component spawns the runtime over exactly this
+    // path, and a directory it cannot create is a fatal startup failure
+    // (logged, non-zero exit) rather than a mid-mount surprise.
+    let store = riff_gui_nsh::store_path();
+    match store.parent().map(std::fs::create_dir_all) {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            tracing::error!(
+                "Fatal: cannot create the store directory {}: {e}",
+                store.display()
+            );
+            std::process::exit(1);
+        }
+        None => {
+            tracing::error!("Fatal: the store path has no parent: {}", store.display());
+            std::process::exit(1);
+        }
+    }
+    tracing::info!("Store path: {}", store.display());
+
     platform::run_app(
         platform::AppSource::Rust(
             platform::Root::of::<riff_gui_nsh::App>().tokens(riff_gui_nsh::theme_tokens()),

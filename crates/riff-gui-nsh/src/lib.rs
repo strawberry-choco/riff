@@ -3,15 +3,16 @@
 //! (ADR 0022).
 //!
 //! N2 ports the design system: [`theme`] carries the palette, tokens,
-//! fonts and icons ported from `crates/riff-gui-theme/src/theme.rs`, the
-//! authoritative runtime store is the `Signal<Palette>` in [`app`], and
-//! `theme.json`'s `cssVars` maps restyle the `nsh_base` defaults. Nothing
-//! here reads the backend or the Application Store yet. The next units
-//! land in this crate: N3 adds the `riff-backend` edge and the bridge that
-//! moves `AppRuntime` into the UI model in `src/app.rs`; N4 replaces the
-//! fixed window size in `src/main.rs` with persisted geometry.
+//! fonts and icons ported from `crates/riff-gui-theme/src/theme.rs`, and
+//! `theme.json`'s `cssVars` maps restyle the `nsh_base` defaults. N3 adds
+//! the `riff-backend` edge: [`bridge`] owns the `AppRuntime` from the
+//! Composition Root and the [`model`] view vocabulary, and the pump in
+//! [`bridge::pump`] is the app's one signal writer. The next unit, N4,
+//! replaces the fixed window size in `src/main.rs` with persisted geometry.
 
 mod app;
+pub mod bridge;
+mod model;
 pub mod theme;
 
 #[cfg(debug_assertions)]
@@ -32,7 +33,7 @@ pub const APP_ID: &str = "io.github.strawberry-choco.riff";
 /// The theme file, compiled in: riff's palette under shadcn's token names
 /// over the nsh defaults, so `nsh_base` controls (menus, dialogs, toasts)
 /// sit close to riff. Never the riff palette's store — that is the
-/// `Signal<Palette>` in [`app`].
+/// `Signal<Palette>` in the bridge's `UiState`.
 const THEME_JSON: &str = include_str!("../theme.json");
 
 /// The design tokens the app renders with: `theme.json` over nsh's defaults.
@@ -44,6 +45,25 @@ const THEME_JSON: &str = include_str!("../theme.json");
 /// committed file, not runtime input.
 pub fn theme_tokens() -> Tokens {
     nsh_base::tokens_of(Some(THEME_JSON)).expect("theme.json is committed and scaffold-tested")
+}
+
+/// The Application Store this frontend opens: the **synthetic** N3 store
+/// under the workspace's `.scratch/nsh-n3/store/`, never the live data-local
+/// store the egui binary uses (the P0 spike's method, carried into N3).
+/// `RIFF_N3_STORE` overrides the location — every run and screenshot in the
+/// evidence trail goes through it or through the default below.
+///
+/// `main` resolves this before the window opens and creates the directory;
+/// the app component spawns the runtime over the same path.
+#[must_use]
+pub fn store_path() -> std::path::PathBuf {
+    if let Some(override_path) = std::env::var_os("RIFF_N3_STORE") {
+        return std::path::PathBuf::from(override_path);
+    }
+    // Compile-time anchor: `crates/riff-gui-nsh` -> workspace root ->
+    // `.scratch/nsh-n3/store/riff.sqlite3`.
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.scratch/nsh-n3/store/riff.sqlite3")
 }
 
 /// The app's UI set (`nsh.json` `"rust"`): what a TSX entry imports from

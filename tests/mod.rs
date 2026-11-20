@@ -26,6 +26,7 @@ pub mod app_tests;
 pub mod domain_tests;
 pub mod golden_tests;
 pub mod integration_tests;
+pub mod nsh_bridge_tests;
 pub mod readme_screenshots;
 pub mod repo_invariant_tests;
 pub mod ui_tests;

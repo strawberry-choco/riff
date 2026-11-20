@@ -49,10 +49,23 @@ riff-library = { path = "../crates/riff-library" }
 riff-playback = { path = "../crates/riff-playback" }
 riff-persistence = { path = "../crates/riff-persistence" }
 riff-gui     = { path = "../crates/riff-gui" }
+# The nsh frontend: the N3 bridge tests (`nsh_bridge_tests`) build its
+# `UiModel` over this suite's mock ports and drive the pump headless.
+riff-gui-nsh = { path = "../crates/riff-gui-nsh" }
 # The widgetry crates: the suite re-points at them directly for the token
 # types and presentation primitives the split moved out of `riff-gui`.
 riff-gui-components = { path = "../crates/riff-gui-components" }
 riff-gui-theme = { path = "../crates/riff-gui-theme" }
+
+# The nsh UI stack, for the headless bridge tests: the engine's
+# `EngineConfig`/`Root`, `nsh-base`'s button, and `nsh-testing`'s `Headless`
+# driver. Same exact pins the workspace single-sources; the engine inherits
+# the workspace entry's `default-features = false` (no QuickJS), as the
+# frontend crate builds it.
+nsh-base.workspace = true
+nsh-core.workspace = true
+nsh-engine.workspace = true
+nsh-testing.workspace = true
 
 # Golden-image tests render real egui frames headlessly (kittest + wgpu).
 egui.workspace = true

@@ -46,7 +46,10 @@ fn main() -> impl std::process::Termination {
             // pipeline decides where the image cache lives), `icon` is N16's
             // (the packager writes the executable's icon), `login_item` is
             // already false, and `data_dir` stays the per-id default — N1
-            // opens no store, so no unit has claimed an override.
+            // opens no store, so no unit has claimed an override. The fonts
+            // and icons are compiled in (see `theme::fonts` and
+            // `theme::icons`), so `asset_base` stays unset until a unit
+            // names a real `asset:/` consumer with a verified layout.
             ..Default::default()
         },
     )

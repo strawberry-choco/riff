@@ -2,16 +2,20 @@
 //! `riff-gui` until feature parity, when the three egui crates are deleted
 //! (ADR 0022).
 //!
-//! N1 is a scaffold: [`App`] renders the app's name and version on nsh's
-//! default tokens, and nothing here reads the backend or the Application
-//! Store. The next units land in this crate: N2 fills `theme.json`'s
-//! `cssVars` maps with the ported palette, ships the fonts and icons under
-//! `assets/`, and adds the nsh-shaped token sweeps in `tests/`; N3 adds the
-//! `riff-backend` edge and the bridge that moves `AppRuntime` into the UI
-//! model in `src/app.rs`; N4 replaces the fixed window size in `src/main.rs`
-//! with persisted geometry.
+//! N2 ports the design system: [`theme`] carries the palette, tokens,
+//! fonts and icons ported from `crates/riff-gui-theme/src/theme.rs`, the
+//! authoritative runtime store is the `Signal<Palette>` in [`app`], and
+//! `theme.json`'s `cssVars` maps restyle the `nsh_base` defaults. Nothing
+//! here reads the backend or the Application Store yet. The next units
+//! land in this crate: N3 adds the `riff-backend` edge and the bridge that
+//! moves `AppRuntime` into the UI model in `src/app.rs`; N4 replaces the
+//! fixed window size in `src/main.rs` with persisted geometry.
 
 mod app;
+pub mod theme;
+
+#[cfg(debug_assertions)]
+mod screens;
 
 pub use app::App;
 use nsh_core::prelude::*;
@@ -25,8 +29,10 @@ pub const APP_NAME: &str = "riff";
 /// test keeps the two equal.
 pub const APP_ID: &str = "io.github.strawberry-choco.riff";
 
-/// The theme file, compiled in: identity plus empty `cssVars` maps at N1,
-/// so the tokens are nsh's defaults. N2 fills the maps.
+/// The theme file, compiled in: riff's palette under shadcn's token names
+/// over the nsh defaults, so `nsh_base` controls (menus, dialogs, toasts)
+/// sit close to riff. Never the riff palette's store — that is the
+/// `Signal<Palette>` in [`app`].
 const THEME_JSON: &str = include_str!("../theme.json");
 
 /// The design tokens the app renders with: `theme.json` over nsh's defaults.

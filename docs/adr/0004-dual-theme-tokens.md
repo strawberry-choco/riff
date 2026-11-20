@@ -111,3 +111,28 @@ draws beside them, and it does not read that store.
   nsh line, so pointing them at the new crate would pass vacuously; the rules
   are written when the values they judge exist.
 
+
+## Amendment — 2026-11-21 (the nsh frontend names its store)
+
+The decision above stands; the coexistence amendment's promised naming lands.
+From N2 the nsh frontend's one authoritative theme store is the
+`Signal<Palette>` the app owns (`crates/riff-gui-nsh/src/app.rs`), holding the
+palette ported verbatim from `crates/riff-gui-theme/src/theme.rs` into
+`crates/riff-gui-nsh/src/theme/` (`palette.rs` the 18 color slots and the four
+variants, `tokens.rs` the type scale, radii, spacing, motion, chrome
+dimensions and shadows, `fonts.rs` the four Inter weights, `icons.rs` the 35
+Lucide glyphs). Every riff surface in the nsh frontend reads its colors from
+that signal — `move || palette.get().surface` and so on — which is what makes
+runtime dark/light and High Contrast switching a signal write, with no nsh
+theme API involved.
+
+- **`theme.json` restyles `nsh_base` controls only.** Its `cssVars` maps
+  carry riff's palette under shadcn's token names so menus, dialogs and
+  toasts sit close to riff; it is never the riff palette's store.
+- **The egui store is untouched.** `crates/riff-gui-theme/src/theme.rs`
+  stays the egui three's store and read source; the nsh port is a copy under
+  the freeze, and `tests/theme_tests.rs` pins the ported values against it.
+- **The sweeps moved with the rule.** `crates/riff-gui-nsh/tests/token_sweeps.rs`
+  sweeps the nsh crate's own source for color constructions, dimension
+  declarations and numeric spacing gaps; the four `src/theme/` store files are
+  the exempt ones, as `theme.rs` was.

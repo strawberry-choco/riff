@@ -1,0 +1,71 @@
+# riff-gui-nsh — the nsh frontend: the Rust UI set and the `riff-nsh` binary
+# that mounts it. A second frontend beside `riff-gui` until feature parity,
+# then the three egui crates are deleted (ADR 0022).
+#
+# Membership criterion: rendering, input and platform integration on nsh.
+# It names no egui crate and no `riff-gui-*` crate — the theme is ported, not
+# shared. The only `riff-*` edge it may ever name is `riff-backend`, and it
+# names none today: nothing here reads the backend yet. N3 adds that edge in
+# the same commit as the first `use riff_backend::`.
+# `tests/scaffold_tests.rs` fails the build if the manifest drifts.
+#
+# No `[profile.*]` table here. The workspace owns LTO, codegen-units and
+# strip; cargo ignores a member's profile table and warns about it.
+
+[package]
+name = "riff-gui-nsh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The riff desktop music player's nsh frontend: an offline-first app for playing a local music library."
+publish = false
+
+[lib]
+name = "riff_gui_nsh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "riff-nsh"
+path = "src/main.rs"
+
+[dependencies]
+# The framework. Versions, default-features and the platform feature list are
+# single-sourced in the root [workspace.dependencies]; this crate inherits
+# them and names no version and no feature of its own.
+#
+# nsh-engine is inherited although no N1 line names it: the platform crates
+# require it on a caret range, and an uninherited workspace pin binds
+# nothing, so without this edge the resolver could take a later 0.6.x.
+# `platform::Root` is its re-export.
+nsh-core.workspace = true
+nsh-base.workspace = true
+nsh-engine.workspace = true
+
+# Logging. riff's one convention is `tracing`
+# (docs/technical/architecture.md, Logging). nsh logs through `log`, and
+# tracing-subscriber's default `tracing-log` feature bridges the two, so one
+# `fmt::init()` shows both. A second, explicit LogTracer install would panic:
+# `fmt::init()` already installs it. The generated template's `env_logger`
+# would be a second logging stack and a new lock entry.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+color-eyre = "0.6"
+
+# The platform backend, one per desktop OS. The feature list lives in the
+# root manifest and is identical on all three, so there is no per-platform
+# divergence to keep in sync.
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows.workspace = true
+
+[lints]
+workspace = true

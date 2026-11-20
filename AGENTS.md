@@ -1,21 +1,22 @@
-# riff — Music Player (Rust + egui)
+# riff — Music Player (Rust)
 
-A lightweight, offline-first desktop music player. A Cargo workspace: backend capability crates, two frontend widgetry crates (design system + component library), a frontend crate, and an integration-test crate. See `docs/technical/architecture.md` for the split.
+A lightweight, offline-first desktop music player. A Cargo workspace of ten members: backend capability crates, two egui widgetry crates (design system + component library), the egui frontend crate, a second frontend crate on the nsh UI stack, and an integration-test crate. The shipping `riff` binary renders through egui. The `riff-nsh` binary is the nsh rewrite's scaffold and ships beside it until feature parity (ADR 0022). See `docs/technical/architecture.md` for the split.
 
 ## Quick Start
 
 ```bash
 cargo run -p riff-gui              # dev build of the `riff` binary (opt-level=1)
+cargo run -p riff-gui-nsh          # dev build of the `riff-nsh` scaffold binary
 cargo build --release -p riff-gui  # LTO, stripped, optimized release
 cargo check --workspace            # fast type-check without codegen
 git config core.hooksPath .githooks  # wire the commit-message hook (CI is the real gate)
 ```
 
-No special features or feature flags. No codegen step, no migrations to run by hand.
+No codegen step, no migrations to run by hand. The `riff` binary builds with no feature flags. The nsh platform crates carry a trimmed feature list (`shader` and `svg`), single-sourced in the root manifest (ADR 0022).
 
 ## Architecture
 
-A vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`; decision records in `docs/adr/0009-vertical-crate-split-of-the-backend.md` and `docs/adr/0018-gui-widgetry-splits-into-theme-and-component-crates.md`):
+A vertical capability split with a strict, compiler-enforced dependency chain (full reference in `docs/technical/architecture.md`; decision records in `docs/adr/0009-vertical-crate-split-of-the-backend.md`, `docs/adr/0018-gui-widgetry-splits-into-theme-and-component-crates.md` and `docs/adr/0022-nsh-ui-stack-replaces-egui.md`):
 
 ```
 riff-gui (frontend, `riff` binary)
@@ -24,6 +25,10 @@ riff-gui (frontend, `riff` binary)
             -> riff-library / riff-playback -> riff-persistence
     -> riff-gui-components (component library)
         -> riff-gui-theme (design system)
+
+riff-gui-nsh (second frontend, `riff-nsh` binary)
+    -> nsh-core / nsh-base / nsh-engine, one nsh-platform-* crate per OS
+    -> riff-backend from N3 (no riff-* edge at N1)
 ```
 
 Each crate's contents and membership criterion, one line each; `docs/technical/architecture.md#crate-definitions-and-membership-criteria` is the full reference.
@@ -33,9 +38,10 @@ Each crate's contents and membership criterion, one line each; `docs/technical/a
 - **`riff-playback`** — the playback capability: playback use cases and the ports they consume.
 - **`riff-infra`** — an item belongs here iff it implements a port defined in another crate or wraps a native/external dependency — nothing else.
 - **`riff-backend`** — the frontend-facing event surface, the app-layer application services, and the one place that knows both ports and adapters (the Composition Root).
-- **`riff-gui-theme`** — the design system: the token and palette store, the vendored fonts, and the icon set, with the assets they are compiled from. `crates/riff-gui-theme/src/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by per-crate source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`). It names no `riff-*` crate.
+- **`riff-gui-theme`** — the design system: the token and palette store, the vendored fonts, and the icon set, with the assets they are compiled from. `crates/riff-gui-theme/src/theme.rs` is the design system's single store: every design value is written there and read from there, enforced by per-crate source sweeps (ADR 0004; rules in `docs/engineering/coding-standards.md#design-tokens`). It names no `riff-*` crate. During the nsh coexistence window the store serves the egui three; `riff-gui-nsh` reads nsh tokens instead (ADR 0004's 2026-11-20 amendment).
 - **`riff-gui-components`** — the component library: the presentation primitives on the props-in / response-or-typed-intent-out contract. It names no `riff-*` crate — `riff-gui-theme` and `egui`, nothing else — so a widget that has to know what an application type means is a frontend module instead (ADR 0018).
 - **`riff-gui`** — the frontend: rendering, input, and platform integration, plus the `riff` binary, which is a thin composition over `riff_backend::composition::AppRuntime::spawn`. It composites the primitives over values read from `riff-gui-theme` and owns the transform between the components' display vocabulary and the business types.
+- **`riff-gui-nsh`** — the second frontend, on the nsh UI stack: the `riff-nsh` binary beside `riff` until feature parity at N15 (ADR 0022). A scaffold at N1, with no store read and no `riff-*` dependency. N2 ports the theme, N3 adds the `riff-backend` edge. It names no egui crate and no `riff-gui-*` crate. The theme is ported, not shared.
 
 Domain types (`Track`, `TrackId`, `PlaybackQueue`, …) live in `riff-persistence` and `riff-playback` and import nothing from app, infra, or UI code. Each slice codes against its own port traits; `riff-infra` implements them; dependency arrows point adapters → slices.
 
@@ -51,6 +57,7 @@ Cross-thread communication: `crossbeam_channel::unbounded()` for all message pas
 
 - **macOS / Windows**: System tray icon (`tray-icon` + `muda`), native folder picker (`rfd`) — all in `riff-gui`.
 - **Linux**: No tray icon (no-op). Folder picker is a text input field (no native file dialog). Conditional via `#[cfg(target_os = "linux")]` / `#[cfg(not(target_os = "linux"))]`.
+- **nsh frontend**: Platform integration comes from the `nsh-platform-*` crates, one per desktop OS. The N1 scaffold opens a window only. Tray, picker and the rest of the platform parity land at N14.
 
 ## Commands (Dev Workflow)
 
@@ -61,12 +68,13 @@ cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
 cargo test --all-targets                   # run all unit and integration tests
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items  # build docs, rustdoc warnings are errors
 cargo run -p riff-gui                      # run in dev mode
+cargo run -p riff-gui-nsh                  # run the nsh scaffold in dev mode
 cargo build --release -p riff-gui          # release build (LTO, stripped)
 ```
 
-**Test suite**: Per-crate suites sit with the code they cover; cross-crate integration, UI and golden suites sit in the single workspace-root `riff-tests` crate. `docs/engineering/testing-strategy.md` is authoritative on placement, and the golden-image snapshot workflow is in `docs/engineering/golden-image-testing.md`.
+**Test suite**: Per-crate suites sit with the code they cover; cross-crate integration, UI and golden suites sit in the single workspace-root `riff-tests` crate. The nsh frontend's four scaffold tests sit in `crates/riff-gui-nsh/tests/scaffold_tests.rs` and need no engine, window or egui. `docs/engineering/testing-strategy.md` is authoritative on placement, and the golden-image snapshot workflow is in `docs/engineering/golden-image-testing.md`.
 
-**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` on push/PR to `master` (Linux + Windows matrix), plus a warning-free rustdoc build (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items`) on the Linux leg, plus the `commit-lint` jobs that validate every commit message against the Conventional Commits profile (`docs/engineering/commit-conventions.md`). A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate.
+**CI**: `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets`, `cargo test --all-targets` and a `cargo build --locked --workspace --bins` link step on push/PR to `master` (Linux + Windows matrix, Linux packages from the shared `.github/actions/linux-deps` action), plus a warning-free rustdoc build (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items`) on the Linux leg, plus the `commit-lint` jobs that validate every commit message against the Conventional Commits profile (`docs/engineering/commit-conventions.md`). A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate.
 
 ## State Persistence
 
@@ -77,8 +85,8 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 ## Important Gotchas
 
-- **msrv**: `rust-version = "1.95"` in every crate manifest (edition 2024), and no job enforces it. CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) and is bumped deliberately, so a Rust release cannot make CI fail on its own.
-- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would capture icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). The pin and its rationale live once in the root `Cargo.toml` under `[workspace.dependencies]`; all three widgetry crates inherit it.
+- **msrv**: `rust-version = "1.97"` in every crate manifest (edition 2024), and no job enforces it. The floor is the nsh framework's, whose crates declare 1.97. The same string lives in `clippy.toml`, `docs/engineering/development-setup.md`, `CONTRIBUTING.md` and the `ci.yml` MSRV comment, and all six declarations move together. CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) and is bumped deliberately, so a Rust release cannot make CI fail on its own.
+- **egui pinned to 0.35**: egui 0.36 regressed headless texture rendering — kittest golden snapshots lose all user-loaded textures (`ctx.load_texture` + painter/image widgets paint nothing; text/shapes still render). The app itself renders fine windowed, but goldens would capture icon-less UI. Revisit when upgrading past 0.35 (check upstream fix status first). The pin and its rationale live once in the root `Cargo.toml` under `[workspace.dependencies]`; all three widgetry crates inherit it. `riff-gui-nsh` names no egui crate; the pin and the three egui crates go together at N15.
 - **Release profile**: workspace-level LTO, codegen-units=1, strip=true. Profiles and the release process live in `docs/engineering/release-and-packaging.md`.
 - **Audio device**: The output stream always opens at the **device default** sample rate. `build_stream_config` (in `riff-infra`'s `audio_output.rs`) takes the track's requested rate as `_requested_rate` and never reads it, so the "falls back when the track's rate is unsupported" behaviour (common on Windows WASAPI shared mode at 48 kHz) is really "always the default" — the requested rate is not consulted. The rate achieved is readable only as a concrete `pub fn CpalAudioOutput::effective_sample_rate`, which **no production code calls**; it is *not* a method on the `AudioOutput` port, so the Audio Engine cannot see it through its interface. Wiring the fact through the port belongs in the same change as the consumer that reads it, never on its own.
 - **Session state is two structs**: `PlaybackSession` (`riff-playback`) and `LibrarySession` (`riff-backend`), each behind its own `Arc<Mutex<>>`. Plan lock ordering carefully; never hold one session's lock while acquiring the other's. The one cross-slice interaction (a playback failure setting a scan-status message) is a typed notice through the event inbox, not a state write.
@@ -88,7 +96,7 @@ cargo build --release -p riff-gui          # release build (LTO, stripped)
 
 ## Config Files
 
-`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and `[workspace.lints.rustdoc]` (`private_intra_doc_links` allowed), inherited by every crate via `[lints] workspace = true`. CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature statuses live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
+`clippy.toml` configures Clippy (msrv, tool-level options). Lint levels are set in the root `Cargo.toml` under `[workspace.lints.clippy]` (pedantic with selected allowances) and `[workspace.lints.rustdoc]` (`private_intra_doc_links` allowed), inherited by every crate via `[lints] workspace = true`. The nsh frontend's app metadata lives in `crates/riff-gui-nsh/nsh.json`, and its `nsh_base` theme file in `crates/riff-gui-nsh/theme.json` (ADR 0022). CI config is `.github/workflows/ci.yml`; no `rustfmt.toml` (defaults apply). Architecture rules live in `docs/technical/architecture.md`. Feature statuses live in `docs/product/features.md`. The full documentation index is in `docs/README.md`.
 
 ## Domain docs
 

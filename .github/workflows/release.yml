@@ -333,36 +333,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # eframe 0.35 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
-      # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
-      # non-Linux targets, so libgtk-3-dev is intentionally NOT required here.
-      # mesa-vulkan-drivers provides the lavapipe software Vulkan adapter that
-      # egui_kittest's wgpu renderer needs to run golden-image tests headless.
-      #
-      # Copied verbatim from ci.yml so the two lists cannot drift. It is a
-      # superset of what `cargo build --release -p riff-gui` alone needs on
-      # Linux (mesa-vulkan-drivers is for kittest's headless renderer, not for
-      # running riff); the same list is kept so a change to either is a visible
-      # edit in both files.
+      # The one Linux apt list lives in the shared composite action ci.yml also
+      # calls, so the two cannot drift. Until N16 the list is a SUPERSET of what
+      # this leg builds: `cargo build --release -p riff-gui` needs only the egui
+      # stack's headers, while the action also carries the nsh platform additions.
+      # This leg stays on ubuntu-22.04 (jammy), whose GTK 4.6 is below nsh's stated
+      # GTK 4.14 floor. N16 moves the runner after verifying the glibc claim, and
+      # only then does this leg build the nsh binary.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update && sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libudev-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxi-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libwayland-dev \
-            libssl-dev \
-            mesa-vulkan-drivers
+        uses: ./.github/actions/linux-deps
 
       # Successor to the archived actions-rs/toolchain, pinned to the same SHA
       # and the same toolchain version as ci.yml. No `components:` here: rustfmt

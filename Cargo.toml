@@ -14,12 +14,17 @@
 #   * `riff-gui`         — frontend (egui UI, tray, native dialogs) + the `riff`
 #                          binary entry point (a thin composition over
 #                          `riff_backend::composition::AppRuntime::spawn`)
+#   * `riff-gui-nsh`     — second frontend (nsh UI) + the `riff-nsh` binary.
+#                          A scaffold at N1: no backend edge, no store read.
+#                          Ships beside `riff` until parity, then the three
+#                          egui crates are deleted (ADR 0022)
 #   * `tests`            — the workspace-root integration-test crate (package
 #                          `riff-tests`); per-crate adapter tests live in
 #                          `riff-infra/tests/`
 #
 # Build / run from here:
 #   cargo run -p riff-gui
+#   cargo run -p riff-gui-nsh
 #   cargo test --all-targets
 #   cargo build --release -p riff-gui
 
@@ -33,8 +38,18 @@ members = [
     "crates/riff-gui-theme",
     "crates/riff-gui-components",
     "crates/riff-gui",
+    "crates/riff-gui-nsh",
     "tests",
 ]
+# Resolver 2, deliberately, though every member is edition 2024 and the nsh
+# plan asked for 3. Resolver 3 adds MSRV-aware resolution, which can select
+# older-than-newest versions for crates whose newest needs a higher MSRV.
+# That re-resolves the EXISTING members too, and the egui golden baselines
+# are byte-exact for one patch level of egui/eframe/egui_kittest and the
+# wgpu/naga pair they rasterise through. Resolver 3 is not needed to build
+# nsh: resolver 2 already does per-target feature unification, which is the
+# only resolver behaviour the nsh graph relies on. Revisit only with a
+# measured lock diff and a green golden suite, never as a scaffold default.
 resolver = "2"
 
 # Single source of truth for the version, edition, MSRV and the identity fields
@@ -43,7 +58,11 @@ resolver = "2"
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.95"
+# 1.97, not 1.95: nsh-core, nsh-base, nsh-engine, nsh-macros and
+# nsh-platform-windows all declare `rust-version = "1.97"` in their own
+# manifests. The floor is the framework's, so it is the workspace's.
+# clippy.toml carries the same string and changes in the same commit.
+rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["strawberry-choco"]
 repository = "https://github.com/strawberry-choco/riff"
@@ -62,6 +81,41 @@ documentation = "https://github.com/strawberry-choco/riff/tree/master/docs"
 # Revisit only after checking the upstream fix status; do not bump the pin
 # to "catch up" and re-baseline the snapshots to make the diff go away.
 egui = "0.35"
+
+# The nsh UI stack, pinned exactly and aligned as one set. All seven publish
+# 0.6.1 and it is the newest non-yanked version of each (P0 memo, Version
+# alignment). The plan's block pinned nsh-core at "=0.6.0" against six at
+# 0.6.1; that set is misaligned and 0.6.1 supersedes it.
+#
+# An entry here binds only when a member inherits it. nsh-engine is inherited
+# by riff-gui-nsh at N1 for exactly that reason: the platform crates require
+# it on a caret range, so without a member consuming the exact pin the
+# resolver could take a later 0.6.x and misalign the set.
+#
+# default-features = false on nsh-base and nsh-engine is load-bearing, not
+# decoration. nsh-base's default is editor, highlight, plot, rich-editor,
+# term; nsh-engine's default is js, which pulls QuickJS through nsh-js.
+# Feature unification is a union across the workspace, so inheriting either
+# with defaults on re-enables what the platform feature lists below turn
+# off. The generated template's "minimal" lock still carries syntect and
+# two-face for exactly this reason.
+#
+# The platform feature list is IDENTICAL on all three OSes: shader for the
+# GPU path (wgpu, naga and pollster are already locked at these versions for
+# egui_kittest, so keeping it adds no package), svg for the Lucide icons N2
+# ports. A wrong svg drop is a compile_error from nsh-core's __require_svg!,
+# not a silent blank icon. Everything the generated template enables beyond
+# these two is a component riff never renders or a network stack an
+# offline-first player must not carry.
+#
+# The crates.io crate named `nsh` is an unrelated shell project. Never add it.
+nsh-core = "=0.6.1"
+nsh-base = { version = "=0.6.1", default-features = false }
+nsh-engine = { version = "=0.6.1", default-features = false }
+nsh-testing = "=0.6.1"
+nsh-platform-windows = { version = "=0.6.1", default-features = false, features = ["shader", "svg"] }
+nsh-platform-linux = { version = "=0.6.1", default-features = false, features = ["shader", "svg"] }
+nsh-platform-macos = { version = "=0.6.1", default-features = false, features = ["shader", "svg"] }
 
 # Workspace-level profiles and lints apply to every member.
 [profile.release]

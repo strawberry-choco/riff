@@ -10,31 +10,34 @@ Be decent to each other. riff follows the [Contributor Covenant](https://www.con
 
 ## Prerequisites
 
-- **Rust stable**, installed via [rustup](https://rustup.rs/), which brings `cargo`, `rustfmt`, and `clippy` with it. Every crate manifest declares `rust-version = "1.95"` and edition 2024, so you want a toolchain at or above that; CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) rather than tracking `stable`. The MSRV is informational — no CI job enforces it, so an older compiler may happen to work but is not supported.
-- **A C toolchain**, and on Linux the system libraries below. The pure-Rust crates build with no native dependencies at all; `riff-infra` (bundled SQLite, ALSA) and `riff-gui` (wgpu, winit) are the ones that need them.
+- **Rust stable**, installed via [rustup](https://rustup.rs/), which brings `cargo`, `rustfmt`, and `clippy` with it. Every crate manifest declares `rust-version = "1.97"` and edition 2024, so you want a toolchain at or above that; CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) rather than tracking `stable`. The MSRV is informational — no CI job enforces it, so an older compiler may happen to work but is not supported.
+- **A C toolchain**, and on Linux the system libraries below. The pure-Rust crates build with no native dependencies at all; `riff-infra` (bundled SQLite, ALSA), `riff-gui` (wgpu, winit) and `riff-gui-nsh` (GTK 4) are the ones that need them.
 
-On Linux, install the development headers. This is the exact list CI installs on its Linux runners, which is also the full list for any Debian/Ubuntu derivative:
+On Linux, install the development headers. This is the exact list CI installs on its Linux runners, which is also the full list for any Debian/Ubuntu derivative. The list has one home, [`.github/actions/linux-deps/action.yml`](.github/actions/linux-deps/action.yml), which both workflows call; `tests/repo_invariant_tests.rs` fails if the copy below drifts from it.
 
 ```bash
 sudo apt-get install pkg-config libasound2-dev libudev-dev \
   libx11-dev libxcursor-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
   libxcb-xfixes0-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev \
-  libwayland-dev libssl-dev mesa-vulkan-drivers
+  libwayland-dev libssl-dev mesa-vulkan-drivers \
+  libgtk-4-dev clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
-The families involved: ALSA development headers for `cpal`, X11/xcb and Wayland development headers for `winit`, plus `libxkbcommon-x11-dev` and `pkg-config`. `libudev-dev` covers cpal's device handling, and `mesa-vulkan-drivers` provides the software Vulkan adapter that renders the headless golden-image tests. **`libgtk-3-dev` is intentionally not needed** — the tray icon and native dialog stack (`tray-icon`, `muda`, `rfd`) are gated to non-Linux targets, and the Linux folder picker is a text input.
+The families involved: ALSA development headers for `cpal`, X11/xcb and Wayland development headers for `winit`, plus `libxkbcommon-x11-dev` and `pkg-config`. `libudev-dev` covers cpal's device handling, and `mesa-vulkan-drivers` provides the software Vulkan adapter that renders the headless golden-image tests. **`libgtk-3-dev` is intentionally not needed** — the tray icon and native dialog stack (`tray-icon`, `muda`, `rfd`) are gated to non-Linux targets, and the Linux folder picker is a text input. **`libgtk-4-dev` is needed** from N1 on, because `nsh-platform-linux` builds the second frontend against GTK 4. `clang` and the two GStreamer packages are a deliberate superset: `nsh-platform-linux`'s build script has not been read, so the first Linux CI run is what measures whether they are consumed. WebKitGTK is absent because the nsh `webview` feature is off.
 
-There are no feature flags, no code-generation step, and no migrations to run by hand.
+The egui crates have no feature flags, no code-generation step, and no migrations to run by hand. The one feature exception is the nsh frontend: `riff-gui-nsh` declares `default-features = false` and selects the `shader` and `svg` features on each `nsh-platform-*` crate, so the platform choice is a feature selection rather than a plain target dependency.
 
 ## Build and verify
 
 ```bash
 cargo run -p riff-gui                      # run in dev mode
+cargo run -p riff-gui-nsh                  # run the nsh frontend (second binary, N1 scaffold)
 cargo build --release -p riff-gui          # release build (LTO, stripped)
 cargo fmt                                  # format
 cargo check --all-targets                  # type/borrow checking across all targets
 cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
 cargo test --all-targets                   # run all unit and integration tests
+cargo test -p riff-gui-nsh                 # run the nsh frontend's scaffold tests
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items  # build docs, rustdoc warnings are errors
 ```
 

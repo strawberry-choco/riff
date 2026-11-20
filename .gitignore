@@ -16,6 +16,8 @@ target/
 
 .omo
 .scratch
+# The nsh CLI's generated runner workspace and package output (nsh run / nsh package).
+.nsh/
 # Local design-tool scratch: generated sample audio, mockup exports, session
 # notes. Must never be committed — it holds copyrighted audio files and notes
 # containing the author's home directory paths.

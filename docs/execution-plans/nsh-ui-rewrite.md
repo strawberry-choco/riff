@@ -17,14 +17,14 @@ The program is operator reviewed. Nothing merges on an agent's own verdict.
 
 Root `Cargo.toml`.
 - Add `"crates/riff-gui-nsh"` to `members`.
-- Set `rust-version = "1.97"` in `[workspace.package]`.
-- Set `resolver = "3"`.
+- Set `rust-version = "1.97"` in `[workspace.package]`. The same string lives in five other declarations: `clippy.toml`, `AGENTS.md`, `docs/engineering/development-setup.md`, `CONTRIBUTING.md`, and the MSRV comment in `ci.yml`. All six move together.
+- Keep `resolver = "2"`. Resolver 3's MSRV-aware resolution can select older-than-newest versions and re-resolve the existing members' lock entries. The egui golden baselines are byte-exact for one patch level, so lock churn is a golden-test risk. Resolver 2 already does the per-target feature unification nsh relies on.
 - Add the pinned `nsh-*` entries to `[workspace.dependencies]`.
 
-Exact pins. P0 records the aligned patch set first, because crates.io already carries `nsh-core` 0.6.0 and `nsh-base` 0.6.1.
+Exact pins. All seven framework crates pin at `=0.6.1`, the aligned set the P0 memo records. The earlier block pinned `nsh-core` at `=0.6.0` against six at `0.6.1`; that set is misaligned and 0.6.1 supersedes it.
 ```toml
 [workspace.dependencies]
-nsh-core = "=0.6.0"
+nsh-core = "=0.6.1"
 nsh-base = "=0.6.1"
 nsh-engine = "=0.6.1"
 nsh-testing = "=0.6.1"
@@ -33,32 +33,33 @@ nsh-platform-linux = "=0.6.1"
 nsh-platform-macos = "=0.6.1"
 ```
 
-Two traps from the research.
+Three traps from the research.
 - The crates.io crate named `nsh` is an unrelated shell project. Never add it. The framework's libraries are `nsh-core`, `nsh-base`, `nsh-engine`, `nsh-testing` and `nsh-platform-*`.
-- The `nsh` command comes from the installer, not from cargo. CI pins it with `NSH_VERSION`.
+- The `nsh` command comes from the installer, not from cargo. CI pins it with `NSH_VERSION` from N16.
+- `nsh-base` and `nsh-engine` carry `default-features = false` in the root workspace block. `nsh-base`'s default is `editor, highlight, plot, rich-editor, term`; `nsh-engine`'s default is `js`, which pulls QuickJS through `nsh-js`. Feature unification is a workspace-wide union, so a bare inherit of a defaults-on entry re-adds what the platform feature lists trim.
 
 `crates/riff-gui-nsh/Cargo.toml`.
 - Inherit the workspace fields.
 - Declare `[[bin]] name = "riff-nsh"`.
-- Depend on `riff-backend`, `nsh-core`, `nsh-base`.
+- Depend on `nsh-core`, `nsh-base` and `nsh-engine` at N1. `nsh-engine` is inherited so its exact pin binds: the platform crates require it on a caret range. The `riff-backend` edge arrives at N3 with the first `use riff_backend::`.
 - Target-gate `nsh-platform-windows`, `nsh-platform-linux` and `nsh-platform-macos`.
 - Do not depend on `riff-gui-theme`. The theme is ported, not shared.
 
 `.github/workflows/ci.yml`.
-- Add `libgtk-4-dev clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev` to the Linux apt list.
-- Add an `Install nsh` step with `NSH_VERSION` pinned and `~/.nsh` cached.
-- Add `cargo build --locked -p riff-gui-nsh` and `cargo test --locked -p riff-tests nsh_`.
+- Replace the inline Linux apt list with the shared composite action `.github/actions/linux-deps/action.yml`. It adds `libgtk-4-dev`, `clang`, `libgstreamer1.0-dev` and `libgstreamer-plugins-base1.0-dev` to the existing 15 packages. `clang` stays, with its consumer unverified: `nsh-platform-linux`'s build script is unread, and the first Linux CI run is the measurement.
+- No `Install nsh` step at N1. The CLI's first consumer is N16, which adds the pinned install and the `~/.nsh` cache.
+- Add a link step, `cargo build --locked --workspace --bins`, because clippy and test do not link a shipped executable. The step is debug and does not exercise the release-only subsystem attribute. The `nsh_` test filter moves to N3, paired with the `tests/mod.rs` registration; before that it passes vacuously (`autotests = false`).
 - Keep every current step until N15, because `riff` still ships.
 
-`.github/workflows/release.yml`, edited at N16.
-- Move the Linux leg from `ubuntu-22.04` to `ubuntu-24.04`, because the nsh Linux runtime needs glibc 2.39.
-- Add the same Linux packages and the pinned `nsh` install.
-- Replace `cargo build -p riff-gui` and the three hand-rolled packaging steps with the shape P0 proves. The likely shape is `nsh package --target <slug>` plus an archive of `.nsh/out/riff/`.
+`.github/workflows/release.yml`, apt step at N1, the rest at N16.
+- At N1 the apt step becomes the same shared action. The list is a superset for this leg until N16. Jammy ships GTK 4.6, below nsh's stated GTK 4.14 floor; the leg still builds only `riff`, which needs no GTK 4.
+- At N16, move the Linux leg from `ubuntu-22.04` to `ubuntu-24.04` only after verifying the glibc claim (see Risks), and add the pinned `nsh` install.
+- At N16, replace `cargo build -p riff-gui` and the three hand-rolled packaging steps with the shape P0 proves. The likely shape is `nsh package --target <slug>` plus an archive of `.nsh/out/riff/`.
 
 Docs.
 - New ADR `docs/adr/0022-nsh-ui-stack-replaces-egui.md`.
-- Amend `docs/adr/0004-dual-theme-tokens.md` for the coexistence window.
-- Update `AGENTS.md`, `README.md`, `docs/README.md`, `docs/technical/architecture.md`, `docs/engineering/development-setup.md`, `docs/engineering/testing-strategy.md` and `docs/engineering/release-and-packaging.md`.
+- Amend `docs/adr/0004-dual-theme-tokens.md` twice: N1 appends the coexistence-window amendment, N2 appends the store-naming one.
+- Update `AGENTS.md`, `README.md`, `docs/README.md`, `docs/technical/architecture.md`, `docs/engineering/development-setup.md`, `docs/engineering/testing-strategy.md`, `docs/engineering/release-and-packaging.md` and `CONTRIBUTING.md`. Edit `clippy.toml` (MSRV), `.gitignore` (`.nsh/`) and `.github/workflows/release.yml` (apt step). Add `.github/actions/linux-deps/action.yml`, `tests/repo_invariant_tests.rs` and its `tests/mod.rs` registration.
 - Retire `docs/engineering/golden-image-testing.md` at N16.
 
 ### New crate tree
@@ -159,14 +160,15 @@ crates/riff-gui-nsh/
   "appearance": "system"
 }
 ```
-- `version` and `build` mirror the workspace version and bump per release.
-- The icon is a new 1024x1024 PNG exported once from the existing brand mark.
+- `version` and `build` mirror the workspace version. The scaffold test `nsh_json_agrees_with_the_bootstrap` fails on drift, so the mirror is checked, not hand-synced.
+- The icon already exists at N1: `assets/brand/riff-1024.png`, extracted from the 1024x1024 chunk of the existing `riff.icns` by `docs/execution-plans/evidence/nsh/n1/tools/extract_brand_png.py`. Keep it; do not overwrite.
+- `theme` names `theme.json`, which exists at N1 as identity plus empty cssVars maps. N2 fills the maps.
 
 `src/main.rs`.
-- Copy the file `nsh init --template rust` generates.
+- Copy the file `nsh init --template rust` generates, with deliberate changes: the release-only `windows_subsystem` attribute, `tracing_subscriber::fmt::init()` instead of `env_logger`, identity from the `lib.rs` constants, and the `Root::tokens` theme wiring.
 - Point the root at `riff_gui_nsh::App` through `Root::of::<App>()`.
-- Set `AppOptions` with `app_id`, `cache`, `login_item: false` and `fps` gated on `NSH_FPS`.
-- `cache` points the nsh image cache at the same data-local directory riff already uses.
+- Set `AppOptions` with `app_id`, an explicit `size: (1200, 800)` and `fps` gated on `NSH_FPS`. `login_item` already defaults to false. `cache` waits for N6 and `icon` for N16; `data_dir` stays default.
+- N6 points `cache` at the same data-local directory riff already uses. N4 replaces the explicit size with persisted geometry.
 
 `src/lib.rs`.
 - Root `#[component] pub fn App()`.
@@ -298,7 +300,7 @@ nsh package --target linux
 nsh package --target macos
 ```
 
-CI install.
+CI install (N16).
 ```bash
 export NSH_VERSION=v0.6.1
 curl -fsSL https://nsh.dev/install.sh | sh
@@ -369,19 +371,19 @@ Gate. Every item has an answer and a number. A red on tray, chrome or packaging 
 Depends on P0.
 
 Files.
-- Create `crates/riff-gui-nsh/{Cargo.toml,nsh.json,theme.json,assets/brand/riff-1024.png,src/lib.rs,src/main.rs}`.
-- Edit the root `Cargo.toml` for the member, the MSRV, resolver 3 and the pins.
-- Edit `.github/workflows/ci.yml` for the Linux packages and the nsh install.
+- Create `crates/riff-gui-nsh/{Cargo.toml,nsh.json,theme.json,assets/brand/riff-1024.png,src/lib.rs,src/app.rs,src/main.rs,tests/scaffold_tests.rs}`. The PNG already exists; keep it.
+- Edit the root `Cargo.toml` for the member, the MSRV and the pins. Resolver 2 stays.
+- Edit `.github/workflows/ci.yml` for the shared Linux-deps action and the link step. No nsh install at N1.
 - Add `docs/adr/0022-nsh-ui-stack-replaces-egui.md`.
 - Edit `AGENTS.md` and `docs/technical/architecture.md`.
 
 Build.
-- Root `App` renders a single token-styled `view()` with the riff name and a version line.
+- Root `App` renders a single `view()` with the riff name and a version line, styled with nsh's named scale steps and default tokens read through `theme()`. No riff design literal; the palette port is N2.
 - `cargo run -p riff-gui-nsh` opens a window on Windows and Linux.
 - Both binaries build in CI.
 
 Evidence.
-- CI run link, `n1-window.png`, and the `nsh --version` line in the log.
+- CI run link, `n1-window.png`, `lock-diff.txt` and `feature-tree-diff.txt`, the Windows release build log, and the four scaffold tests passing. No `nsh --version` line; the CLI is not installed at N1.
 
 ### N2 Theme port
 
@@ -390,8 +392,8 @@ Depends on N1.
 Files.
 - Create `src/theme/{palette,tokens,fonts,icons}.rs` and `src/screens/dev_tokens.rs`.
 - Copy the four Inter files and the 35 SVGs into `assets/`.
-- Write `theme.json` for `nsh_base` defaults.
-- Amend `docs/adr/0004-dual-theme-tokens.md`.
+- Fill `theme.json`'s cssVars maps for `nsh_base` defaults.
+- Append the store-naming amendment to `docs/adr/0004-dual-theme-tokens.md`, naming the `Signal<Palette>` store.
 
 Build.
 - Define `Palette` with the 17 color fields and the four color variants. Dark, light, high contrast dark and high contrast light. Reduce motion is a separate flag, not a color.
@@ -698,14 +700,14 @@ Done when.
 ## Risks
 
 - **Framework maturity.** P0 numbers and the exact pin are the controls. Upgrade PRs run the full suite.
-- **Tray gap.** nsh's desktop docs list no tray API. Default is to ship without a tray and restore it later. The operator must accept this before N1 if P0 cannot make it work.
-- **Platform floors.** Windows 10 1809, macOS 14 and GTK 4.14. Document them and decide whether pre-floor systems are out of scope.
+- **Tray close-to-hide.** nsh has a native tray API (`set_tray`), so the no-tray default is gone (P0 correction 7). The real gate is N14: close-to-hide needs explicit configuration, and the tray `on_click` handler is unverified (P0 correction 23).
+- **Platform floors.** Windows 10 1809, macOS 14 and GTK 4.14. The Linux backend is GTK 4, not GPUI; GPUI is a separate opt-in target (P0 correction 8). The CI Linux leg already runs ubuntu-24.04, which ships GTK 4.14. Document the floors and decide whether pre-floor systems are out of scope.
 - **Runtime theme model.** The `Signal<Palette>` path avoids dependence on an nsh theme API. P0 still verifies the base components restyle.
 - **Windowed reads in a recycled list.** P0 verifies the exact pattern. Fallback is a bounded prefetch window driven by viewability callbacks.
 - **Test loss.** 457 UI test functions and 87 golden baselines die with egui. The replacement is a smaller behavior suite plus perf fixtures.
 - **Two stacks drift.** Feature freeze and backend changes land in the nsh bridge first.
 - **Packaging shape.** The current release ships a bare executable, a tar.gz and a dmg. nsh writes a directory with an assets folder. P0 records the new shape and N16 rewrites the workflow and notes.
-- **Linux runner version.** nsh needs glibc 2.39, so the release runner moves from Ubuntu 22.04 to 24.04.
+- **Linux runner version.** The glibc 2.39 claim is unconfirmed by the nsh docs. Verify it before N16 moves the release runner from Ubuntu 22.04 to 24.04.
 - **Build weight and binary size.** P0 measures both.
 - **macOS coverage.** CI build plus one operator run before cutover.
 

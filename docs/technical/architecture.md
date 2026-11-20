@@ -1,8 +1,8 @@
 # Architecture
 
-riff is a lightweight, offline-first desktop music player written in Rust on top of the egui immediate-mode UI framework. It is a Cargo **workspace** with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations. The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
+riff is a lightweight, offline-first desktop music player written in Rust. The shipping frontend renders through the egui immediate-mode UI framework. A second frontend on the nsh UI stack ships beside it as the `riff-nsh` binary until feature parity, and then the three egui crates are deleted (ADR 0022). It is a Cargo **workspace** with no code-generation step and no plugin system; persistence runs through ordered, checksummed SQLite migrations. The architecture is a **vertical capability split**: the headless backend is divided into crates by capability with a strict, compiler-enforced dependency chain, infrastructure adapters that wrap external crates sit in one dedicated crate at the edge, and a single composition root wires everything together at startup.
 
-This document is the reference for how the workspace is organized, how the crates are allowed to depend on one another, and what belongs where. For the runtime view of the system see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md); for the concrete types that flow between layers see [./data-model.md](./data-model.md). The split decision and its rationale are recorded in [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md).
+This document is the reference for how the workspace is organized, how the crates are allowed to depend on one another, and what belongs where. For the runtime view of the system see [./threading-model.md](./threading-model.md) and [./data-flow.md](./data-flow.md); for the concrete types that flow between layers see [./data-model.md](./data-model.md). The split decision and its rationale are recorded in [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md). The nsh rewrite decision is recorded in [ADR 0022](../adr/0022-nsh-ui-stack-replaces-egui.md).
 
 ## Overview
 
@@ -18,7 +18,8 @@ The workspace members:
 | `riff-gui-theme` | Design system | The design authority: the token and palette store, the vendored fonts, the icon set, and the assets those are compiled from. No `riff-*` dependency at all — `egui`, `resvg` and `tracing`, nothing else. |
 | `riff-gui-components` | Component library | The presentation primitives: props in, a response or a typed intent out. No `riff-*` dependency at all — `riff-gui-theme` and `egui`, nothing else. |
 | `riff-gui` | Frontend | egui UI, tray icon, native dialogs, and the `riff` binary entry point — a thin composition over `riff-backend`, rendering through the two widgetry crates. |
-| `tests` | Integration tests | The single workspace-root integration-test crate (cross-crate integration, UI, and golden-image suites). |
+| `riff-gui-nsh` | Second frontend (nsh) | The nsh UI set and the `riff-nsh` binary entry point. A scaffold at N1: no store read, no `riff-*` dependency, no egui crate and no `riff-gui-*` crate. The theme is ported, not shared. |
+| `riff-tests` (directory `tests/`) | Integration tests | The single workspace-root integration-test crate (cross-crate integration, UI, and golden-image suites). |
 
 ### Dependency chain
 
@@ -39,9 +40,15 @@ riff-gui (frontend, `riff` binary)
              | depends on
              v
           riff-gui-theme (design system)
+
+riff-gui-nsh (second frontend, `riff-nsh` binary)
+    | depends on
+    +--> nsh-core / nsh-base / nsh-engine
+    +--> one nsh-platform-* crate per desktop OS
+    +--> riff-backend from N3 (no riff-* edge at N1)
 ```
 
-`riff-gui-theme` and `riff-gui-components` are written to point at nothing else in the workspace: neither has an edge to `riff-backend`, to a slice, or to `riff-infra` (ADR 0018).
+`riff-gui-theme` and `riff-gui-components` are written to point at nothing else in the workspace: neither has an edge to `riff-backend`, to a slice, or to `riff-infra` (ADR 0018). `riff-gui-nsh` points at no egui crate and no `riff-gui-*` crate: the theme is ported, not shared (ADR 0022).
 
 Read precisely, the edges are:
 
@@ -52,7 +59,8 @@ Read precisely, the edges are:
 - `riff-gui-theme` depends on **nothing in the workspace** — `egui`, `resvg` and `tracing`, and the assets it compiles in. It is the design authority and no business crate may reach it, or it, them.
 - `riff-gui-components` depends on `riff-gui-theme` and `egui`, and on nothing else in the workspace. A primitive's props are its own types; it names no business type at all.
 - `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform dependencies: `egui`/`eframe`, `tray-icon`/`muda`/`rfd` on non-Linux). It carries no adapter dependencies; the icon rasterizer it used to name moved down into `riff-gui-theme`.
-- `tests` depends on every crate by name (per-crate imports) so each suite reaches the type it needs directly.
+- `riff-gui-nsh` depends on `nsh-core`, `nsh-base` and `nsh-engine`, plus one `nsh-platform-*` crate per desktop OS. It names no egui crate and no `riff-gui-*` crate. The only `riff-*` edge it may ever name is `riff-backend`, and it names none until N3 adds it with the first `use riff_backend::`.
+- `riff-tests` (directory `tests/`) depends on the backend crates and the three egui crates by name (per-crate imports) so each suite reaches the type it needs directly. It does not name `riff-gui-nsh` at N1; the scaffold's tests live in that crate, and the bridge tests arrive at N3.
 
 The arrows point inward in the inversion-of-control sense: slices define ports and code against `Box<dyn Port>`; `riff-infra` depends on the slices and implements their traits; runtime control flows slices → adapters while the dependency arrow points adapters → slices.
 
@@ -114,9 +122,15 @@ It owns the reusable presentation and interaction widgets that views compose fro
 
 It owns the feature composites (`app.rs`, `app/`, `browser`, `chrome`, `detail`, `playerbar`, `sidebar`, `settings`, `selection`, `now_playing`, `frame`, and the presentation owners that name application types: `artwork`, `cover_cache`, `column`, `scroll_memory`), the host adapters (`tray`, `window_visibility`, `traffic_lights`, and the `impl RiffApp` blocks), and the `riff` binary — a thin composition over `riff_backend::composition::AppRuntime::spawn` that opens the store at its default location and hands the returned `AppRuntime` handles to the UI and tray. It depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme`. The cover-texture LRU lives here because it is at once an egui-specific concern (`egui::TextureHandle`) and a store-facing one.
 
+### `riff-gui-nsh` — the second frontend
+
+**Membership criterion**: rendering, input, and platform integration on the nsh UI stack.
+
+It owns the `riff-nsh` binary and the nsh UI set that binary mounts. At N1 it is a scaffold: `src/app.rs` holds the root `App` component, re-exported from `lib.rs`; `lib.rs` holds the identity constants, the `theme_tokens()` reader and the one `#[native_module]` that registers `App` and the brand asset; `main.rs` is the platform bootstrap. It reads no store and names no `riff-*` crate. N2 ports the palette, tokens, fonts and icons into `src/theme/`. N3 adds the `riff-backend` edge and the bridge that owns `AppRuntime`. N4 and the later units build the shell and the screens. The crate names no egui crate and no `riff-gui-*` crate — the theme is ported, not shared — and a scaffold test fails the build if its manifest gains an egui token, a `riff-*` token other than `riff-backend`, or a `[profile.*]` table. During the coexistence window new feature work lands here first, and the egui frontend takes bug fixes only (ADR 0022).
+
 ### Inside the frontend: the widgetry crates, and the two tiers that remain
 
-The shared widgetry is **two crates below the frontend, not a layer inside it** (ADR 0018): `riff-gui-theme` holds the design authority and `riff-gui-components` the presentation primitives, and neither can name a `riff-*` crate. New UI work starts by asking which of three homes it belongs to:
+The shared widgetry is **two crates below the frontend, not a layer inside it** (ADR 0018): `riff-gui-theme` holds the design authority and `riff-gui-components` the presentation primitives, and neither can name a `riff-*` crate. New egui UI work starts by asking which of three homes it belongs to:
 
 - **`riff-gui-theme`** — a design value, or the asset it is compiled from: a token, a palette, a font, a glyph, a geometry constant, a helper that derives one. Names may be riff-flavoured (`geometry::playerbar`, `geometry::seek`) because naming a surface is not knowing anything about it, and the store still makes no decision.
 - **`riff-gui-components`** — a presentation primitive on the props-in / intents-out contract, whose vocabulary is its own. If a widget has to know what a `TrackSort` or a `NoticeSeverity` *is*, it is not this crate's, and the mapping lives in the frontend.
@@ -138,7 +152,7 @@ The dispatch entry points follow: `apply_entity_selection`, `entity_track_ids` a
 
 The Tracks Column's Track-menu report is a **separate report type** (`menu::TrackMenuReport`, carried in `detail::DetailReport`'s second variant) rather than a `DetailAction`. That is what makes the detail-action applier's former no-op arm *unnecessary* rather than merely removed: the applier takes a type that cannot carry a menu report, so it needs no arm to discard one.
 
-The theme, fonts, and icons are one design authority in `riff-gui-theme`, and both crates above it read their values from there rather than keeping a second token store — the arrangement this section anticipated, moved together rather than split (ADR 0018).
+The theme, fonts, and icons are one design authority in `riff-gui-theme`, and both crates above it read their values from there rather than keeping a second token store — the arrangement this section anticipated, moved together rather than split (ADR 0018). During the nsh coexistence window this authority serves the egui three. `riff-gui-nsh` reads nsh `Tokens` through `theme()` and, from N2, its own `Signal<Palette>`. `theme.json` restyles `nsh_base` controls only and is never the riff palette's store (ADR 0004's 2026-11-20 amendment).
 
 ## Dependency Rules
 
@@ -151,6 +165,7 @@ The core rule is that **dependencies follow the chain above and nothing bypasses
 - `riff-backend` is the only place that names both a port and its concrete implementation (`composition.rs`). Concrete adapters are not re-exported to the frontend.
 - `riff-gui` depends on `riff-backend`, `riff-gui-components` and `riff-gui-theme` (plus UI/platform crates). It reads the backend's re-exported read-side surface — entities, Session Views, projections, Transport — and never touches an adapter.
 - `riff-gui-theme` and `riff-gui-components` never gain a dependency on a `riff-*` business crate — not `riff-backend`, not a slice, not `riff-infra`. Neither holds a decision, a port, a session or a shared handle, and a widget that has to know what an application type means is a frontend module instead.
+- `riff-gui-nsh` names no egui crate and no `riff-gui-*` crate; the theme is ported, not shared. Its only permitted `riff-*` edge is `riff-backend`, from N3. A scaffold test fails the build on any other `riff-*` token, any egui token, or a `[profile.*]` table in its manifest.
 
 Inside each slice, the historical layering is preserved as module convention: `domain/` (pure types and logic), `app/` (use cases, session state, projections), `infra/` (port traits the adapter crate implements). What the split added is compiler enforcement of the boundaries *between* capabilities.
 
@@ -178,7 +193,7 @@ There is no DI container. `composition.rs` performs manual constructor injection
 
 ### Thread boundaries
 
-- The egui event loop runs on the main thread (an egui/eframe requirement).
+- The egui event loop runs on the main thread (an egui/eframe requirement) in the `riff` binary. The `riff-nsh` binary's UI runs on the engine thread `platform::run_app` spawns; the N1 scaffold starts no backend workers.
 - Audio decoding runs on a dedicated audio engine thread; the Playback Coordinator runs on its own thread.
 - Library scanning, filesystem-watch event processing, tag editing, and cover decoding each run on dedicated worker threads — all spawned by the Composition Root in `riff-backend`, not by the frontend.
 - The cpal callback runs on an OS-owned real-time audio thread.
@@ -203,7 +218,7 @@ Use this checklist when adding or reviewing a component:
 - [ ] **Purity**: `riff-persistence` builds with no dependencies; the slices stay pure Rust. If a change needs a C compiler or platform audio libraries, it belongs in `riff-infra`.
 - [ ] **Thread safety**: shared state between threads is synchronized with `Arc<Mutex<_>>` (one mutex per session — never nested), and cross-thread communication uses channels.
 - [ ] **Error handling**: errors are owned by the crate that raises them; `riff-infra` maps external errors into the owning port's error; the UI shows user-friendly messages.
-- [ ] **No UI in logic**: `egui` code lives only in `riff-gui`, `riff-gui-components` and `riff-gui-theme`, and there is no audio decoding in any of them. Neither widgetry crate names a `riff-*` business crate, and neither holds a decision, a port, a session or a shared handle.
+- [ ] **No UI in logic**: `egui` code lives only in `riff-gui`, `riff-gui-components` and `riff-gui-theme`, and there is no audio decoding in any of them. Neither widgetry crate names a `riff-*` business crate, and neither holds a decision, a port, a session or a shared handle. `riff-gui-nsh` names no egui crate at all.
 - [ ] **Composition root**: only `riff-backend/src/composition.rs` constructs and wires infrastructure; no other file calls `::new()` on a concrete adapter and injects it across a boundary.
 
 ## Anti-Patterns
@@ -211,6 +226,7 @@ Use this checklist when adding or reviewing a component:
 - **Native crates in a slice**: a `Cargo.toml` of `riff-library` or `riff-playback` gains `rusqlite`, `cpal`, `symphonia`, `lofty`, or `image`. Move the code to `riff-infra` behind a port.
 - **A slice imports the other slice**: `riff-library` code touches a `riff-playback` type (or vice versa). Move the shared type down into `riff-persistence`, or move the code into `riff-backend`.
 - **egui outside the frontend**: any crate other than `riff-gui`, `riff-gui-components` and `riff-gui-theme` imports `egui::`. UI concerns belong in the frontend.
+- **egui in the nsh frontend**: `riff-gui-nsh` gains an `egui` or `egui_*` dependency, or a `riff-*` dependency other than `riff-backend`. The two stacks share neither a window nor a theme store, and the scaffold test fails the build.
 - **A business import in a widgetry crate**: `riff-gui-theme` or `riff-gui-components` gains `riff-backend`, `riff-library`, `riff-playback`, `riff-persistence` or `riff-infra` as a dependency. A primitive's props are its own types; what an application type means is the frontend's to translate, at the boundary.
 - **Second composition root**: a file other than `composition.rs` calls `SymphoniaDecoder::new()` (or any concrete adapter constructor) and injects it across a boundary. Route the wiring through the Composition Root.
 - **UI thread blocking**: a `riff-gui` handler performs scanning or image decoding synchronously. Move it to a worker thread and use a channel.
@@ -233,7 +249,7 @@ These are decisions with more than one defensible answer. Surface them explicitl
 - **Infrastructure mapping**: each adapter in `riff-infra` converts its crate's error type into the appropriate owning port's error at the boundary, typically with `map_err`, so external error types never cross above the adapter crate.
 - **Typed notices for playback failures**: the Playback Coordinator sends pre-formatted failure messages over the notice channel; BackendEvents stamps them with playback source and error severity. No slice ever writes into another slice's session state.
 - **UI display**: the frontend matches on results and shows brief, user-facing messages. Technical detail goes to the log, not the screen.
-- **Logging**: the `tracing` crate provides structured logging, initialized in `riff-gui/src/main.rs` via `tracing_subscriber::fmt::init()` with env-filter support. Use ERROR for failures, WARN for recoverable issues (for example, a failed store write or a failed cover decode), INFO for notable state changes, and DEBUG for detailed tracing.
+- **Logging**: the `tracing` crate provides structured logging, initialized in `riff-gui/src/main.rs` via `tracing_subscriber::fmt::init()` with env-filter support. The `riff-nsh` bootstrap initializes the same way, with one `tracing_subscriber::fmt::init()`; its default `tracing-log` feature bridges nsh's `log` records, so a second `LogTracer` install is neither needed nor safe. Use ERROR for failures, WARN for recoverable issues (for example, a failed store write or a failed cover decode), INFO for notable state changes, and DEBUG for detailed tracing.
 - **Lock poisoning**: `MutexExt::lock_or_recover` recovers from a poisoned mutex instead of panicking, so an isolated thread panic does not take down the whole application.
 
 ## See also
@@ -242,3 +258,4 @@ These are decisions with more than one defensible answer. Surface them explicitl
 - [./data-flow.md](./data-flow.md) — step-by-step sequences for playback, scanning, and cover resolution.
 - [./data-model.md](./data-model.md) — the entities, the two session structs, the store ports, and the port traits.
 - [ADR 0009](../adr/0009-vertical-crate-split-of-the-backend.md) — the crate-split decision and its consequences.
+- [ADR 0022](../adr/0022-nsh-ui-stack-replaces-egui.md) — the nsh rewrite decision, the second binary, and the coexistence window.

@@ -2,7 +2,7 @@
 
 This document describes how riff is built for distribution. For the development build workflow, see [development-setup.md](./development-setup.md); for the feature catalog the release ships, see [../product/features.md](../product/features.md).
 
-riff is a Cargo workspace that compiles to a single standalone binary (the `riff` binary in `riff-gui`). It has no feature flags, no runtime plugin system, and no external assets that must ship alongside the executable, which is what makes packaging a matter of building one binary per platform and wrapping it in the thinnest container each platform's users expect. There is no installer and no code signing, and those omissions are deliberate at this stage rather than oversights: they are the same limitations the release notes state to users. Windows ships the bare `riff.exe`; macOS ships a `.dmg` holding a minimal, ad-hoc-signed `.app` bundle with the brand icon.
+riff is a Cargo workspace that compiles to a single standalone binary (the `riff` binary in `riff-gui`). The workspace also builds a second binary, `riff-nsh` in `riff-gui-nsh`, the nsh rewrite's scaffold. The pipeline does not ship it until N16 (ADR 0022). The shipped binary has no feature flags, no runtime plugin system, and no external assets that must ship alongside the executable, which is what makes packaging a matter of building one binary per platform and wrapping it in the thinnest container each platform's users expect. There is no installer and no code signing, and those omissions are deliberate at this stage rather than oversights: they are the same limitations the release notes state to users. Windows ships the bare `riff.exe`; macOS ships a `.dmg` holding a minimal, ad-hoc-signed `.app` bundle with the brand icon.
 
 ## The release pipeline
 
@@ -35,6 +35,8 @@ The two macOS labels are pinned to currently-GA images, and keeping them current
 
 The published names are `riff-<tag>-<slug>.<ext>` where the extension follows the platform — `.dmg` on macOS, `.exe` on Windows, `.tar.gz` on Linux — for example `riff-v0.1.0-linux-x86_64.tar.gz` or `riff-v0.1.0-windows-x86_64.exe`.
 
+The Linux leg's apt list comes from the shared `.github/actions/linux-deps` action, a superset of what `riff` alone needs until N16. Jammy ships GTK 4.6, below the GTK 4.14 floor nsh states for its Linux backend. The leg builds only `riff`, which needs no GTK 4. The runner move to `ubuntu-24.04` waits for N16, and the glibc 2.39 claim behind it is unconfirmed.
+
 **The executable carries its own fonts and icons; the containers carry nothing extra.** The Inter faces are `include_bytes!`-ed and the Lucide icons `include_str!`-ed by `crates/riff-gui-theme/src/fonts.rs` and `crates/riff-gui-theme/src/icons.rs`, so no assets folder is needed. The Linux leg uses `tar -czf` with a member name, which keeps the archive flat at one entry. The Windows leg copies `target/release/riff.exe` into `dist/` under the published name and uploads it directly — GitHub release assets must be single files, and the `.exe` already is one, so there is no zip wrapper; the `.exe` suffix matters, and a Unix path there would package nothing at all.
 
 The macOS leg assembles a minimal `.app` bundle around the binary: `Contents/MacOS/riff`, an `Info.plist` (identifier `io.github.strawberry-choco.riff`, version taken from the tag), and the brand icon `crates/riff-gui/assets/brand/riff.icns`. The bundle is ad-hoc signed (`codesign -s -`), which is what an arm64 Mach-O needs to run at all; it is not identified with Apple, so Gatekeeper still quarantines the download — the release notes carry the instructions. The image is built with `hdiutil create -format UDZO` and holds the app plus an `/Applications` symlink for the drag-to-install gesture. The icon is the packaging copy of the mark the app generates at runtime: `mark_svg()` in `crates/riff-gui/src/ui/chrome.rs` derives four equalizer bars from `WORDMARK_BARS`, and `assets/brand/mark.svg` is the same geometry as a file (source for regenerating the `.icns` via `iconutil`). If the in-app mark changes, regenerate both — the two must not drift.
@@ -61,7 +63,7 @@ The "what changed" part of the release notes is generated in a dedicated `notes`
 
 ## Cutting a release
 
-1. Set the version in the root `Cargo.toml` `[workspace.package]` block. The seven member manifests inherit it and must not be edited.
+1. Set the version in the root `Cargo.toml` `[workspace.package]` block. The ten member manifests inherit it and must not be edited.
 2. Merge to `master` and let CI pass. The release workflow does not re-run the quality gate, so a red `master` will not be caught by tagging it.
 3. Push the tag: `git push origin v<version>`. The `verify` job fails in under a minute if the tag and the workspace version disagree, which is the intended moment to notice a version bump that was forgotten. The `notes` job then renders the release notes' change section from the commit range `v0.1.0..<tag>` with `cliff.toml`; an empty section — no conventional commits in the range — fails the release before the build matrix, because a release with no change entries is a tagging mistake rather than notes to publish.
 4. When the four artifacts are published, add the download badges to `README.md`. This is deliberately **not** automated: the badges are a claim that a real release exists, and a workflow that rewrote the README on a failed run would leave a claim behind with nothing to back it.
@@ -109,8 +111,8 @@ The resulting binary is written to `target/release/` (for example `target/releas
 ### Binary characteristics
 
 - **Single standalone binary.** riff links its dependencies statically into one executable; there is no separate runtime or library to install. The Linux build is the one exception, and it is dynamic against `libasound2` only, which the release notes name.
-- **One workspace, one shipped artifact.** The workspace splits the backend into capability crates, but only `riff-gui` produces a binary (the `riff` package target); the other members are libraries, so there is no multi-artifact assembly.
-- **No feature flags.** Every build includes the same set of capabilities; the only conditional compilation is per-target-OS for system integration (tray icon and native file dialogs on non-Linux platforms).
+- **One workspace, one shipped artifact.** Two members produce binaries: `riff-gui` (the `riff` package target) and `riff-gui-nsh` (the `riff-nsh` scaffold). The pipeline ships only `riff`, and `riff-nsh` is not released until N16, so there is no multi-artifact assembly.
+- **No feature flags on the shipped binary.** Every `riff` build includes the same set of capabilities; the only conditional compilation is per-target-OS for system integration (tray icon and native file dialogs on non-Linux platforms). The nsh platform crates carry a trimmed feature list (`shader` and `svg`), single-sourced in the root manifest, and it never reaches the `riff` build.
 - **No companion assets.** Fonts and icons are compiled into the executable. The one deliberate addition is the macOS app bundle's brand icon (`assets/brand/riff.icns`), which is packaging, not a runtime asset.
 - **Stripped.** Debug symbols are removed, reducing binary size.
 

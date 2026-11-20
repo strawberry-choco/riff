@@ -1,0 +1,11 @@
+{
+  "name": "riff",
+  "id": "io.github.strawberry-choco.riff",
+  "version": "0.2.0",
+  "build": 1,
+  "icon": "assets/brand/riff-1024.png",
+  "rust": ".",
+  "root": "App",
+  "theme": "theme.json",
+  "appearance": "system"
+}

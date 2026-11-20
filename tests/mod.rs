@@ -27,6 +27,7 @@ pub mod domain_tests;
 pub mod golden_tests;
 pub mod integration_tests;
 pub mod readme_screenshots;
+pub mod repo_invariant_tests;
 pub mod ui_tests;
 
 // --- Shared rendering-determinism contract ------------------------------------

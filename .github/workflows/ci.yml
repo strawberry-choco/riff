@@ -25,10 +25,13 @@ jobs:
         # the golden tests rasterise through the runner's Mesa/lavapipe, so an image
         # move can cross a smoke threshold with no code change. `ubuntu-latest`
         # resolves to `ubuntu-24.04` today, which makes this a no-op pin rather than
-        # a migration. Windows deliberately stays on `latest`: that alias now covers
-        # two Windows Server 2025 flavours differing by Visual Studio toolset, and no
-        # public source says which one it carries, so naming a label there would be a
-        # toolchain change dressed up as a pin. Settle that first — and keep this leg
+        # a migration. The image is part of the nsh verdict too: the GTK 4 bindings
+        # need GTK 4.14, which ubuntu-24.04 (noble) ships, so the pin is what keeps
+        # the second binary buildable on this leg. Windows deliberately stays on
+        # `latest`: that alias now covers two Windows Server 2025 flavours differing
+        # by Visual Studio toolset, and no public source says which one it carries,
+        # so naming a label there would be a toolchain change dressed up as a pin.
+        # Settle that first — and keep this leg
         # and `release.yml`'s Windows build leg the same label, or the Windows
         # toolchain CI tests is not the one that ships.
         os: [ubuntu-24.04, windows-latest]
@@ -37,30 +40,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # eframe 0.35 (wgpu + winit x11/wayland + clipboard) and cpal 0.18 (ALSA)
-      # need these headers to COMPILE on Linux. tray-icon/muda/rfd are gated to
-      # non-Linux targets, so libgtk-3-dev is intentionally NOT required here.
-      # mesa-vulkan-drivers provides the lavapipe software Vulkan adapter that
-      # egui_kittest's wgpu renderer needs to run golden-image tests headless.
+      # The one Linux apt list lives in the shared composite action, so this leg
+      # and release.yml's cannot drift. Its comment carries the per-package
+      # rationale, including the nsh platform additions that land at N1.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update && sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libudev-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxi-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libwayland-dev \
-            libssl-dev \
-            mesa-vulkan-drivers
+        uses: ./.github/actions/linux-deps
 
       # Installs the pinned Rust toolchain with rustfmt + clippy, enables cargo
       # caching (Swatinem/rust-cache under the hood) and PR problem-matchers.
@@ -70,7 +55,7 @@ jobs:
       # verdict must be about the change, not about the calendar: `clippy
       # --all-targets -- -D warnings` with the workspace's pedantic lints means a
       # Rust release can redden every branch with no code change (1.99.0 did, via
-      # `assert_is_empty`). `msrv` in the manifests is separate — 1.95, and no job
+      # `assert_is_empty`). `msrv` in the manifests is separate — 1.97, and no job
       # enforces it. Bump deliberately: install the new version locally and get a
       # clean `cargo +<new> clippy --locked --all-targets --keep-going -- -D warnings`
       # first, remembering that a platform's `cfg` arms compile only on it.
@@ -99,6 +84,14 @@ jobs:
       # compare against, must run against the resolved graph the repository carries.
       - name: Test
         run: cargo test --locked --all-targets
+
+      # Clippy type-checks without codegen, and `cargo test` builds the bins in
+      # test mode, so neither links a shipped executable. This step is the one
+      # that does. It is a DEBUG build, so it does NOT exercise the release-only
+      # `windows_subsystem` attribute; a Windows release build is the only
+      # evidence that attribute is well-formed.
+      - name: Link the binaries
+        run: cargo build --locked --workspace --bins
 
       # The rustdoc gate. `cargo test --all-targets` never runs doctests, and
       # there are no runnable ones in the tree anyway — so this step is the doc

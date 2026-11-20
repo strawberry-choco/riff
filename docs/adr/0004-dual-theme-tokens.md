@@ -92,3 +92,22 @@ sweeps in its own `tests/token_sweeps.rs`, scanning its own source, and
 changes what a token is or how the palettes derive; only where the store and
 its guards live.
 
+## Amendment — 2026-11-20 (the coexistence window)
+
+The decision above stands, and the store's address does not move. During the
+nsh rewrite's coexistence window (N1 through N14, ADR 0022) the egui three —
+`riff-gui-theme`, `riff-gui-components` and `riff-gui` — keep
+`crates/riff-gui-theme/src/theme.rs` as both the store and the read source, and
+their three per-crate `tests/token_sweeps.rs` keep enforcing it. What narrows is
+the 2026-10-15 amendment's universal read-source claim: a second frontend now
+draws beside them, and it does not read that store.
+
+- **`riff-gui-nsh` reads nsh `Tokens` through `theme()`.** From N2 it reads its
+  own `Signal<Palette>`; that store does not exist yet, and N2 appends the
+  amendment that names it.
+- **`theme.json` restyles `nsh_base` controls only.** It is never the riff
+  palette's store.
+- **nsh-shaped sweeps arrive at N2.** The egui sweeps' markers cannot fire on an
+  nsh line, so pointing them at the new crate would pass vacuously; the rules
+  are written when the values they judge exist.
+

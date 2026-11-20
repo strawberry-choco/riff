@@ -58,6 +58,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0019: Folder drops are the third Library Path entry point](adr/0019-folder-drop-is-the-third-library-path-entry-point.md) — a folder dropped onto the window joins the picker and the typed path on one acceptance and one fact-set, with the one deliberate divergence (a drop auto-scans because it is an impatient gesture) and no platform conditional added.
 - [ADR 0020: Rule matching lowercases at query time](adr/0020-rule-matching-lowercases-at-query-time.md) — Custom Smart Playlist Rules fold case in the predicate (`lower(column)` against a Rust-lowercased needle) rather than in stored lowercase twins; SQLite's ASCII-only folding is accepted, so non-Latin tags do not fold, and reversing the choice means superseding the ADR rather than editing it.
 - [ADR 0021: Smart playlist rules are collection data](adr/0021-smart-playlist-rules-are-collection-data.md) — a Custom Smart Playlist's Rules are authored on a Settings page but stored as collection data in their own typed tables; the same change widens name uniqueness across both list tables and rewrites the ordinary playlist port's duplicate-name contract.
+- [ADR 0022: The nsh UI stack replaces egui, behind a second binary until parity](adr/0022-nsh-ui-stack-replaces-egui.md) — a presentation-only rewrite ships as `riff-nsh` beside `riff` until feature parity at N15; seven exact pins at 0.6.1, a trimmed platform feature list, resolver 2 kept for the golden baselines, MSRV 1.97, and a coexistence amendment to ADR 0004.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 
@@ -83,6 +84,12 @@ How to work on riff correctly.
 - [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
 - [Access-violation flake](engineering/access-violation-flake.md) — the closed `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: the harness-concurrency cap that now covers every suite, and the evidence that closed it.
 - [Release and packaging](engineering/release-and-packaging.md) — the tag-triggered release pipeline in `.github/workflows/release.yml` (version guard, four-platform build matrix, artifact packaging, pre-release publish) and how to cut a release.
+
+### Execution plans
+
+Plans for work in flight. They describe intended changes, not the current repository.
+
+- [nsh UI rewrite](execution-plans/nsh-ui-rewrite.md) — the unit-by-unit plan for replacing the egui frontend with nsh, from the P0 spike to N16. A plan, not current state. Each unit lands with its own evidence under `execution-plans/evidence/nsh/`.
 
 ### Reference
 

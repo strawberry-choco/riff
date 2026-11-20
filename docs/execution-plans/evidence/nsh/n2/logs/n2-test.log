@@ -1,0 +1,62 @@
+   Compiling riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+    Finished `test` profile [optimized + debuginfo] target(s) in 5.91s
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_nsh-ca76b87db45fad26.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\riff_nsh-3c37113283abcaef.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-b5ae0731a56b1d90.exe)
+
+running 4 tests
+test nsh_json_agrees_with_the_bootstrap ... ok
+test the_registry_ships_the_brand_mark ... ok
+test the_manifest_keeps_the_nsh_frontend_out_of_egui ... ok
+test the_root_carries_the_theme_file ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-39fcca6c398909a8.exe)
+
+running 13 tests
+test every_palette_slot_resolves_in_all_four_variants ... ok
+test the_light_exceptions_match_the_egui_store ... ok
+test light_mirrors_dark_and_brand_is_family_invariant ... ok
+test reduce_motion_is_not_a_color ... ok
+test the_brand_gradient_runs_light_to_deep ... ok
+test the_dark_slots_match_the_egui_store ... ok
+test every_slot_is_listed ... ok
+test the_shadows_match_the_egui_store ... ok
+test the_four_variants_are_distinct ... ok
+test high_contrast_is_a_token_set_over_its_base ... ok
+test the_variant_flags_resolve ... ok
+test the_token_scale_matches_the_egui_store ... ok
+test the_icon_set_is_complete ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-d42da79529f29e1f.exe)
+
+running 7 tests
+test test_the_color_sweep_flags_constructions_and_derivations ... ok
+test test_the_dimension_sweep_flags_f32_consts_only ... ok
+test test_the_spacing_sweep_flags_numeric_gaps_only ... ok
+test test_the_scan_covers_the_non_store_sources ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+test test_view_code_contains_no_color_constructions ... ok
+test test_view_code_sets_no_spacing_by_number ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests riff_gui_nsh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

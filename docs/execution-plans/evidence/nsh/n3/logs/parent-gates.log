@@ -1,0 +1,67 @@
+N3 parent gates at the review-fix head (6339df9), 2026-11-20T20:48:34Z
+
+== cargo fmt --check ==
+exit 0
+
+== cargo clippy -p riff-gui-nsh -p riff-tests --all-targets -- -D warnings ==
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.95s
+
+== cargo test -p riff-gui-nsh ==
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_nsh-785a9c3d3b9c9fe8.exe)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src\main.rs (target\debug\deps\riff_nsh-9bf13df62e5f7af4.exe)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-09cf6a71e36c2b40.exe)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-0ff24b2fee74ba92.exe)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-4e7e73f5d75783b4.exe)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-9a5cc801ba79a5be.exe)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== RUSTDOCFLAGS=-D warnings cargo doc -p riff-gui-nsh -p riff-backend ==
+   Generated C:\projects\riff\target\doc\riff_backend\index.html and 2 other files
+
+== cargo test --all-targets -- --test-threads=1 ==
+     Running tests\option_list_tests.rs (target\debug\deps\option_list_tests-04c1fff4fef6d6c3.exe)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests\press_feedback_tests.rs (target\debug\deps\press_feedback_tests-d3266147314f2c2e.exe)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+     Running tests\seek_affordance_tests.rs (target\debug\deps\seek_affordance_tests-c7fb95f396926fba.exe)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+     Running tests\text_field_tests.rs (target\debug\deps\text_field_tests-affe9577f8a42c19.exe)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-3d0ea8af9482b182.exe)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-39b53d732d544153.exe)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-4f4d3a00ed2ee67b.exe)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-c8a4358e354c047b.exe)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-7ecee2015e32c91b.exe)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-32b140f8347b7b83.exe)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+     Running tests\mod.rs (target\debug\deps\integration-40edadd0ee83f195.exe)
+test result: ok. 266 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.20s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\audio_extensions_tests.rs (target\debug\deps\audio_extensions_tests-e77343cbd5d6302d.exe)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\generation_cache_tests.rs (target\debug\deps\generation_cache_tests-6b778f95e476cae4.exe)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\rule_catalog_tests.rs (target\debug\deps\rule_catalog_tests-035343c5de4fc354.exe)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\rule_field_catalog_tests.rs (target\debug\deps\rule_field_catalog_tests-978abaada3074ca1.exe)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\rule_tree_tests.rs (target\debug\deps\rule_tree_tests-ffe8380655a55a4a.exe)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 872 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 95.65s

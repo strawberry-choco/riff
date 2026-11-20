@@ -31,7 +31,8 @@ pub struct UiModel {
     /// spike's did.
     #[allow(dead_code)]
     pub(crate) lifecycle: Option<RuntimeLifecycle>,
-    /// The signals. Written only by the pump.
+    /// The signals. Written on the engine thread only: the pump at runtime,
+    /// the debug fixture and readout controls in debug builds.
     pub(crate) state: UiState,
     /// The covers decision half: what is wanted, in flight, arrived.
     pub(crate) covers: CoverCache,

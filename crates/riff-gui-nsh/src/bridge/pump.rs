@@ -1,5 +1,9 @@
-//! The pump: one 16 ms poller on the engine thread, the only writer of the
-//! [`UiState`](crate::bridge::state::UiState) signals (the plan's "Worker threads never touch a signal").
+//! The pump: one 16 ms poller on the engine thread. At runtime it is the
+//! only writer of the [`UiState`](crate::bridge::state::UiState) signals;
+//! in debug builds the fixture's variant switcher and the readout's toggles
+//! also write, from the same thread. The invariant the plan states is
+//! "worker threads never touch a signal", and no write anywhere leaves the
+//! engine thread.
 //!
 //! Why a poller and not an event sink: `BackendEvent` has only typed notices
 //! and coalesced Library generations (P0 correction 1) — there is no
@@ -101,9 +105,10 @@ struct CheapSnapshot {
     replaygain_mode: riff_backend::app::state::ReplayGainMode,
     queue_len: usize,
     queue_index: usize,
-    /// The current track's path. Updated in place: a tick where the id did
-    /// not move keeps the previous `String` instead of re-cloning a track
-    /// path every 16 ms.
+    /// The current track's path, compared against the previous tick's to
+    /// decide whether the view's identity moved. A one-`String` clone per
+    /// tick is bounded and negligible; the contract is that no track, queue
+    /// or up-next window is ever cloned.
     current_id: Option<String>,
 }
 

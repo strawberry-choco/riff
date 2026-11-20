@@ -1,6 +1,7 @@
 //! The root component. N3 moves the backend runtime in: the app spawns the
 //! Composition Root's `AppRuntime`, the bridge owns it in a `stored` model,
-//! and the pump — installed once here — is the only signal writer. The
+//! and the pump — installed once here — writes the signals at runtime (the
+//! debug fixture and readout controls also write, on the same thread). The
 //! palette now comes out of the bridge's `UiState` (the same one
 //! `Signal<Palette>` store ADR 0004's amendment names; only its
 //! construction moved from this file into `bridge::state`).

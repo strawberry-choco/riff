@@ -1,8 +1,10 @@
-//! The [`UiState`]: the signals the bridge owns and only the pump writes.
+//! The [`UiState`]: the signals the bridge owns.
 //!
-//! Every signal here is written on the engine thread and nowhere else — the
-//! worker threads hand results over by channel and the pump lands them (the
-//! plan's "Worker threads never touch a signal"). nsh signals are `!Send`
+//! Every signal here is written on the engine thread and nowhere else — at
+//! runtime through the pump, and in debug builds through the fixture's
+//! variant switcher and the readout's toggles. The worker threads hand
+//! results over by channel and never write (the plan's "Worker threads
+//! never touch a signal"). nsh signals are `!Send`
 //! (P0 correction 9), so this bundle lives and dies with the engine thread:
 //! [`UiState`] is `Copy` because every field is a `Signal` handle, and the
 //! app copies the handles it renders from once.

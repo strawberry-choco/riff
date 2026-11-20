@@ -10,9 +10,9 @@ use riff_gui_nsh::theme::palette;
 use riff_gui_nsh::theme::tokens;
 use riff_gui_nsh::theme::{Palette, Variant};
 
-/// Every color slot with its name, read through one accessor table so a new
-/// field cannot dodge the sweep: adding a slot without adding it here
-/// fails `every_slot_is_listed`.
+/// Every color slot with its name, read through one accessor table. The
+/// table's completeness is enforced by `every_slot_is_listed`'s exhaustive
+/// destructure, not by this doc comment.
 fn slots(p: &Palette) -> [(&'static str, nsh_core::color::Hsla); 18] {
     [
         ("background", p.background),
@@ -36,17 +36,59 @@ fn slots(p: &Palette) -> [(&'static str, nsh_core::color::Hsla); 18] {
     ]
 }
 
-/// The slot count the struct carries and the accessor table covers must
-/// agree; a field added to `Palette` without joining the table is an unset
-/// slot waiting to happen.
+/// The compile-time guard a length assert cannot be: destructuring
+/// `Palette` without `..` names every field, so a field added to the struct
+/// without joining the accessor table above fails the build, not a test
+/// that could never fail.
 #[test]
 fn every_slot_is_listed() {
     let p = Palette::dark();
-    let count = slots(&p).len();
-    assert_eq!(
-        count, 18,
-        "the palette has 18 color slots; the plan's prose says 17 but lists \
-         18 names, and theme.rs (the authoritative source) carries 18"
+    let Palette {
+        dark,
+        high_contrast,
+        background,
+        surface_row,
+        surface,
+        surface_2,
+        surface_3,
+        row_hover,
+        ink,
+        ink_2,
+        ink_3,
+        line,
+        border,
+        brand_primary,
+        on_brand,
+        success,
+        warning,
+        error,
+        info,
+        focus_ring,
+    } = p;
+    // The table and the struct agree; resolving them again through
+    // `slots` keeps the two lists one and the same source of truth.
+    assert_eq!(slots(&p).len(), 18);
+    let _ = (
+        dark,
+        high_contrast,
+        background,
+        surface_row,
+        surface,
+        surface_2,
+        surface_3,
+        row_hover,
+        ink,
+        ink_2,
+        ink_3,
+        line,
+        border,
+        brand_primary,
+        on_brand,
+        success,
+        warning,
+        error,
+        info,
+        focus_ring,
     );
 }
 

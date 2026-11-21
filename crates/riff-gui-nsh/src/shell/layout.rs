@@ -273,7 +273,10 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
     on_key("right", move |_| step_traversal(1));
     on_key("up", move |_| step_traversal(-1));
     on_key("down", move |_| step_traversal(1));
+    #[cfg(debug_assertions)]
     debug_keys(model, state, list);
+    #[cfg(not(debug_assertions))]
+    let _ = list;
     (focus, nav_focus, list_focus)
 }
 

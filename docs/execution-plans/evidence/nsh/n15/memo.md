@@ -20,8 +20,9 @@ Evidence.
 - [x] `cargo build --release --workspace --bins`: `logs/release-build.log`;
       the binary is `target/release/riff.exe`, 38,288,896 bytes
       (`logs/release-binary.txt`).
-- [x] Live: `../n15/shots/n15-playing.png` shows the shipped debug binary
-      playing a fixture track through the new shell.
+- [x] Live: `../n15/shots/n15-playing.png` shows the debug binary playing a
+      fixture track through the new shell; `../n15/shots/n15-release-playing.png`
+      does the same with the 38.3 MB stripped release binary at 0:02/0:03.
 - [ ] Gap: the Linux and macOS binaries were not built on this machine; CI's
       matrix is the coverage, and N16's packaging leg needs the nsh CLI.
 

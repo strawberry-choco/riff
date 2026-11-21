@@ -1728,3 +1728,41 @@ fn n7_stage_drive_over_the_fixture_store() {
         app.wait_for("id:entity-row").unwrap();
     });
 }
+
+// --- The N8/N9 surfaces ------------------------------------------------------
+
+#[test]
+fn the_queue_toggle_opens_and_closes_the_up_next_panel() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:player-bar").unwrap();
+
+    app.press("id:queue-toggle").unwrap();
+    app.wait_for("id:queue-panel").unwrap();
+    app.wait_for("text:Queue is empty").unwrap();
+    app.press("id:queue-toggle").unwrap();
+    app.wait_for_gone("id:queue-panel", Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
+fn the_now_playing_toggle_switches_the_stage_and_close_returns() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+
+    app.press("id:now-playing-toggle").unwrap();
+    app.wait_for("id:now-playing").unwrap();
+    app.wait_for("text:Nothing playing").unwrap();
+    app.press("id:now-playing-close").unwrap();
+    app.wait_for("id:track-list").unwrap();
+}
+
+#[test]
+fn a_double_press_plays_the_row() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-row").unwrap();
+
+    app.press("id:track-row >> nth=0").unwrap();
+    app.press("id:track-row >> nth=0").unwrap();
+    app.wait_for("text:1/1")
+        .expect("the second press starts the row's track");
+}

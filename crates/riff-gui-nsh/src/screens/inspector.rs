@@ -21,7 +21,10 @@ use crate::bridge::state::UiState;
 use crate::components::cover;
 use crate::components::empty_state;
 use crate::model::reads;
+use crate::theme::icons::{Icon, icon};
 use crate::theme::tokens;
+
+pub mod tag_editor;
 
 /// The panel: the column and its content. The egui column renders only
 /// while a selection exists; here it stays mounted and shows the empty
@@ -29,6 +32,8 @@ use crate::theme::tokens;
 pub fn panel(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
     let palette = state.palette;
     request_cover_on_selection(model, state);
+    tag_editor::install(model, state);
+    close_editor_on_selection_move(state);
     view()
         .w(px(tokens::INSPECTOR_WIDTH))
         .flex_col()
@@ -44,13 +49,33 @@ pub fn panel(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
                 .p(px(tokens::SPACE_LG))
                 .gap(px(tokens::SPACE_LG))
                 .test_id("inspector-body")
-                .child(dynamic(move || {
-                    let Some(track) = selected_track(model, state) else {
-                        return nothing_selected(palette).into_element();
-                    };
-                    readout(model, state, track).into_element()
-                })),
+                .child(
+                    when(
+                        move || state.tag_edit.get().is_some(),
+                        move || tag_editor::form(model, state).into_element(),
+                    )
+                    .otherwise(move || {
+                        dynamic(move || {
+                            let Some(track) = selected_track(model, state) else {
+                                return nothing_selected(palette).into_element();
+                            };
+                            readout(model, state, track).into_element()
+                        })
+                    }),
+                ),
         )
+}
+
+/// The editor follows the selection: picking another row closes the open
+/// draft, the egui reconciliation's rule.
+fn close_editor_on_selection_move(state: UiState) {
+    effect(move || {
+        if let Some(editing) = state.tag_edit.get()
+            && state.selection.get().as_ref() != Some(&editing)
+        {
+            state.tag_edit.set(None);
+        }
+    });
 }
 
 /// The `SELECTION` header, with the readout kind's chip at the right edge
@@ -139,28 +164,49 @@ fn readout(model: Stored<UiModel>, state: UiState, track: Arc<Track>) -> impl In
                 .text_color(move || palette.get().ink_2)
                 .test_id("inspector-subtitle"),
         )
-        .child(tag_section(state, &track))
+        .child(tag_section(model, state, &track))
         .child(details(state, &track))
 }
 
-/// The tag section, read-only placeholder: the metadata fields' values with
-/// the egui panel's `(none)` for what the track does not carry. The editable
-/// eleven-field section and its draft flow are the tag editor's unit.
-fn tag_section(state: UiState, track: &Track) -> impl IntoElement {
+/// The tag section: the metadata fields' values with the egui panel's
+/// `(none)` for what the track does not carry, plus the Edit control the
+/// inline editor opens from.
+fn tag_section(model: Stored<UiModel>, state: UiState, track: &Track) -> impl IntoElement {
     let palette = state.palette;
     let title = track.metadata.title.clone();
     let artist = track.metadata.artist.clone();
     let album = track.metadata.album.clone();
     let genre = track.metadata.genre.clone();
     let year = track.metadata.year.map(|y| y.to_string());
+    let edit_id = track.id.clone();
     view()
         .flex_col()
         .gap(px(tokens::SPACE_MD))
         .test_id("inspector-tags")
         .child(
-            text("TAGS")
-                .text_xs()
-                .text_color(move || palette.get().ink_3),
+            view()
+                .flex_row()
+                .items_center()
+                .child(
+                    text("TAGS")
+                        .flex_1()
+                        .text_xs()
+                        .text_color(move || palette.get().ink_3),
+                )
+                .child(
+                    view()
+                        .on_press(move || tag_editor::begin(model, edit_id.clone()))
+                        .test_id("tag-edit-open")
+                        .label("Edit tags")
+                        .p(px(tokens::SPACE_XS))
+                        .rounded(px(tokens::RADIUS_SM))
+                        .hover(|s| s.bg(move || palette.get().row_hover))
+                        .child(icon(
+                            Icon::Pencil,
+                            Icon::ICON_SIZE,
+                            move || palette.get().ink_2,
+                        )),
+                ),
         )
         .child(tag_row(palette, "Title", title))
         .child(tag_row(palette, "Artist", artist))

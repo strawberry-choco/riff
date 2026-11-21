@@ -149,26 +149,33 @@ fn info(state: UiState) -> impl IntoElement {
     let palette = state.palette;
     view()
         .flex_1()
-        .flex_col()
-        .gap(px(tokens::SPACE_XS))
+        .flex_row()
+        .items_center()
+        .gap(px(tokens::SPACE_SM))
         .child(
-            text(move || {
-                state.playback.get().current.map_or_else(
-                    || "Nothing playing".to_owned(),
-                    |track| track.metadata.title.clone().unwrap_or_default(),
+            view()
+                .flex_1()
+                .flex_col()
+                .gap(px(tokens::SPACE_XS))
+                .child(
+                    text(move || {
+                        state.playback.get().current.map_or_else(
+                            || "Nothing playing".to_owned(),
+                            |track| track.metadata.title.clone().unwrap_or_default(),
+                        )
+                    })
+                    .text_sm()
+                    .truncate()
+                    .text_color(move || palette.get().ink)
+                    .test_id("track-title"),
                 )
-            })
-            .text_sm()
-            .truncate()
-            .text_color(move || palette.get().ink)
-            .test_id("track-title"),
-        )
-        .child(
-            text(move || meta_line(state.playback.get().current))
-                .text_xs()
-                .truncate()
-                .text_color(move || palette.get().ink_3)
-                .test_id("track-meta"),
+                .child(
+                    text(move || meta_line(state.playback.get().current))
+                        .text_xs()
+                        .truncate()
+                        .text_color(move || palette.get().ink_3)
+                        .test_id("track-meta"),
+                ),
         )
 }
 
@@ -303,6 +310,8 @@ fn controls(
         .gap(px(tokens::SPACE_MD))
         .child(shuffle(model, state, focus))
         .child(repeat(model, state, focus))
+        .child(now_playing_toggle(model, state))
+        .child(queue_toggle(model, state))
         .child(queue_position(state))
         .child(mute(model, state, focus))
         .child(volume(model, state))
@@ -371,6 +380,61 @@ fn repeat(
         focus,
         palette,
     )
+}
+
+/// The Now Playing toggle: the egui bar's `ToggleExpanded`, flipped through
+/// the session's view mode and mirrored to the nav signal the stage reads.
+fn now_playing_toggle(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
+    let palette = state.palette;
+    let open = move || state.nav.get().view_mode == riff_backend::app::state::ViewMode::NowPlaying;
+    let glyph = move || if open() { Icon::Collapse } else { Icon::Expand };
+    view()
+        .on_press(move || {
+            if open() {
+                crate::screens::now_playing::close(model, state);
+            } else {
+                crate::screens::now_playing::open(model, state);
+            }
+        })
+        .test_id("now-playing-toggle")
+        .label(move || if open() { "Close Now Playing" } else { "Now Playing" })
+        .p(px(tokens::SPACE_SM))
+        .rounded(px(tokens::RADIUS_FULL))
+        .hover(|s| s.bg(move || palette.get().row_hover))
+        .child(dynamic(move || icon(glyph(), Icon::ICON_SIZE, move || palette.get().ink)))
+}
+
+/// The queue panel's toggle: the egui bar's `ToggleQueue`, opening the panel
+/// above the bar.
+fn queue_toggle(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
+    let palette = state.palette;
+    let open = move || state.queue_open.get();
+    let tint = move || {
+        if open() {
+            palette.get().brand_primary
+        } else {
+            palette.get().ink
+        }
+    };
+    view()
+        .on_press(move || toggle_queue(model))
+        .test_id("queue-toggle")
+        .label(move || if open() { "Close queue" } else { "Open queue" })
+        .p(px(tokens::SPACE_SM))
+        .rounded(px(tokens::RADIUS_FULL))
+        .hover(|s| s.bg(move || palette.get().row_hover))
+        .child(icon(Icon::ListMusic, Icon::ICON_SIZE, tint))
+}
+
+/// Flip the queue panel's flag: the session field plus the signal mirror.
+fn toggle_queue(model: Stored<UiModel>) {
+    let open = model.with(|m| m.state.queue_open);
+    let next = model.with(|m| {
+        let mut library = m.rt.library.lock_or_recover();
+        library.queue_open = !library.queue_open;
+        library.queue_open
+    });
+    open.set(next);
 }
 
 /// `"1/2"` — the egui bar's queue readout; nothing while the queue is

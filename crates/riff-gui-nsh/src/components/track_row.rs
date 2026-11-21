@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
-use riff_backend::domain::TrackId;
+use riff_backend::domain::{PlaylistId, TrackId};
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
@@ -47,6 +47,24 @@ pub struct TrackRowView {
     pub missing: bool,
 }
 
+/// The blank row a listing's tail answers with while the count signal and
+/// the rows disagree for one frame.
+impl TrackRowView {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            index: 0,
+            id: TrackId(String::new()),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            favorite: false,
+            missing: false,
+        }
+    }
+}
+
 /// One track row: band, favorite heart, cover, the three text columns,
 /// duration, the missing and playing markers.
 pub fn row_of(
@@ -54,6 +72,18 @@ pub fn row_of(
     state: UiState,
     facts: impl Fn() -> TrackRowView + Clone + 'static,
     list_focus: Signal<Option<usize>>,
+) -> impl IntoElement {
+    row_of_in(model, state, facts, list_focus, None)
+}
+
+/// The row inside a user playlist: the same anatomy plus the menu's Remove
+/// from Playlist item, which acts on `playlist`.
+pub fn row_of_in(
+    model: Stored<UiModel>,
+    state: UiState,
+    facts: impl Fn() -> TrackRowView + Clone + 'static,
+    list_focus: Signal<Option<usize>>,
+    playlist: Option<PlaylistId>,
 ) -> impl IntoElement {
     let palette = state.palette;
     let selection = state.selection;
@@ -78,6 +108,8 @@ pub fn row_of(
     };
     let heart_facts = facts.clone();
     let press_facts = facts.clone();
+    let menu_facts = facts.clone();
+    let menu_playlist = playlist;
     let cover_facts = facts.clone();
     let missing_facts = facts.clone();
     let focused = {
@@ -110,7 +142,25 @@ pub fn row_of(
             }
         })
         .hover(|s| s.bg(move || palette.get().row_hover))
-        .on_press(move || select_track(model, press_facts().id))
+        .on_press(move |event: &PressEvent| {
+            let row = press_facts();
+            select_track(model, row.id.clone());
+            // The egui row's `double_clicked` arm: select, then play. A
+            // dangling entry has no file to play.
+            if event.clicks == 2 && !row.missing {
+                crate::menus::track::play(model, row.id);
+            }
+        })
+        .on_context_menu(move |event: &ContextMenuEvent| {
+            let row = menu_facts();
+            let subject = crate::menus::track::TrackMenuSubject {
+                id: row.id,
+                favorite: row.favorite,
+                resolved: !row.missing,
+                playlist: menu_playlist.clone(),
+            };
+            crate::menus::track::open_track_menu(model, subject, event.page_position);
+        })
         .child(favorite_cell(model, state, heart_facts))
         .child(
             view()

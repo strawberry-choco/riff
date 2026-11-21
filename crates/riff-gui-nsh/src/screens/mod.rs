@@ -9,3 +9,8 @@ pub mod dev_tokens;
 
 pub mod inspector;
 pub mod library;
+pub mod now_playing;
+pub mod playlists;
+pub mod queue;
+pub mod settings;
+pub mod smart_playlists;

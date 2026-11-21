@@ -32,6 +32,7 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
     title_bar::install_chrome();
     restore_window_geometry(model);
     watch_window_geometry(model);
+    crate::platform::install(model, state);
 
     let search = element_ref();
     let list = element_ref();
@@ -46,7 +47,17 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         .text_color(move || palette.get().ink)
         .child(title_bar::bar(model, state, &search, focus))
         .child(middle(model, state, nav_focus, list_focus, list))
+        .child(dynamic(move || {
+            if state.queue_open.get() {
+                crate::screens::queue::panel(model, state).into_element()
+            } else {
+                view().into_element()
+            }
+        }))
         .child(player_bar::bar(model, state, focus))
+        .on_file_drop(move |event: &FileDropEvent| {
+            crate::platform::library_paths::accept_drop(model, state, &event.uris);
+        })
 }
 
 /// The middle region: the sidebar panel beside the stage slot. The slot is
@@ -68,20 +79,44 @@ fn middle(
         .flex_1()
         .flex_row()
         .child(sidebar::panel(model, state, nav_focus))
-        .child(dynamic(move || match crate::model::stage_of(&nav.get()) {
-            None => empty_stage(state).into_element(),
-            Some(StageKind::Flat) => {
-                crate::screens::library::list::stage(model, state, list, list_focus).into_element()
-            }
-            Some(StageKind::Folders) => {
-                crate::screens::library::folders::stage(model, state).into_element()
-            }
-            Some(kind @ StageKind::Tracks { .. }) => {
-                crate::screens::library::browse::tracks_stage(model, state, list, list_focus, kind)
-                    .into_element()
-            }
-            Some(kind) => {
-                crate::screens::library::browse::entity_stage(model, state, kind).into_element()
+        .child(dynamic(move || {
+            let view = nav.get();
+            match view.view_mode {
+                riff_backend::app::state::ViewMode::NowPlaying => {
+                    crate::screens::now_playing::screen(model, state).into_element()
+                }
+                riff_backend::app::state::ViewMode::Settings => {
+                    crate::screens::settings::screen(model, state).into_element()
+                }
+                riff_backend::app::state::ViewMode::Library => {
+                    if view.playlist.is_some() {
+                        return crate::screens::playlists::stage(model, state).into_element();
+                    }
+                    if view.smart_list.is_some() || view.custom_list.is_some() {
+                        return crate::screens::smart_playlists::stage(model, state)
+                            .into_element();
+                    }
+                    match crate::model::stage_of(&view) {
+                        None => empty_stage(state).into_element(),
+                        Some(StageKind::Flat) => crate::screens::library::list::stage(
+                            model, state, list, list_focus,
+                        )
+                        .into_element(),
+                        Some(StageKind::Folders) => {
+                            crate::screens::library::folders::stage(model, state).into_element()
+                        }
+                        Some(kind @ StageKind::Tracks { .. }) => {
+                            crate::screens::library::browse::tracks_stage(
+                                model, state, list, list_focus, kind,
+                            )
+                            .into_element()
+                        }
+                        Some(kind) => {
+                            crate::screens::library::browse::entity_stage(model, state, kind)
+                                .into_element()
+                        }
+                    }
+                }
             }
         }))
 }
@@ -148,6 +183,7 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
             &state.sidebar.get(),
             flags.smart_lists_collapsed,
             flags.advanced_mode,
+            &state.custom_lists.get(),
         )
         .len()
     };

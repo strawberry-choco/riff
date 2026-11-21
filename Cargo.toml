@@ -7,26 +7,19 @@
 #   * `riff-playback`    — playback capability slice (pure Rust)
 #   * `riff-infra`       — every port implementation + every native dependency
 #   * `riff-backend`     — application API: facade, services, Composition Root
-#   * `riff-gui-theme`   — design authority: token/palette store, fonts, icons,
-#                          and the assets those are compiled in from
-#   * `riff-gui-components` — presentation primitives (props in, a response or
-#                          a typed intent out); depends on riff-gui-theme
-#   * `riff-gui`         — frontend (egui UI, tray, native dialogs) + the `riff`
-#                          binary entry point (a thin composition over
-#                          `riff_backend::composition::AppRuntime::spawn`)
-#   * `riff-gui-nsh`     — second frontend (nsh UI) + the `riff-nsh` binary.
-#                          A scaffold at N1: no backend edge, no store read.
-#                          Ships beside `riff` until parity, then the three
-#                          egui crates are deleted (ADR 0022)
+#   * `riff-gui-nsh`     — the frontend (nsh UI) + the `riff` binary entry
+#                          point: a thin composition over
+#                          `riff_backend::composition::AppRuntime::spawn`. It
+#                          owns the ported design system (palette, tokens,
+#                          fonts, icons) too.
 #   * `tests`            — the workspace-root integration-test crate (package
 #                          `riff-tests`); per-crate adapter tests live in
 #                          `riff-infra/tests/`
 #
 # Build / run from here:
-#   cargo run -p riff-gui
-#   cargo run -p riff-gui-nsh
+#   cargo run
 #   cargo test --all-targets
-#   cargo build --release -p riff-gui
+#   cargo build --release
 
 [workspace]
 members = [
@@ -35,21 +28,14 @@ members = [
     "crates/riff-library",
     "crates/riff-infra",
     "crates/riff-backend",
-    "crates/riff-gui-theme",
-    "crates/riff-gui-components",
-    "crates/riff-gui",
     "crates/riff-gui-nsh",
     "tests",
 ]
 # Resolver 2, deliberately, though every member is edition 2024 and the nsh
 # plan asked for 3. Resolver 3 adds MSRV-aware resolution, which can select
 # older-than-newest versions for crates whose newest needs a higher MSRV.
-# That re-resolves the EXISTING members too, and the egui golden baselines
-# are byte-exact for one patch level of egui/eframe/egui_kittest and the
-# wgpu/naga pair they rasterise through. Resolver 3 is not needed to build
-# nsh: resolver 2 already does per-target feature unification, which is the
-# only resolver behaviour the nsh graph relies on. Revisit only with a
-# measured lock diff and a green golden suite, never as a scaffold default.
+# Resolver 2 already does the per-target feature unification the nsh graph
+# relies on, and the workspace's lock entries stay stable across the flip.
 resolver = "2"
 
 # Single source of truth for the version, edition, MSRV and the identity fields
@@ -69,19 +55,7 @@ repository = "https://github.com/strawberry-choco/riff"
 homepage = "https://github.com/strawberry-choco/riff"
 documentation = "https://github.com/strawberry-choco/riff/tree/master/docs"
 
-# The GUI toolkit pin, stated exactly once for every crate that names the
-# toolkit; members inherit it via `egui.workspace = true`.
 [workspace.dependencies]
-# egui is pinned to 0.35 deliberately. 0.36 regressed headless texture
-# rendering: under kittest the golden snapshots silently lose every
-# user-loaded texture, because `ctx.load_texture` and the painter/image
-# widgets paint nothing while text and shapes still render. That partial
-# failure is what makes it easy to miss — the windowed app looks fine on
-# either version, and the damage lands entirely in the committed goldens.
-# Revisit only after checking the upstream fix status; do not bump the pin
-# to "catch up" and re-baseline the snapshots to make the diff go away.
-egui = "0.35"
-
 # The nsh UI stack, pinned exactly and aligned as one set. All seven publish
 # 0.6.1 and it is the newest non-yanked version of each (P0 memo, Version
 # alignment). The plan's block pinned nsh-core at "=0.6.0" against six at

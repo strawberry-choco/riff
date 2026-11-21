@@ -35,6 +35,18 @@ pub fn App() -> impl IntoElement {
     let state = model.with(|m| m.signals());
     let palette: Signal<Palette> = state.palette;
 
+    // The persisted High Contrast flag opens the app on its variant; the
+    // base family stays the session's Dark default (the store carries no
+    // light/dark column, exactly as the egui store did not).
+    let high_contrast = model.with(|m| {
+        use riff_backend::app::MutexExt;
+        m.rt.library.lock_or_recover().ui_flags.high_contrast
+    });
+    if high_contrast {
+        palette.set(Palette::dark().high_contrast());
+        state.appearance.set(crate::model::AppearanceMode::DarkHighContrast);
+    }
+
     // The dev fixture's control surface (N2), plus the N3 readout's toggles.
     // Both are compiled out in release with their screens.
     #[cfg(debug_assertions)]

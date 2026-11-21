@@ -158,6 +158,8 @@ fn folder_row(
         |name| name.to_string_lossy().into_owned(),
     );
     let path_buf = path.to_path_buf();
+    let press_path = path_buf.clone();
+    let menu_path = path_buf.clone();
     let selected_path = state.folder_selected;
     let selected_target = path_buf.clone();
     let selected = move || selected_path.get().as_deref() == Some(selected_target.as_path());
@@ -184,7 +186,14 @@ fn folder_row(
             }
         })
         .hover(|s| s.bg(move || palette.get().row_hover))
-        .on_press(move || toggle_folder(model, path_buf.clone()))
+        .on_press(move || toggle_folder(model, press_path.clone()))
+        .on_context_menu(move |event: &ContextMenuEvent| {
+            crate::menus::collection::open_collection_menu(
+                model,
+                crate::menus::CollectionTarget::Folder(menu_path.clone()),
+                event.page_position,
+            );
+        })
         .child(icon(
             if open { Icon::FolderOpen } else { Icon::Folder },
             Icon::ICON_SIZE,

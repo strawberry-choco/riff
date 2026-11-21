@@ -8869,7 +8869,7 @@ mod cover_thumbnail_cache_tests {
     use super::*;
     use riff_backend::app::cover_service::{ClearCacheOutcome, CoverService, Covers};
     use riff_backend::domain::CoverSource;
-    use riff_gui::ui::app::{COVER_CARD, COVER_HERO, COVER_THUMB};
+    use riff_gui_nsh::bridge::covers::{COVER_CARD, COVER_HERO, COVER_THUMB};
     use riff_infra::media::FileThumbnailCache;
     use riff_library::app::errors::LibraryError;
     use riff_library::app::traits::{

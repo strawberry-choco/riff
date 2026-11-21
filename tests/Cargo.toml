@@ -48,14 +48,9 @@ riff-infra = { path = "../crates/riff-infra" }
 riff-library = { path = "../crates/riff-library" }
 riff-playback = { path = "../crates/riff-playback" }
 riff-persistence = { path = "../crates/riff-persistence" }
-riff-gui     = { path = "../crates/riff-gui" }
 # The nsh frontend: the N3 bridge tests (`nsh_bridge_tests`) build its
 # `UiModel` over this suite's mock ports and drive the pump headless.
 riff-gui-nsh = { path = "../crates/riff-gui-nsh" }
-# The widgetry crates: the suite re-points at them directly for the token
-# types and presentation primitives the split moved out of `riff-gui`.
-riff-gui-components = { path = "../crates/riff-gui-components" }
-riff-gui-theme = { path = "../crates/riff-gui-theme" }
 
 # The nsh UI stack, for the headless bridge tests: the engine's
 # `EngineConfig`/`Root`, `nsh-base`'s button, and `nsh-testing`'s `Headless`
@@ -67,17 +62,8 @@ nsh-core.workspace = true
 nsh-engine.workspace = true
 nsh-testing.workspace = true
 
-# Golden-image tests render real egui frames headlessly (kittest + wgpu).
-egui.workspace = true
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot", "eframe"] }
-# The whole-frame tests drive the real app through its `eframe::App` impl, so
-# this crate names `eframe::CreationContext` directly (the kittest `eframe`
-# feature pulls the crate in, but a direct dependency is what lets us name it).
-eframe = "0.35"
 
 # Test helpers used at test-runtime by app suites.
 tempfile = "3.8"
 crossbeam-channel = "0.5"
-# Counting pixels in headlessly rendered golden snapshots.
-image = { version = "0.25", default-features = false, features = ["png"] }
 

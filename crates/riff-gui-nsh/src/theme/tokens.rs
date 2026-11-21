@@ -116,6 +116,16 @@ pub const INSPECTOR_ART_H: f32 = 200.0;
 pub const PLACEHOLDER_GLYPH: f32 = 16.0;
 /// `--riff-playerbar-h` — 88 px bottom player bar.
 pub const PLAYERBAR_H: f32 = 88.0;
+/// The Now Playing hero cover's edge.
+pub const HERO_COVER: f32 = 320.0;
+/// The Now Playing seek row's width (the hero plus its readouts' room).
+pub const NOW_PLAYING_SEEK_W: f32 = 440.0;
+/// The Up Next panel above the player bar: its width and height.
+pub const QUEUE_PANEL_W: f32 = 360.0;
+pub const QUEUE_PANEL_H: f32 = 280.0;
+/// The settings switch's box: a pill twice as wide as it is tall.
+pub const SWITCH_W: f32 = 24.0;
+pub const SWITCH_H: f32 = 12.0;
 
 /// The 1 px hairline border: the width every separator, panel edge and
 /// focus ring paints at. The egui shell spoke this width as a bare `1.0`

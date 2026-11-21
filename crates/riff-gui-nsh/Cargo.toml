@@ -1,12 +1,12 @@
-# riff-gui-nsh — the nsh frontend: the Rust UI set and the `riff-nsh` binary
-# that mounts it. A second frontend beside `riff-gui` until feature parity,
-# then the three egui crates are deleted (ADR 0022).
+# riff-gui-nsh — the riff frontend: the nsh UI set and the `riff` binary that
+# mounts it. The workspace's one frontend since the egui crates were deleted
+# (ADR 0022).
 #
 # Membership criterion: rendering, input and platform integration on nsh.
-# It names no egui crate and no `riff-gui-*` crate — the theme is ported, not
-# shared. The only `riff-*` edge it may ever name is `riff-backend`, which N3
-# added below with the first `use riff_backend::` (the bridge); the scaffold
-# test's allowlist already carried that one edge.
+# It names no `riff-gui-*` crate — the theme is ported, not shared. The only
+# `riff-*` edge it may ever name is `riff-backend`, which N3 added below with
+# the first `use riff_backend::` (the bridge); the scaffold test's allowlist
+# already carried that one edge.
 # `tests/scaffold_tests.rs` fails the build if the manifest drifts.
 #
 # No `[profile.*]` table here. The workspace owns LTO, codegen-units and
@@ -29,7 +29,7 @@ name = "riff_gui_nsh"
 path = "src/lib.rs"
 
 [[bin]]
-name = "riff-nsh"
+name = "riff"
 path = "src/main.rs"
 
 [dependencies]

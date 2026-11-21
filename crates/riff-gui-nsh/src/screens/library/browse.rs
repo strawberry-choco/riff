@@ -205,6 +205,8 @@ fn entity_row(
     let selected_a11y = selected.clone();
     let press_facts = facts.clone();
     let press_kind = kind.clone();
+    let menu_facts = facts.clone();
+    let menu_kind = kind.clone();
     let cover_facts = facts.clone();
     let cover_kind = kind.clone();
     let label_facts = facts.clone();
@@ -238,6 +240,20 @@ fn entity_row(
                 press_facts().and_then(|row| selection_at(&press_kind, &row.key))
             {
                 select_entity(model, level, selection);
+            }
+        })
+        .on_context_menu(move |event: &ContextMenuEvent| {
+            if let Some(row) = menu_facts()
+                && let Some(target) = collection_target(&menu_kind, &row.key)
+            {
+                if let Some((level, selection)) = selection_at(&menu_kind, &row.key) {
+                    select_entity(model, level, selection);
+                }
+                crate::menus::collection::open_collection_menu(
+                    model,
+                    target,
+                    event.page_position,
+                );
             }
         })
         .child(
@@ -333,6 +349,38 @@ fn selection_at(stage: &StageKind, key: &str) -> Option<(usize, BrowserSelection
 fn split_album_key(key: &str) -> Option<(String, String)> {
     let (artist, title) = key.split_once('\u{1f}')?;
     Some((artist.to_owned(), title.to_owned()))
+}
+
+/// The collection a row's context menu acts on, keyed off the stage: the
+/// entity the row denotes, resolved to a track batch at dispatch time.
+#[must_use]
+fn collection_target(stage: &StageKind, key: &str) -> Option<crate::menus::CollectionTarget> {
+    use crate::menus::CollectionTarget;
+    match stage {
+        StageKind::ArtistsRoot => Some(CollectionTarget::Artist(key.to_owned())),
+        StageKind::AlbumsRoot => {
+            let (artist, title) = split_album_key(key)?;
+            Some(CollectionTarget::Album { artist, title })
+        }
+        StageKind::GenresRoot => Some(CollectionTarget::Genre(key.to_owned())),
+        StageKind::ArtistAlbums { .. } => {
+            let (artist, title) = split_album_key(key)?;
+            Some(CollectionTarget::Album { artist, title })
+        }
+        StageKind::GenreArtists { genre } => Some(CollectionTarget::GenreArtist {
+            artist: key.to_owned(),
+            genre: genre.clone(),
+        }),
+        StageKind::GenreArtistAlbums { genre, .. } => {
+            let (artist, title) = split_album_key(key)?;
+            Some(CollectionTarget::GenreAlbum {
+                artist,
+                title,
+                genre: genre.clone(),
+            })
+        }
+        StageKind::Flat | StageKind::Tracks { .. } | StageKind::Folders => None,
+    }
 }
 
 /// The stage's empty copy: the egui columns' wording, the plain pair for a

@@ -53,6 +53,15 @@ pub struct UiModel {
     pub(crate) scroll_memory: ScrollMemory,
     /// The pump's per-tick comparison cache.
     pub(crate) pump: PumpCache,
+    /// The playlist the stage currently shows, written by the sidebar's
+    /// selection handler (and cleared by every other navigation) so the pump
+    /// can refresh its detail without reading the nav signal.
+    pub(crate) open_playlist: Option<riff_backend::domain::PlaylistId>,
+    /// The built-in smart list the stage currently shows, written by the
+    /// sidebar's selection handler and cleared by every other navigation.
+    pub(crate) open_smart_list: Option<riff_backend::domain::SmartPlaylistKind>,
+    /// The custom smart playlist the stage currently shows.
+    pub(crate) open_custom_list: Option<riff_backend::domain::PlaylistId>,
 }
 
 impl UiModel {
@@ -70,6 +79,9 @@ impl UiModel {
             album_rows: Vec::new(),
             scroll_memory: ScrollMemory::default(),
             pump: PumpCache::new(),
+            open_playlist: None,
+            open_smart_list: None,
+            open_custom_list: None,
         }
     }
 

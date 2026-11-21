@@ -11,6 +11,7 @@
 //! scan's stamp, pinned below the scrolling rows like the egui footer's
 //! bottom panel.
 
+use nsh_base::input;
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
 use riff_backend::app::state::{BrowseMode, LibrarySection, LibrarySession, ViewMode};
@@ -38,6 +39,8 @@ pub(crate) enum SidebarTarget {
     Folders,
     /// A SMART LISTS row: the built-in list it opens.
     SmartList(SmartPlaylistKind),
+    /// A saved custom smart list row.
+    CustomList(PlaylistId),
     /// A PLAYLISTS row: the list it opens.
     Playlist(PlaylistId),
 }
@@ -94,7 +97,12 @@ fn smart_count(view: &SidebarView, kind: SmartPlaylistKind) -> usize {
 /// Every nav row in display order: LIBRARY, then SMART LISTS (folded away
 /// when the persisted flag says so), then PLAYLISTS. The keyboard
 /// traversal's row count is this list's length.
-pub(crate) fn nav_rows(view: &SidebarView, collapsed: bool, advanced: bool) -> Vec<NavRow> {
+pub(crate) fn nav_rows(
+    view: &SidebarView,
+    collapsed: bool,
+    advanced: bool,
+    custom: &[crate::model::CustomListRow],
+) -> Vec<NavRow> {
     let mut rows: Vec<NavRow> = LIBRARY_ROWS
         .iter()
         .map(|(section, label, glyph)| NavRow {
@@ -116,6 +124,12 @@ pub(crate) fn nav_rows(view: &SidebarView, collapsed: bool, advanced: bool) -> V
             label: kind.display_name().to_owned(),
             glyph: Some(Icon::Sparkles),
             count: Some(smart_count(view, kind)),
+        }));
+        rows.extend(custom.iter().map(|list| NavRow {
+            target: SidebarTarget::CustomList(list.id.clone()),
+            label: list.name.clone(),
+            glyph: Some(Icon::Sparkles),
+            count: None,
         }));
     }
     rows.extend(view.playlists.iter().map(|playlist| NavRow {
@@ -170,17 +184,21 @@ pub fn panel(
                 .child(smart_lists_header(model, state))
                 .child(dynamic(move || {
                     section_rows(model, state, nav_focus, |target| {
-                        matches!(target, SidebarTarget::SmartList(_))
+                        matches!(
+                            target,
+                            SidebarTarget::SmartList(_) | SidebarTarget::CustomList(_)
+                        )
                     })
                 }))
-                .child(header(palette, "PLAYLISTS"))
+                .child(playlists_header(state))
+                .child(dynamic(move || create_row(model, state)))
                 .child(dynamic(move || {
                     section_rows(model, state, nav_focus, |target| {
                         matches!(target, SidebarTarget::Playlist(_))
                     })
                 })),
         )
-        .child(footer(state))
+        .child(footer(model, state))
 }
 
 /// The rows of one section, cut out of the display order by `keep` — the
@@ -195,12 +213,18 @@ fn section_rows(
 ) -> Vec<impl IntoElement> {
     let view = state.sidebar.get();
     let flags = state.settings.get().flags;
-    nav_rows(&view, flags.smart_lists_collapsed, flags.advanced_mode)
-        .into_iter()
-        .enumerate()
-        .filter(|(_, row)| keep(&row.target))
-        .map(|(at, row)| nav_row(model, state, nav_focus, at, row))
-        .collect()
+    let custom = state.custom_lists.get();
+    nav_rows(
+        &view,
+        flags.smart_lists_collapsed,
+        flags.advanced_mode,
+        &custom,
+    )
+    .into_iter()
+    .enumerate()
+    .filter(|(_, row)| keep(&row.target))
+    .map(|(at, row)| nav_row(model, state, nav_focus, at, row))
+    .collect()
 }
 
 /// A section header: the small caps label the egui sidebar led its
@@ -210,6 +234,141 @@ fn header(palette: Signal<Palette>, label: &'static str) -> impl IntoElement {
         .text_xs()
         .text_color(move || palette.get().ink_3)
         .test_id("sidebar-section")
+}
+
+/// The PLAYLISTS header with the create control, the egui section header's
+/// shape.
+fn playlists_header(state: UiState) -> impl IntoElement {
+    let palette = state.palette;
+    view()
+        .flex_row()
+        .items_center()
+        .test_id("sidebar-section")
+        .child(
+            text("PLAYLISTS")
+                .flex_1()
+                .text_xs()
+                .text_color(move || palette.get().ink_3),
+        )
+        .child(
+            view()
+                .on_press(move || {
+                    state.playlist_creating.update(|open| *open = !*open);
+                    state.playlist_error.set(None);
+                })
+                .test_id("playlist-create")
+                .label("New playlist")
+                .p(px(tokens::SPACE_XS))
+                .rounded(px(tokens::RADIUS_SM))
+                .hover(|s| s.bg(move || palette.get().row_hover))
+                .child(icon(Icon::Plus, Icon::ICON_SIZE, move || {
+                    palette.get().ink_2
+                })),
+        )
+}
+
+/// The inline create row: a name field and Create/Cancel, with the refusal
+/// line under it. Rendered only while the header's plus is engaged.
+fn create_row(model: Stored<UiModel>, state: UiState) -> AnyElement {
+    let palette = state.palette;
+    if !state.playlist_creating.get() {
+        return view().into_element();
+    }
+    let draft = state.playlist_draft;
+    let write = draft;
+    view()
+        .flex_col()
+        .gap(px(tokens::SPACE_XS))
+        .test_id("playlist-create-row")
+        .child(
+            input()
+                .value(draft)
+                .on_change(move |text: &str| write.set(text.to_owned()))
+                .placeholder("Playlist name")
+                .test_id("playlist-name")
+                .label("Playlist name")
+                .text_sm()
+                .p(px(tokens::SPACE_SM))
+                .rounded(px(tokens::RADIUS_SM))
+                .bg(move || palette.get().surface_2)
+                .text_color(move || palette.get().ink),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap(px(tokens::SPACE_SM))
+                .child(
+                    view()
+                        .on_press(move || create_playlist(model, state))
+                        .test_id("playlist-create-commit")
+                        .label("Create playlist")
+                        .px(px(tokens::SPACE_SM))
+                        .py(px(tokens::SPACE_XS))
+                        .rounded(px(tokens::RADIUS_SM))
+                        .bg(move || palette.get().brand_primary)
+                        .child(text("Create").text_xs().text_color(move || {
+                            palette.get().on_brand
+                        })),
+                )
+                .child(
+                    view()
+                        .on_press(move || {
+                            state.playlist_creating.set(false);
+                            state.playlist_draft.set(String::new());
+                            state.playlist_error.set(None);
+                        })
+                        .test_id("playlist-create-cancel")
+                        .label("Cancel")
+                        .px(px(tokens::SPACE_SM))
+                        .py(px(tokens::SPACE_XS))
+                        .rounded(px(tokens::RADIUS_SM))
+                        .hover(|s| s.bg(move || palette.get().row_hover))
+                        .child(
+                            text("Cancel")
+                                .text_xs()
+                                .text_color(move || palette.get().ink_2),
+                        ),
+                ),
+        )
+        .child(dynamic(move || {
+            state
+                .playlist_error
+                .get()
+                .map_or_else(|| view().into_element(), |reason| {
+                    text(move || reason.clone())
+                        .text_xs()
+                        .text_color(move || palette.get().error)
+                        .test_id("playlist-error")
+                        .into_element()
+                })
+        }))
+        .into_element()
+}
+
+/// Create the drafted playlist: trim, run the built-in name rule, commit,
+/// then open the new list. The store's own refusal (a name another row
+/// holds) is shown verbatim.
+fn create_playlist(model: Stored<UiModel>, state: UiState) {
+    let name = state.playlist_draft.get().trim().to_owned();
+    if name.is_empty() {
+        state.playlist_error.set(Some("Enter a playlist name".to_owned()));
+        return;
+    }
+    if let Some(reason) =
+        riff_backend::app::playlist_name::builtin_smart_list_name_conflict(&name)
+    {
+        state.playlist_error.set(Some(reason));
+        return;
+    }
+    match model.with(|m| m.rt.playlists.create_playlist(&name, &[])) {
+        Ok(id) => {
+            state.playlist_creating.set(false);
+            state.playlist_draft.set(String::new());
+            state.playlist_error.set(None);
+            apply(model, SidebarTarget::Playlist(id));
+        }
+        Err(e) => state.playlist_error.set(Some(e.to_string())),
+    }
 }
 
 /// The SMART LISTS header with the fold chevron the egui header pinned at
@@ -228,6 +387,18 @@ fn smart_lists_header(model: Stored<UiModel>, state: UiState) -> impl IntoElemen
                 .flex_1()
                 .text_xs()
                 .text_color(move || palette.get().ink_3),
+        )
+        .child(
+            view()
+                .on_press(move || crate::screens::smart_playlists::editor::create_new(model, state))
+                .test_id("smart-list-create")
+                .label("New smart playlist")
+                .p(px(tokens::SPACE_XS))
+                .rounded(px(tokens::RADIUS_SM))
+                .hover(|s| s.bg(move || palette.get().row_hover))
+                .child(icon(Icon::Plus, Icon::ICON_SIZE, move || {
+                    palette.get().ink_2
+                })),
         )
         .child(
             view()
@@ -335,6 +506,7 @@ fn is_active(nav: NavView, target: &SidebarTarget) -> bool {
             nav.view_mode == ViewMode::Library && nav.browse_mode == BrowseMode::Folders
         }
         SidebarTarget::SmartList(kind) => nav.smart_list == Some(*kind),
+        SidebarTarget::CustomList(id) => nav.custom_list.as_ref() == Some(id),
         SidebarTarget::Playlist(id) => nav.playlist.as_ref() == Some(id),
     }
 }
@@ -344,10 +516,12 @@ fn is_active(nav: NavView, target: &SidebarTarget) -> bool {
 pub(crate) fn activate(model: Stored<UiModel>, at: usize) {
     let state = model.with(|m| m.signals());
     let flags = state.settings.get().flags;
+    let custom = state.custom_lists.get();
     let rows = nav_rows(
         &state.sidebar.get(),
         flags.smart_lists_collapsed,
         flags.advanced_mode,
+        &custom,
     );
     if let Some(row) = rows.into_iter().nth(at) {
         apply(model, row.target);
@@ -381,13 +555,33 @@ pub(crate) fn apply(model: Stored<UiModel>, target: SidebarTarget) {
                 land_on_library(&mut library);
                 nav.smart_list = Some(*kind);
                 nav.playlist = None;
+                nav.custom_list = None;
+                m.open_smart_list = Some(*kind);
+            }
+            SidebarTarget::CustomList(id) => {
+                land_on_library(&mut library);
+                nav.smart_list = None;
+                nav.playlist = None;
+                nav.custom_list = Some(id.clone());
+                m.open_custom_list = Some(id.clone());
             }
             SidebarTarget::Playlist(id) => {
                 // The egui row's Open is slots only: no view field moves,
                 // the list draws over whatever the Library view stands in.
                 nav.playlist = Some(id.clone());
                 nav.smart_list = None;
+                nav.custom_list = None;
+                m.open_playlist = Some(id.clone());
             }
+        }
+        if !matches!(target, SidebarTarget::Playlist(_)) {
+            m.open_playlist = None;
+        }
+        if !matches!(target, SidebarTarget::SmartList(_)) {
+            m.open_smart_list = None;
+        }
+        if !matches!(target, SidebarTarget::CustomList(_)) {
+            m.open_custom_list = None;
         }
         nav.view_mode = library.view_mode;
         nav.browse_mode = library.browse_mode;
@@ -431,7 +625,7 @@ fn toggle_smart_lists(model: Stored<UiModel>) {
 /// The footer: the Add-folder affordance (inert — the egui contract routes
 /// it to the native folder picker, N14's platform integration here) and the
 /// last full scan's stamp, the two facts the egui footer carried.
-fn footer(state: UiState) -> impl IntoElement {
+fn footer(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
     let palette = state.palette;
     view()
         .flex_col()
@@ -444,10 +638,33 @@ fn footer(state: UiState) -> impl IntoElement {
                 .gap(px(tokens::SPACE_SM))
                 .p(px(tokens::SPACE_SM))
                 .rounded(px(tokens::RADIUS_SM))
+                .test_id("settings-open")
+                .label("Settings")
+                .hover(|s| s.bg(move || palette.get().row_hover))
+                .on_press(move || crate::screens::settings::open(model, state))
+                .child(icon(Icon::Settings, Icon::ICON_SIZE, move || {
+                    palette.get().ink_2
+                }))
+                .child(
+                    text("Settings")
+                        .text_sm()
+                        .text_color(move || palette.get().ink_2),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(tokens::SPACE_SM))
+                .p(px(tokens::SPACE_SM))
+                .rounded(px(tokens::RADIUS_SM))
                 .border(px(tokens::BORDER_HAIRLINE))
                 .border_color(move || palette.get().border)
                 .test_id("add-folder")
                 .label("Add folder")
+                .on_press(move || {
+                    crate::platform::library_paths::pick_folders(model, state)
+                })
                 .child(icon(Icon::Plus, Icon::ICON_SIZE, move || {
                     palette.get().ink_2
                 }))
@@ -485,7 +702,9 @@ pub fn last_scan_line(last_scan: Option<SystemTime>) -> String {
 /// on its id, whose slug the name's label would only re-slug.
 fn row_id(row: &NavRow) -> String {
     match &row.target {
-        SidebarTarget::Playlist(id) => format!("nav-playlist-{}", id.0),
+        SidebarTarget::Playlist(id) | SidebarTarget::CustomList(id) => {
+            format!("nav-list-{}", id.0)
+        }
         _ => nav_id(&row.label),
     }
 }
@@ -539,7 +758,7 @@ mod tests {
             .into(),
             last_scan: None,
         };
-        let rows = nav_rows(&view, false, true);
+        let rows = nav_rows(&view, false, true, &[]);
         assert_eq!(rows.len(), 5 + 6 + 1);
         assert_eq!(rows[0].count, Some(50_000));
         assert_eq!(rows[3].count, Some(9));
@@ -559,8 +778,8 @@ mod tests {
     #[test]
     fn the_fold_removes_the_smart_rows_only() {
         let view = SidebarView::default();
-        let open = nav_rows(&view, false, false);
-        let folded = nav_rows(&view, true, false);
+        let open = nav_rows(&view, false, false, &[]);
+        let folded = nav_rows(&view, true, false, &[]);
         assert_eq!(open.len(), 9);
         assert_eq!(folded.len(), 5);
     }

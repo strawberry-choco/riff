@@ -82,11 +82,13 @@ fn wordmark(palette: Signal<Palette>) -> impl IntoElement {
 fn status(state: UiState) -> impl IntoElement {
     let palette = state.palette;
     let line = move || {
-        state
-            .notices
-            .get()
-            .last()
-            .map_or_else(String::new, |notice| notice.message.clone())
+        state.action_status.get().unwrap_or_else(|| {
+            state
+                .notices
+                .get()
+                .last()
+                .map_or_else(String::new, |notice| notice.message.clone())
+        })
     };
     text(line)
         .flex_1()

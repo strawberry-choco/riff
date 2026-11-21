@@ -15,7 +15,9 @@
 mod app;
 pub mod bridge;
 pub mod components;
+pub mod menus;
 mod model;
+pub mod platform;
 pub mod screens;
 pub mod shell;
 pub mod theme;

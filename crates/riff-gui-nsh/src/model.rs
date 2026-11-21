@@ -138,6 +138,8 @@ pub struct NavView {
     pub smart_list: Option<SmartPlaylistKind>,
     /// The playlist opened over the Library view.
     pub playlist: Option<PlaylistId>,
+    /// The custom smart playlist opened over the Library view.
+    pub custom_list: Option<PlaylistId>,
 }
 
 impl Default for NavView {
@@ -152,6 +154,7 @@ impl Default for NavView {
             browser_path: Vec::new(),
             smart_list: None,
             playlist: None,
+            custom_list: None,
         }
     }
 }
@@ -263,7 +266,11 @@ pub fn stage_of_parts(
 /// their own units).
 #[must_use]
 pub fn stage_of(nav: &NavView) -> Option<StageKind> {
-    if nav.playlist.is_some() || nav.smart_list.is_some() || nav.view_mode != ViewMode::Library {
+    if nav.playlist.is_some()
+        || nav.smart_list.is_some()
+        || nav.custom_list.is_some()
+        || nav.view_mode != ViewMode::Library
+    {
         return None;
     }
     Some(stage_of_parts(
@@ -361,6 +368,403 @@ impl SettingsSnapshot {
             && self.replaygain_mode == replaygain_mode
     }
 }
+
+/// One SMART LISTS custom row: the identity a selection write opens the
+/// list with and the name the sidebar and editor paint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomListRow {
+    pub id: PlaylistId,
+    pub name: String,
+}
+
+/// One user playlist's detail: its identity, saved name and resolved
+/// entries, in playlist order. Dangling entries stay listed with
+/// `track: None` (ADR 0001) and are skipped by playback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaylistDetail {
+    pub id: PlaylistId,
+    pub name: String,
+    pub rows: Arc<[PlaylistRowView]>,
+}
+
+/// One playlist entry as the row renders it: the identity written through
+/// any reorder, the resolved track when the Library still holds it, and
+/// whether the store's valid verdict says so.
+#[derive(Debug, Clone)]
+pub struct PlaylistRowView {
+    pub id: TrackId,
+    pub track: Option<Arc<Track>>,
+    pub valid: bool,
+}
+
+impl PartialEq for PlaylistRowView {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.valid == other.valid
+            && match (&self.track, &other.track) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// Build one playlist's detail from the read seam, or `None` when the store
+/// no longer knows the list.
+pub(crate) fn playlist_detail(
+    views: &mut SessionViews,
+    id: &PlaylistId,
+) -> Option<PlaylistDetail> {
+    let name = reads::playlists(views)
+        .iter()
+        .find(|playlist| &playlist.id == id)
+        .map(|playlist| playlist.name.clone())?;
+    let view = reads::playlist_view(views, id)?;
+    let rows = view
+        .rows
+        .iter()
+        .map(|(id, track, valid)| PlaylistRowView {
+            id: id.clone(),
+            track: track.clone().map(Arc::new),
+            valid: *valid,
+        })
+        .collect::<Vec<_>>();
+    Some(PlaylistDetail {
+        id: id.clone(),
+        name,
+        rows: rows.into(),
+    })
+}
+
+/// One built-in smart list's detail: the kind, its display name and its
+/// tracks under the list's own bound.
+#[derive(Debug, Clone)]
+pub struct SmartListDetail {
+    pub kind: SmartPlaylistKind,
+    pub name: String,
+    pub tracks: Arc<[Track]>,
+}
+
+impl PartialEq for SmartListDetail {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.name == other.name
+            && Arc::ptr_eq(&self.tracks, &other.tracks)
+    }
+}
+
+/// Build one built-in smart list's detail through the seam.
+pub(crate) fn smart_list_detail(
+    views: &mut SessionViews,
+    kind: SmartPlaylistKind,
+) -> SmartListDetail {
+    SmartListDetail {
+        kind,
+        name: kind.display_name().to_owned(),
+        tracks: reads::smart_list(views, kind),
+    }
+}
+
+/// The tag editor's draft: the eleven editable values as the fields show
+/// them (empty = unset), plus the album aggregate's per-field `(different)`
+/// marks. The draft is engine-thread state in the bridge signals; the save
+/// builds one request per written track.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TagDraft {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub year: String,
+    pub track_number: String,
+    pub track_gain: String,
+    pub track_peak: String,
+    pub album_gain: String,
+    pub album_peak: String,
+    /// Which fields the album's tracks disagree on, in the field order
+    /// above. A marked field shows `(different)` until edited.
+    pub different: [bool; 11],
+}
+
+/// The draft field order, the one place the eleven names live.
+pub const TAG_FIELDS: [&str; 11] = [
+    "Title",
+    "Artist",
+    "Album",
+    "Album artist",
+    "Genre",
+    "Year",
+    "Track number",
+    "Track gain",
+    "Track peak",
+    "Album gain",
+    "Album peak",
+];
+
+impl TagDraft {
+    /// The draft from one track's metadata.
+    #[must_use]
+    pub fn of_track(track: &Track) -> Self {
+        let mut draft = Self::default();
+        draft.title = track.metadata.title.clone().unwrap_or_default();
+        draft.artist = track.metadata.artist.clone().unwrap_or_default();
+        draft.album = track.metadata.album.clone().unwrap_or_default();
+        draft.album_artist = track.metadata.album_artist.clone().unwrap_or_default();
+        draft.genre = track.metadata.genre.clone().unwrap_or_default();
+        draft.year = track.metadata.year.map(|y| y.to_string()).unwrap_or_default();
+        draft.track_number = track
+            .metadata
+            .track_number
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        draft.track_gain = number(track.metadata.replaygain_track_gain);
+        draft.track_peak = number(track.metadata.replaygain_track_peak);
+        draft.album_gain = number(track.metadata.replaygain_album_gain);
+        draft.album_peak = number(track.metadata.replaygain_album_peak);
+        draft
+    }
+
+    /// The album aggregate: a field all tracks share keeps its value; one
+    /// they disagree on is blanked and marked `(different)`.
+    #[must_use]
+    pub fn of_album(tracks: &[Track]) -> Self {
+        let Some(first) = tracks.first() else {
+            return Self::default();
+        };
+        let mut draft = Self::of_track(first);
+        for track in &tracks[1..] {
+            let other = Self::of_track(track);
+            let pairs = [
+                (&mut draft.title, &other.title),
+                (&mut draft.artist, &other.artist),
+                (&mut draft.album, &other.album),
+                (&mut draft.album_artist, &other.album_artist),
+                (&mut draft.genre, &other.genre),
+                (&mut draft.year, &other.year),
+                (&mut draft.track_number, &other.track_number),
+                (&mut draft.track_gain, &other.track_gain),
+                (&mut draft.track_peak, &other.track_peak),
+                (&mut draft.album_gain, &other.album_gain),
+                (&mut draft.album_peak, &other.album_peak),
+            ];
+            for (index, (held, incoming)) in pairs.into_iter().enumerate() {
+                if held != incoming {
+                    draft.different[index] = true;
+                    held.clear();
+                }
+            }
+        }
+        draft
+    }
+
+    /// The field at `index`, for the render and the save.
+    #[must_use]
+    pub fn field(&self, index: usize) -> &str {
+        match index {
+            0 => &self.title,
+            1 => &self.artist,
+            2 => &self.album,
+            3 => &self.album_artist,
+            4 => &self.genre,
+            5 => &self.year,
+            6 => &self.track_number,
+            7 => &self.track_gain,
+            8 => &self.track_peak,
+            9 => &self.album_gain,
+            _ => &self.album_peak,
+        }
+    }
+
+    /// Write the field at `index` from the input's text and clear its
+    /// `(different)` mark (the user typed a value the album now shares).
+    pub fn set_field(&mut self, index: usize, value: String) {
+        match index {
+            0 => self.title = value,
+            1 => self.artist = value,
+            2 => self.album = value,
+            3 => self.album_artist = value,
+            4 => self.genre = value,
+            5 => self.year = value,
+            6 => self.track_number = value,
+            7 => self.track_gain = value,
+            8 => self.track_peak = value,
+            9 => self.album_gain = value,
+            _ => self.album_peak = value,
+        }
+        if let Some(mark) = self.different.get_mut(index) {
+            *mark = false;
+        }
+    }
+
+    /// The placeholder a field shows: `(different)` when the album
+    /// disagrees, `(none)` when the value is unset.
+    #[must_use]
+    pub fn placeholder(&self, index: usize) -> &'static str {
+        if self.different.get(index).copied().unwrap_or(false) {
+            "(different)"
+        } else {
+            "(none)"
+        }
+    }
+
+    /// The text/number half of the draft as a `TagEdit`: only non-empty
+    /// fields travel, so a blank field never clears a file's tag.
+    #[must_use]
+    pub fn edit(&self) -> riff_backend::app::traits::TagEdit {
+        riff_backend::app::traits::TagEdit {
+            title: non_empty(&self.title),
+            artist: non_empty(&self.artist),
+            album: non_empty(&self.album),
+            album_artist: non_empty(&self.album_artist),
+            genre: non_empty(&self.genre),
+            track_number: self.track_number.trim().parse().ok(),
+            disc_number: None,
+            year: self.year.trim().parse().ok(),
+            composer: None,
+            comment: None,
+        }
+    }
+
+    /// The ReplayGain half of the draft, only non-empty values.
+    #[must_use]
+    pub fn replaygain(&self) -> riff_backend::app::traits::ReplayGainTags {
+        riff_backend::app::traits::ReplayGainTags {
+            track_gain: self.track_gain.trim().parse().ok(),
+            track_peak: self.track_peak.trim().parse().ok(),
+            album_gain: self.album_gain.trim().parse().ok(),
+            album_peak: self.album_peak.trim().parse().ok(),
+        }
+    }
+
+    /// Whether the draft differs from `track` in any field — the per-track
+    /// save's dirtiness and the album save's skip rule.
+    #[must_use]
+    pub fn differs_from(&self, track: &Track) -> bool {
+        let theirs = Self::of_track(track);
+        (0..11).any(|index| self.field(index) != theirs.field(index))
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn number(value: Option<f32>) -> String {
+    value.map_or_else(String::new, |v| v.to_string())
+}
+
+/// One registered library path as the Settings page shows it: the path, its
+/// readiness word, and its watch state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryPathView {
+    pub path: std::path::PathBuf,
+    pub readiness: String,
+    pub watching: bool,
+    /// The watcher's refusal, when its last attempt failed.
+    pub watch_warning: Option<String>,
+}
+
+impl LibraryPathView {
+    /// The readiness column for a session status.
+    #[must_use]
+    pub fn readiness_of(status: &riff_backend::app::state::LibraryStatus) -> String {
+        use riff_backend::app::state::LibraryStatus;
+        match status {
+            LibraryStatus::Idle => "Ready".to_owned(),
+            LibraryStatus::Scanning { files_found } => format!("Scanning ({files_found})"),
+            LibraryStatus::Scanned(count) => format!("Scanned ({count})"),
+            LibraryStatus::Unavailable => "Folder unavailable".to_owned(),
+        }
+    }
+}
+
+/// The Settings pages, in sidebar order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsPage {
+    #[default]
+    Library,
+    Playback,
+    Appearance,
+    Advanced,
+    About,
+}
+
+impl SettingsPage {
+    pub const ALL: [Self; 5] = [
+        Self::Library,
+        Self::Playback,
+        Self::Appearance,
+        Self::Advanced,
+        Self::About,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Library => "Library",
+            Self::Playback => "Playback",
+            Self::Appearance => "Appearance",
+            Self::Advanced => "Advanced",
+            Self::About => "About",
+        }
+    }
+}
+
+/// The appearance choice. Dark and Light are explicit; System follows the
+/// OS. High contrast is a separate persisted flag over whichever base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppearanceMode {
+    #[default]
+    Dark,
+    Light,
+    System,
+    DarkHighContrast,
+    LightHighContrast,
+}
+
+impl AppearanceMode {
+    pub const ALL: [Self; 5] = [
+        Self::Dark,
+        Self::Light,
+        Self::System,
+        Self::DarkHighContrast,
+        Self::LightHighContrast,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::System => "System",
+            Self::DarkHighContrast => "Dark high contrast",
+            Self::LightHighContrast => "Light high contrast",
+        }
+    }
+
+    /// The palette this mode resolves to.
+    #[must_use]
+    pub fn palette(self) -> crate::theme::Palette {
+        use crate::theme::Palette;
+        match self {
+            Self::Dark => Palette::dark(),
+            Self::Light => Palette::light(),
+            Self::System => {
+                if nsh_core::element::dark() {
+                    Palette::dark()
+                } else {
+                    Palette::light()
+                }
+            }
+            Self::DarkHighContrast => Palette::dark().high_contrast(),
+            Self::LightHighContrast => Palette::light().high_contrast(),
+        }
+    }
+}
+
+
 
 /// The covers the View half holds, keyed by the decision half's composite
 /// [`crate::bridge::covers::CoverCacheKey`]: one artwork identity at one
@@ -667,7 +1071,9 @@ pub(crate) mod reads {
     use super::{PlaylistView, SessionViews};
     use riff_backend::app::state::TrackSort;
     use riff_backend::app::store::{CustomSmartPlaylist, SortDirection};
-    use riff_backend::domain::{Album, Artist, GenreCount, Playlist, PlaylistId, Track, TrackId};
+    use riff_backend::domain::{
+        Album, Artist, GenreCount, Playlist, PlaylistId, SmartPlaylistKind, Track, TrackId,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::SystemTime;
@@ -850,6 +1256,15 @@ pub(crate) mod reads {
 
     pub(crate) fn playlists(views: &mut SessionViews) -> Arc<[Playlist]> {
         views.playlists()
+    }
+
+    /// One built-in smart list's tracks under its own bound, the sidebar's
+    /// and the stage's shared limit choice.
+    pub(crate) fn smart_list(
+        views: &mut SessionViews,
+        kind: SmartPlaylistKind,
+    ) -> Arc<[Track]> {
+        views.smart_list(kind, crate::menus::smart_list_limit(kind))
     }
 
     pub(crate) fn playlist_view(views: &mut SessionViews, id: &PlaylistId) -> Option<PlaylistView> {

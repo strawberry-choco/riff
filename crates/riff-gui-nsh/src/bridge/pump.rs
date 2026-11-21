@@ -65,6 +65,14 @@ struct TickOutcome {
     list_revision: Option<u64>,
     browse: Option<Arc<[EntityView]>>,
     folder_roots: Option<Arc<[PathBuf]>>,
+    custom_lists: Option<Result<Arc<[crate::model::CustomListRow]>, String>>,
+    playlist_detail: Option<Option<crate::model::PlaylistDetail>>,
+    smart_list_detail: Option<Option<crate::model::SmartListDetail>>,
+    custom_list_total: Option<usize>,
+    library_paths: Option<Arc<[crate::model::LibraryPathView]>>,
+    cache_status: Option<String>,
+    pass_progress: Option<(usize, usize)>,
+    pass_status: Option<String>,
 }
 
 /// The pump's per-tick comparison state: what the last tick saw, so a tick
@@ -84,6 +92,21 @@ pub(crate) struct PumpCache {
     /// needle, the listing sort and the entity roots' direction — the
     /// content identity a move rebuilds against.
     stage: Option<(StageKind, String, TrackSort, bool)>,
+    /// The custom smart lists last read, as the id/name pairs the sidebar
+    /// and editor paint.
+    custom_lists: Option<Vec<crate::model::CustomListRow>>,
+    /// The playlist whose detail the last build served.
+    open_playlist: Option<riff_backend::domain::PlaylistId>,
+    /// The built-in smart list whose detail the last build served.
+    open_smart_list: Option<riff_backend::domain::SmartPlaylistKind>,
+    /// The custom list whose total the last build served, and the total.
+    open_custom_list: Option<riff_backend::domain::PlaylistId>,
+    custom_total: usize,
+    /// The pass progress and outcome the last tick reported, and the
+    /// thumbnail-cache clear's last reported outcome.
+    pass_progress: (usize, usize),
+    pass_status: Option<String>,
+    cache_status: Option<String>,
 }
 
 impl PumpCache {
@@ -104,6 +127,14 @@ impl PumpCache {
             list_total: 0,
             list_revision: 0,
             stage: None,
+            custom_lists: None,
+            open_playlist: None,
+            open_smart_list: None,
+            open_custom_list: None,
+            custom_total: 0,
+            pass_progress: (0, 0),
+            pass_status: None,
+            cache_status: None,
         }
     }
 }
@@ -202,6 +233,9 @@ pub fn install(model: Stored<UiModel>) {
     let sigs = model.with(|m| m.state);
     set_interval(TICK, move || {
         let outcome = model.with(|m| {
+            let open_playlist = m.open_playlist.clone();
+            let open_smart_list = m.open_smart_list;
+            let open_custom_list = m.open_custom_list.clone();
             tick(
                 &mut m.rt,
                 &mut m.pump,
@@ -209,6 +243,9 @@ pub fn install(model: Stored<UiModel>) {
                 &mut m.cover_views,
                 &mut m.list_window,
                 &mut m.album_rows,
+                open_playlist.as_ref(),
+                open_smart_list,
+                open_custom_list.as_ref(),
             )
         });
         // Every write below is outside the borrow: `set` notifies bindings
@@ -244,6 +281,36 @@ pub fn install(model: Stored<UiModel>) {
         if let Some(roots) = outcome.folder_roots {
             sigs.folder_roots.set(roots);
         }
+        if let Some(read) = outcome.custom_lists {
+            match read {
+                Ok(rows) => {
+                    sigs.custom_lists.set(rows);
+                    sigs.custom_lists_error.set(None);
+                }
+                Err(reason) => sigs.custom_lists_error.set(Some(reason)),
+            }
+        }
+        if let Some(detail) = outcome.playlist_detail {
+            sigs.playlist_detail.set(detail);
+        }
+        if let Some(detail) = outcome.smart_list_detail {
+            sigs.smart_list_detail.set(detail);
+        }
+        if let Some(total) = outcome.custom_list_total {
+            sigs.custom_list_total.set(total);
+        }
+        if let Some(paths) = outcome.library_paths {
+            sigs.library_paths.set(paths);
+        }
+        if let Some(status) = outcome.cache_status {
+            sigs.cache_status.set(Some(status));
+        }
+        if let Some(progress) = outcome.pass_progress {
+            sigs.pass_progress.set(progress);
+        }
+        if let Some(status) = outcome.pass_status {
+            sigs.pass_status.set(Some(status));
+        }
         if outcome.covers_arrived {
             // `update` always notifies, which is right here: the count only
             // moves when covers landed (P0 correction 9).
@@ -261,6 +328,9 @@ fn tick(
     cover_views: &mut CoverViews,
     list_window: &mut ListWindow,
     album_rows_out: &mut Vec<Arc<riff_backend::domain::Track>>,
+    open_playlist: Option<&riff_backend::domain::PlaylistId>,
+    open_smart_list: Option<riff_backend::domain::SmartPlaylistKind>,
+    open_custom_list: Option<&riff_backend::domain::PlaylistId>,
 ) -> TickOutcome {
     let mut outcome = TickOutcome {
         playback: None,
@@ -274,6 +344,14 @@ fn tick(
         list_revision: None,
         browse: None,
         folder_roots: None,
+        custom_lists: None,
+        playlist_detail: None,
+        smart_list_detail: None,
+        custom_list_total: None,
+        library_paths: None,
+        cache_status: None,
+        pass_progress: None,
+        pass_status: None,
     };
     let mut sidebar_dirty = cache.primed;
 
@@ -325,9 +403,32 @@ fn tick(
     let stage;
     let stage_desc;
     let mut stage_query: Option<String> = None;
+    let mut path_views: Option<Arc<[crate::model::LibraryPathView]>> = None;
     {
         let library = rt.library.lock_or_recover();
         folder_roots = library.library_paths.paths().len();
+        if sidebar_dirty {
+            use riff_backend::app::state::WatchState;
+            path_views = Some(
+                library
+                    .library_paths
+                    .paths()
+                    .iter()
+                    .map(|path| crate::model::LibraryPathView {
+                        path: path.clone(),
+                        readiness: crate::model::LibraryPathView::readiness_of(
+                            &library.library_paths.readiness(path),
+                        ),
+                        watching: library.library_paths.watch_state(path) == WatchState::Enabled,
+                        watch_warning: match library.library_paths.watch_state(path) {
+                            WatchState::Warning(reason) => Some(reason),
+                            _ => None,
+                        },
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+        }
         track_sort = library.track_sort;
         stage = stage_of_parts(
             library.browse_mode,
@@ -353,6 +454,7 @@ fn tick(
             ));
         }
     }
+    outcome.library_paths = path_views;
 
     // 4. PlaybackView: built only when the cheap comparison moved (or on the
     //    priming tick), with the identity `Arc`s reused when the playing
@@ -456,6 +558,79 @@ fn tick(
         outcome.sidebar = Some(view);
     }
 
+    // 6b. The custom smart playlists: the sidebar's SMART LISTS rows and the
+    //     editor's load both read them. They move with the playlist
+    //     generation (names and identity) and with the Library generation
+    //     (membership is a query over tracks), so the same dirty flag
+    //     serves. The failure reason travels alone, never a degraded empty.
+    if sidebar_dirty || cache.custom_lists.is_none() {
+        match reads::try_custom_smart_playlists(&mut rt.session_views) {
+            Ok(lists) => {
+                let rows: Vec<crate::model::CustomListRow> = lists
+                    .into_iter()
+                    .map(|list| crate::model::CustomListRow {
+                        id: list.id,
+                        name: list.name,
+                    })
+                    .collect();
+                if cache.custom_lists.as_ref() != Some(&rows) {
+                    cache.custom_lists = Some(rows.clone());
+                    outcome.custom_lists = Some(Ok(rows.into()));
+                }
+            }
+            Err(reason) => {
+                outcome.custom_lists = Some(Err(reason));
+            }
+        }
+    }
+
+    // 6c. The open playlist's detail: rebuilt when the open list changes or
+    //     either generation behind its rows moved. The nav signal is not
+    //     read here — the selection handler records the open list on the
+    //     model instead.
+    let detail_moved = cache.open_playlist.as_ref() != open_playlist
+        || outcome.playlist_revision.is_some()
+        || outcome.library_revision.is_some();
+    if detail_moved {
+        cache.open_playlist = open_playlist.cloned();
+        outcome.playlist_detail = Some(
+            open_playlist
+                .and_then(|id| crate::model::playlist_detail(&mut rt.session_views, id)),
+        );
+    }
+
+    // 6d. The open built-in smart list: its tracks re-read when the list
+    //     opens or the Library generation moves.
+    let smart_moved = cache.open_smart_list != open_smart_list
+        || outcome.library_revision.is_some();
+    if smart_moved {
+        cache.open_smart_list = open_smart_list;
+        outcome.smart_list_detail = Some(
+            open_smart_list
+                .map(|kind| crate::model::smart_list_detail(&mut rt.session_views, kind)),
+        );
+    }
+
+    // 6e. The open custom smart list's total: re-read when the list opens or
+    //     either generation moves (membership is a Library query, identity a
+    //     playlist one). Rows are read by the stage's virtual list through
+    //     the seam's own bounded window.
+    let custom_moved = cache.open_custom_list.as_ref() != open_custom_list
+        || outcome.library_revision.is_some()
+        || outcome.playlist_revision.is_some();
+    if custom_moved {
+        cache.open_custom_list = open_custom_list.cloned();
+        let total = open_custom_list.map_or(0, |id| {
+            rt.session_views
+                .custom_list_count(id, TrackSort::NumberAsc, None)
+                .unwrap_or_default()
+        });
+        if total != cache.custom_total {
+            cache.custom_total = total;
+            outcome.custom_list_total = Some(total);
+        }
+    }
+
     // 7. Covers: drain the service through the ported decision half; every
     //    arrival (artless verdicts included, as terminal non-answers) leaves
     //    the in-flight set, and the ones with pixels enter the View map,
@@ -538,6 +713,46 @@ fn tick(
         list_window.reset();
         cache.list_revision += 1;
         outcome.list_revision = Some(cache.list_revision);
+    }
+
+    // 8b. The background services' settled reports: the ReplayGain pass's
+    //     progress and outcome, and the thumbnail cache clear's verdict. The
+    //     reads are non-blocking cell reads, cheap enough for every tick.
+    let progress = rt.passes.poll_progress();
+    if progress != cache.pass_progress {
+        cache.pass_progress = progress;
+        outcome.pass_progress = Some(progress);
+    }
+    if let Some(report) = rt.passes.poll() {
+        let mut line = format!(
+            "ReplayGain pass: measured {}, skipped {}, failed {}",
+            report.measured, report.skipped, report.failed
+        );
+        if report.cancelled {
+            line.push_str(" (cancelled)");
+        }
+        if let Some(reason) = report.first_failure {
+            line.push_str(": ");
+            line.push_str(&reason);
+        }
+        if cache.pass_status.as_deref() != Some(line.as_str()) {
+            cache.pass_status = Some(line.clone());
+            outcome.pass_status = Some(line);
+        }
+    }
+    if let Some(clear) = rt.covers.poll_cache_clear() {
+        let line = match clear {
+            riff_backend::app::cover_service::ClearCacheOutcome::Cleared => {
+                "Thumbnail cache cleared".to_owned()
+            }
+            riff_backend::app::cover_service::ClearCacheOutcome::Failed { reason } => {
+                format!("Could not clear the thumbnail cache: {reason}")
+            }
+        };
+        if cache.cache_status.as_deref() != Some(line.as_str()) {
+            cache.cache_status = Some(line.clone());
+            outcome.cache_status = Some(line);
+        }
     }
 
     // 9. The settings round-trip: the pump is this frontend's frame end.

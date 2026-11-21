@@ -41,6 +41,7 @@ use riff_backend::app::views::SessionViews;
 use riff_backend::composition::AppRuntime;
 use riff_backend::domain::{PlaybackCommand, Track, TrackId};
 use riff_gui_nsh::bridge::{UiModel, install};
+use riff_gui_nsh::screens::library::search;
 
 use crate::MutexExt;
 use crate::mocks::{
@@ -227,6 +228,8 @@ pub(crate) fn BridgeProbeApp() -> impl IntoElement {
     let playlist_sig = state.playlist_revision;
     let covers_sig = state.covers;
     let notices_sig = state.notices;
+    let list_revision_sig = state.list_revision;
+    let model_for_query = model;
 
     let transport = ChannelTransport::new(cmd_tx.clone());
     let transport_playpause = transport.clone();
@@ -284,6 +287,10 @@ pub(crate) fn BridgeProbeApp() -> impl IntoElement {
                 )
             })
             .test_id("revisions"),
+        )
+        .child(
+            text(move || format!("list revision {}", list_revision_sig.get()))
+                .test_id("list-revisions"),
         )
         .child(
             // The settings-commit count rides the volume read: a binding
@@ -381,6 +388,12 @@ pub(crate) fn BridgeProbeApp() -> impl IntoElement {
                             let _ = notice_tx_line.send("the engine said something".to_owned());
                         })
                         .child(text("Notice")),
+                )
+                .child(
+                    button()
+                        .test_id("query")
+                        .on_press(move || search::query_input(model_for_query, "probe"))
+                        .child(text("Query")),
                 ),
         )
 }
@@ -466,6 +479,21 @@ fn library_and_playlist_revisions_move_with_their_generations() {
         .expect("playlist trigger presses");
     app.wait_for("text:/pl 2/")
         .expect("playlist generation landed");
+}
+
+/// The search retarget's announcement: the needle's write mutates no store,
+/// so the pump cannot see it through a generation — it re-stamps the row
+/// window's query, drops the rows and bumps the list revision, the same
+/// seam a committed Library mutation and a sort change announce through.
+#[test]
+fn a_search_write_bumps_the_list_revision_through_the_window_reset() {
+    let mut app = start_probe();
+    app.wait_for("text:/list revision 1/")
+        .expect("the priming build announced once");
+
+    app.press("id:query").unwrap();
+    app.wait_for("text:/list revision 2/")
+        .expect("the needle's retarget announced");
 }
 
 #[test]

@@ -9,12 +9,14 @@
 
 use nsh_core::desktop::{WindowFrame, WindowMode, WindowPlacement};
 use nsh_core::element::desktop::current_window;
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
 use riff_backend::app::preferences::WindowGeometry;
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
+use crate::model::StageKind;
 
 use super::player_bar;
 use super::sidebar;
@@ -34,6 +36,7 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
     let search = element_ref();
     let list = element_ref();
     let (focus, nav_focus, list_focus) = keyboard(model, search, list);
+    clear_list_focus_on_stage_switch(state, list_focus);
 
     view()
         .flex_1()
@@ -41,16 +44,18 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         .test_id("shell")
         .bg(move || palette.get().background)
         .text_color(move || palette.get().ink)
-        .child(title_bar::bar(state, &search, focus))
+        .child(title_bar::bar(model, state, &search, focus))
         .child(middle(model, state, nav_focus, list_focus, list))
         .child(player_bar::bar(model, state, focus))
 }
 
-/// The middle region: the sidebar panel beside the stage. The stage renders
-/// the All Tracks listing (list beside inspector) while the nav state names
-/// it — the drill-downs land at N7 — and an empty surface otherwise.
-/// `flex_1` is load-bearing: without it the region sizes to its children
-/// and the stage collapses to nothing (P0 correction 21).
+/// The middle region: the sidebar panel beside the stage slot. The slot is
+/// the stage table (N7): the stage the nav state names mounts there — the
+/// flat All Tracks listing, a browse drill-down, the Folders tree — and an
+/// empty surface for the views whose stages are later units' (playlists,
+/// smart lists, Now Playing, Settings). `flex_1` is load-bearing: without
+/// it the region sizes to its children and the stage collapses to nothing
+/// (P0 correction 21).
 fn middle(
     model: Stored<UiModel>,
     state: UiState,
@@ -58,27 +63,52 @@ fn middle(
     list_focus: Signal<Option<usize>>,
     list: ElementRef,
 ) -> impl IntoElement {
-    let palette = state.palette;
     let nav = state.nav;
     view()
         .flex_1()
         .flex_row()
         .child(sidebar::panel(model, state, nav_focus))
-        .child(
-            when(
-                move || crate::screens::library::list::is_all_tracks(&nav.get()),
-                move || {
-                    crate::screens::library::list::stage(model, state, list, list_focus)
-                        .into_element()
-                },
-            )
-            .otherwise(move || {
-                view()
-                    .flex_1()
-                    .test_id("stage")
-                    .bg(move || palette.get().surface_row)
-            }),
-        )
+        .child(dynamic(move || match crate::model::stage_of(&nav.get()) {
+            None => empty_stage(state).into_element(),
+            Some(StageKind::Flat) => {
+                crate::screens::library::list::stage(model, state, list, list_focus).into_element()
+            }
+            Some(StageKind::Folders) => {
+                crate::screens::library::folders::stage(model, state).into_element()
+            }
+            Some(kind @ StageKind::Tracks { .. }) => {
+                crate::screens::library::browse::tracks_stage(model, state, list, list_focus, kind)
+                    .into_element()
+            }
+            Some(kind) => {
+                crate::screens::library::browse::entity_stage(model, state, kind).into_element()
+            }
+        }))
+}
+
+/// The stage slot's empty surface: a later unit's stage (the plan's N10
+/// playlists, N12 smart lists, N13 Now Playing and Settings).
+fn empty_stage(state: UiState) -> impl IntoElement {
+    let palette = state.palette;
+    view()
+        .flex_1()
+        .test_id("stage")
+        .bg(move || palette.get().surface_row)
+}
+
+/// The phantom-segment cleanup (N6's carried-forward flag): a stage switch
+/// unmounts the rows the traversal focused, and `list_focus` naming a row
+/// of a dead stage left the arrows walking an invisible segment. Any nav
+/// move remounts the slot — so every nav move clears the segment, not
+/// just Escape. The search retarget keeps the stage (its rows move under
+/// an unchanged focus, which the egui frame also kept) — the cleanup reads
+/// only the nav.
+fn clear_list_focus_on_stage_switch(state: UiState, list_focus: Signal<Option<usize>>) {
+    let nav = state.nav;
+    effect(move || {
+        let _ = crate::model::stage_of(&nav.get());
+        list_focus.set(None);
+    });
 }
 
 /// The global shortcuts: Space toggles playback exactly like the egui
@@ -86,14 +116,17 @@ fn middle(
 /// stopped session stays stopped, the play button is the one that starts
 /// one) unless a traversal-focused row holds it, where Space and Enter
 /// activate the focused row like the egui frame's keyboard did on its
-/// focused widget; Ctrl+K focuses the search field; Escape surrenders it
-/// and clears every focus segment; the arrows step the traversal — the
-/// chrome ring, the sidebar rows and the track list's rows as one sequence
-/// (the egui rows took no arrow traversal; the list segment is the nsh
-/// frame's own, recorded in the N6 trail). Nothing here writes a bridge
-/// signal except the traversal's own handles: the transport dispatch reads
-/// the session through the model, and the activations write the signals
-/// their handlers own.
+/// focused widget; Ctrl+K focuses the search field; Escape surrenders it,
+/// clears every focus segment and restores the unfiltered listing (the
+/// search flow's write, `When::Always` so it reaches a focused field); the
+/// arrows step the traversal — the chrome ring, the sidebar rows and the
+/// track list's rows as one sequence (the egui rows took no arrow
+/// traversal; the list segment is the nsh frame's own, recorded in the N6
+/// trail). Nothing here writes a bridge signal except the traversal's own
+/// handles and the search flow's (the handlers own those signals the way
+/// the sidebar's selection writes own theirs): the transport dispatch
+/// reads the session through the model, and the activations write the
+/// signals their handlers own.
 #[allow(clippy::type_complexity)]
 type FocusSegments = (
     Signal<Option<usize>>,
@@ -159,7 +192,7 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
     on_key("space", move |_| {
         match (nav_focus.get(), list_focus.get()) {
             (Some(row), _) => sidebar::activate(model, row),
-            (None, Some(_)) => select_focused(model, list_focus),
+            (None, Some(_)) => select_focused(model, state, list_focus),
             (None, None) => model.with(|m| {
                 let session = m.rt.playback.lock_or_recover();
                 if session.playback_state == riff_backend::app::state::PlaybackState::Playing {
@@ -173,7 +206,7 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
     on_key("enter", move |_| {
         match (nav_focus.get(), list_focus.get()) {
             (Some(row), _) => sidebar::activate(model, row),
-            (None, Some(_)) => select_focused(model, list_focus),
+            (None, Some(_)) => select_focused(model, state, list_focus),
             (None, None) => {}
         }
     });
@@ -183,12 +216,24 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
         list_focus.set(None);
         search.focus();
     });
-    on_key("escape", move |_| {
-        search.blur();
-        focus.set(None);
-        nav_focus.set(None);
-        list_focus.set(None);
-    });
+    // Escape, wherever the focus is (`When::Always`): the field is a
+    // native input and the raw key path serves custom views only, so the
+    // egui field's `dismiss_on_escape` lands here — the query clears and
+    // the full list restores through the same retarget a keystroke takes.
+    let search_ref = search;
+    on_key_with(
+        "escape",
+        nsh_core::element::KeyOptions {
+            when: When::Always,
+            ..nsh_core::element::KeyOptions::default()
+        },
+        move |_| {
+            crate::screens::library::search::escape(model, state.search_text, search_ref);
+            focus.set(None);
+            nav_focus.set(None);
+            list_focus.set(None);
+        },
+    );
     on_key("left", move |_| step_traversal(-1));
     on_key("right", move |_| step_traversal(1));
     on_key("up", move |_| step_traversal(-1));
@@ -204,10 +249,16 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
 }
 
 /// Enter or Space on a traversal-focused list row: the row's press write
-/// (the egui click's same selection), read at the focused index.
-fn select_focused(model: Stored<UiModel>, list_focus: Signal<Option<usize>>) {
+/// (the egui click's same selection), read at the focused index. The read
+/// follows the stage the nav names — an album's tracks stage selects out
+/// of its display copy, the flat stage out of the seam.
+fn select_focused(model: Stored<UiModel>, state: UiState, list_focus: Signal<Option<usize>>) {
     if let Some(index) = list_focus.get() {
-        let track = model.with(|m| crate::screens::library::list::track_at(m, index));
+        let kind = match crate::model::stage_of(&state.nav.get()) {
+            Some(StageKind::Tracks { .. }) => crate::screens::library::list::Listing::Album,
+            _ => crate::screens::library::list::Listing::Flat,
+        };
+        let track = model.with(|m| crate::screens::library::list::track_at(m, index, kind));
         if let Some(track) = track {
             crate::components::track_row::select_track(model, track.id.clone());
         }

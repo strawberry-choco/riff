@@ -1020,3 +1020,711 @@ fn n6_read_cost_probe() {
         "N6 READS: depth-40000 cold(50) {cold:?} warm(50) {warm:?} next-window(50) {next_window:?} walk(100) {walk:?}"
     );
 }
+
+// --- The N7 browse probes -----------------------------------------------------
+
+use riff_backend::app::state::{BrowserSelection, LibrarySession};
+use riff_backend::domain::{Album, Artist, GenreCount};
+use riff_gui_nsh::screens::library::search;
+
+/// The browse probe's store: three artists, four albums, six tracks, two
+/// genres, and a synthetic folder tree — names the tests assert on, in the
+/// order the mock serves them.
+const ARTIST_A: &str = "Paper Lanterns";
+const ARTIST_B: &str = "Amber Signals";
+const ARTIST_C: &str = "Quiet Foxes";
+const ALBUM_A1: &str = "Neon Tide";
+const ALBUM_A2: &str = "Paper Hearts";
+const ALBUM_B1: &str = "Golden Fields";
+const ALBUM_C1: &str = "Harbor Lights";
+const GENRE_ONE: &str = "Ambient";
+
+fn browse_track(path: &str, title: &str, artist: &str, album: &str) -> Track {
+    crate::test_utils::create_test_track_with_metadata(path, path, artist, title, album)
+}
+
+/// The album's track rows, in canonical order.
+fn browse_album_tracks(artist: &str, album: &str, titles: &[&str]) -> Vec<Track> {
+    titles
+        .iter()
+        .enumerate()
+        .map(|(at, title)| {
+            browse_track(
+                &format!(
+                    "/music/{}/{}.wav",
+                    album.to_lowercase().replace(' ', "-"),
+                    at
+                ),
+                title,
+                artist,
+                album,
+            )
+        })
+        .collect()
+}
+
+/// The probe's whole seed, built once and sliced into the mock's fields.
+struct BrowseSeed {
+    tracks: Vec<Track>,
+    albums: Vec<(String, String, Vec<Track>)>,
+    artists: Vec<(String, Vec<String>)>,
+}
+
+fn browse_seed() -> BrowseSeed {
+    let albums: Vec<(String, String, Vec<Track>)> = vec![
+        (
+            ARTIST_A.to_owned(),
+            ALBUM_A1.to_owned(),
+            browse_album_tracks(ARTIST_A, ALBUM_A1, &["Neon One", "Neon Two"]),
+        ),
+        (
+            ARTIST_A.to_owned(),
+            ALBUM_A2.to_owned(),
+            browse_album_tracks(ARTIST_A, ALBUM_A2, &["Paper Heart"]),
+        ),
+        (
+            ARTIST_B.to_owned(),
+            ALBUM_B1.to_owned(),
+            browse_album_tracks(ARTIST_B, ALBUM_B1, &["Golden One", "Golden Two"]),
+        ),
+        (
+            ARTIST_C.to_owned(),
+            ALBUM_C1.to_owned(),
+            browse_album_tracks(ARTIST_C, ALBUM_C1, &["Harbor One"]),
+        ),
+    ];
+    let artists: Vec<(String, Vec<String>)> = vec![
+        (
+            ARTIST_A.to_owned(),
+            vec![ALBUM_A1.to_owned(), ALBUM_A2.to_owned()],
+        ),
+        (ARTIST_B.to_owned(), vec![ALBUM_B1.to_owned()]),
+        (ARTIST_C.to_owned(), vec![ALBUM_C1.to_owned()]),
+    ];
+    let tracks: Vec<Track> = albums
+        .iter()
+        .flat_map(|(_, _, rows)| rows.clone())
+        .collect();
+    BrowseSeed {
+        tracks,
+        albums,
+        artists,
+    }
+}
+
+/// The browse probe: the mock runtime over the seeded store under the real
+/// shell, plus the two query triggers (the titlebar field's own write and
+/// its Escape flow, driven by buttons because a headless engine has no
+/// text-input surface) and the readouts the assertions read.
+#[component]
+pub(crate) fn BrowseProbeApp() -> impl IntoElement {
+    let seed = browse_seed();
+    let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+    let library_ids: Vec<TrackId> = seed.tracks.iter().map(|t| t.id.clone()).collect();
+    let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+    spawn_command_applier(cmd_rx, Arc::clone(&playback), library_ids);
+
+    let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+    let (_change_tx, change_rx) = unbounded::<StoreChanged>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_to_backend_changes(change_rx);
+    let (_notice_tx, notice_rx) = unbounded::<String>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_playback_notices(notice_rx);
+
+    let settings_store = crate::mocks::MockSettingsStore::default();
+    let library = Arc::new(Mutex::new(LibrarySession::default()));
+
+    // The synthetic folder tree: the registered root the session carries,
+    // and the children and direct tracks the mock serves per directory.
+    let folder_root = std::path::PathBuf::from("/music-lib");
+    let folder_artist_a = folder_root.join(ARTIST_A);
+    let folder_artist_b = folder_root.join(ARTIST_B);
+    let folder_album_a1 = folder_artist_a.join(ALBUM_A1);
+    let folder_album_b1 = folder_artist_b.join(ALBUM_B1);
+    {
+        let mut settings_for_register = crate::mocks::MockSettingsStore::default();
+        library
+            .lock_or_recover()
+            .library_paths
+            .register(folder_root.clone(), &mut settings_for_register);
+    }
+
+    let album_rows_for = |artist: &str, album: &str| -> Vec<Track> {
+        seed.albums
+            .iter()
+            .find(|(a, t, _)| a == artist && t == album)
+            .map(|(_, _, rows)| rows.clone())
+            .unwrap_or_default()
+    };
+    let albums_of = |artist: &str| -> Vec<Album> {
+        seed.albums
+            .iter()
+            .filter(|(a, _, _)| a == artist)
+            .map(|(_, title, rows)| Album {
+                title: title.clone(),
+                artist: artist.to_owned(),
+                tracks: rows.iter().map(|t| t.id.clone()).collect(),
+                year: Some(2024),
+                genre: None,
+            })
+            .collect()
+    };
+
+    let albums_by_artist: std::collections::HashMap<String, Vec<Album>> = seed
+        .artists
+        .iter()
+        .map(|(name, _)| (name.clone(), albums_of(name)))
+        .collect();
+    let tracks_by_album: std::collections::HashMap<(String, String), Vec<Track>> = seed
+        .albums
+        .iter()
+        .map(|(artist, title, rows)| {
+            (
+                (artist.clone(), title.clone()),
+                album_rows_for(artist, title),
+            )
+        })
+        .collect();
+
+    // The flat listing grows past the viewport (filler rows behind the six
+    // real ones), so the scroll-restore proof has room to scroll in.
+    let fillers: Vec<Track> = (0..100)
+        .map(|at| {
+            browse_track(
+                &format!("/music/filler/{at:03}.wav"),
+                &format!("Filler {at:03}"),
+                "Filler Artist",
+                "Filler Album",
+            )
+        })
+        .collect();
+    let flat_rows: Vec<Track> = seed
+        .tracks
+        .iter()
+        .cloned()
+        .chain(fillers.iter().cloned())
+        .collect();
+
+    let views = SessionViews::new(
+        Box::new(crate::mocks::MockLibraryQueryStore {
+            library: flat_rows
+                .iter()
+                .map(|t| (t.id.clone(), t.clone()))
+                .collect(),
+            flat: flat_rows,
+            // The search listing answers only the seeded needle: the two
+            // Neon Tide rows.
+            search: album_rows_for(ARTIST_A, ALBUM_A1),
+            matching_searches: vec!["neon".to_owned()],
+            artists: seed
+                .artists
+                .iter()
+                .map(|(name, albums)| Artist {
+                    name: name.clone(),
+                    albums: albums.clone(),
+                })
+                .collect(),
+            albums: albums_of(ARTIST_A),
+            paged_albums: seed
+                .albums
+                .iter()
+                .map(|(artist, title, rows)| Album {
+                    title: title.clone(),
+                    artist: artist.clone(),
+                    tracks: rows.iter().map(|t| t.id.clone()).collect(),
+                    year: Some(2024),
+                    genre: None,
+                })
+                .collect(),
+            albums_by_artist,
+            tracks_by_album,
+            genre_counts: vec![
+                GenreCount {
+                    genre: GENRE_ONE.to_owned(),
+                    tracks: 4,
+                },
+                GenreCount {
+                    genre: "Jazz".to_owned(),
+                    tracks: 2,
+                },
+            ],
+            genre_artists: vec![
+                Artist {
+                    name: ARTIST_A.to_owned(),
+                    albums: vec![ALBUM_A1.to_owned()],
+                },
+                Artist {
+                    name: ARTIST_B.to_owned(),
+                    albums: vec![ALBUM_B1.to_owned()],
+                },
+            ],
+            genre_albums: vec![albums_of(ARTIST_A).remove(0)],
+            genre_album_tracks: album_rows_for(ARTIST_A, ALBUM_A1),
+            hit_artists: vec![Artist {
+                name: ARTIST_A.to_owned(),
+                albums: vec![ALBUM_A1.to_owned()],
+            }],
+            folder_children_by_dir: [
+                (
+                    folder_root.clone(),
+                    vec![folder_artist_a.clone(), folder_artist_b.clone()],
+                ),
+                (folder_artist_a.clone(), vec![folder_album_a1.clone()]),
+                (folder_artist_b.clone(), vec![folder_album_b1.clone()]),
+            ]
+            .into_iter()
+            .collect(),
+            tracks_by_dir: [(folder_album_a1.clone(), album_rows_for(ARTIST_A, ALBUM_A1))]
+                .into_iter()
+                .collect(),
+            library_counts: riff_persistence::store::LibraryCounts {
+                tracks: seed.tracks.len(),
+                artists: seed.artists.len(),
+                albums: seed.albums.len(),
+                genres: 2,
+            },
+            ..crate::mocks::MockLibraryQueryStore::default()
+        }),
+        Box::new(crate::mocks::MockPlaylistStore::default()),
+    );
+
+    let preferences = Preferences::hydrate(
+        &playback,
+        &library,
+        &settings_store,
+        &ChannelTransport::new(unbounded().0),
+        &Arc::new(Mutex::new(None)),
+    );
+
+    let runtime = AppRuntime {
+        playback,
+        library,
+        backend_events,
+        ui_transport: Box::new(ChannelTransport::new(cmd_tx)),
+        tray_transport: ChannelTransport::new(unbounded().0),
+        preferences,
+        scans: Box::new(crate::mocks::MockScans::default()),
+        watcher_manager: Arc::new(Mutex::new(None)),
+        quit_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settings: Box::new(settings_store),
+        playlists: Box::new(crate::mocks::MockPlaylistStore::default()),
+        library_mutations: Box::new(crate::mocks::MockLibraryMutationStore::new()),
+        session_views: views,
+        tag_edits: Box::new(crate::mocks::FakeTagEdits::new()),
+        passes: Box::new(crate::mocks::RecordingPasses::default()),
+        covers: Box::new(crate::mocks::RecordingCovers::new()),
+        thumbnail_cache: Arc::new(StubThumbnailCache),
+    };
+
+    let model = stored(UiModel::new(runtime, None));
+    install(model);
+    let state = model.with(|m| m.signals());
+    let session = signal(String::new());
+    let session_line = session;
+    let model_for_query = model;
+    let model_for_escape = model;
+    let model_for_read = model;
+    let escape_value = signal(String::new());
+    let escape_value_handle = escape_value;
+    let escape_ref = element_ref();
+    let search_line = state.search;
+    let nav_line = state.nav;
+
+    view()
+        .flex_1()
+        .flex_col()
+        .child(riff_gui_nsh::shell::install(model))
+        .child(text(move || format!("nav {:?}", nav_line.get())).test_id("nav-view"))
+        .child(text(move || session_line.get()).test_id("session-view"))
+        .child(text(move || format!("needle {}", search_line.get())).test_id("needle-view"))
+        .child(
+            button()
+                .test_id("read-session")
+                .on_press(move || {
+                    let nav = model_for_read.with(|m| m.signals()).nav.get();
+                    let walk: Vec<String> = nav
+                        .browser_path
+                        .iter()
+                        .map(|selection| match selection {
+                            BrowserSelection::Artist(name) => format!("artist {name}"),
+                            BrowserSelection::Album { artist, title } => {
+                                format!("album {artist} / {title}")
+                            }
+                            BrowserSelection::Genre(genre) => format!("genre {genre}"),
+                        })
+                        .collect();
+                    session.set(format!("path {}", walk.join(" > ")));
+                })
+                .child(text("read session")),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .child(
+                    button()
+                        .test_id("set-query")
+                        .on_press(move || search::query_input(model_for_query, "neon"))
+                        .child(text("set query")),
+                )
+                .child(
+                    button()
+                        .test_id("escape-query")
+                        .on_press(move || {
+                            escape_value_handle.set(String::new());
+                            search::escape(model_for_escape, escape_value, escape_ref);
+                        })
+                        .child(text("escape")),
+                ),
+        )
+}
+
+fn browse_desktop() -> EngineConfig {
+    let mut config = EngineConfig::new(Root::of::<BrowseProbeApp>());
+    config.environment.os = nsh_core::platform::Os::Windows;
+    config.viewport = size(px(1280.0), px(800.0));
+    config
+}
+
+fn start_browse() -> Headless {
+    let mut app = Headless::start(browse_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app
+}
+
+/// The Artists walk: the root lists the seeded artists; a row press lands
+/// the artist's albums; another lands the album's tracks — each stage
+/// rendering through the same stage slot, the session's drill-down path
+/// carried by the nav mirror.
+#[test]
+fn the_artists_walk_lands_on_albums_then_tracks() {
+    let mut app = start_browse();
+    app.press("id:nav-artists").unwrap();
+    app.wait_for("label:Paper Lanterns")
+        .expect("the artists root");
+    app.wait_for("label:Quiet Foxes").expect("every artist");
+
+    app.press("id:entity-row >> nth=1").unwrap();
+    app.wait_for("label:Golden Fields")
+        .expect("the artist's albums");
+    app.wait_for_gone("label:Quiet Foxes", Duration::from_secs(2))
+        .expect("the root's rows went with the drill");
+
+    app.press("id:entity-row >> nth=0").unwrap();
+    app.wait_for("text:Golden One").expect("the album's tracks");
+    app.wait_for("text:Golden Two")
+        .expect("both rows in canonical order");
+
+    app.press("id:read-session").unwrap();
+    app.wait_for("text:path artist Amber Signals > album Amber Signals / Golden Fields")
+        .expect("the session's drill-down path holds both selections");
+}
+
+/// The Albums root walks straight to its tracks.
+#[test]
+fn the_albums_root_walks_to_its_tracks() {
+    let mut app = start_browse();
+    app.press("id:nav-albums").unwrap();
+    app.wait_for("label:Neon Tide").expect("the albums root");
+    app.wait_for("label:Paper Hearts").expect("every album");
+
+    app.press("id:entity-row >> nth=0").unwrap();
+    app.wait_for("text:Neon One").expect("the album's tracks");
+    app.wait_for("text:Neon Two").expect("both rows");
+}
+
+/// The Genres walk: genre, its artists, an artist's genre albums, and the
+/// album's genre-scoped tracks — four stages deep.
+#[test]
+fn the_genres_walk_reaches_the_tracks() {
+    let mut app = start_browse();
+    app.press("id:nav-genres").unwrap();
+    app.wait_for("label:Ambient").expect("the genres root");
+    app.wait_for("text:4 tracks")
+        .expect("the genre's count line");
+
+    app.press("id:entity-row >> nth=0").unwrap();
+    app.wait_for("label:Paper Lanterns")
+        .expect("the genre's artists");
+
+    app.press("id:entity-row >> nth=0").unwrap();
+    app.wait_for("label:Neon Tide")
+        .expect("the artist's albums in the genre");
+
+    app.press("id:entity-row >> nth=0").unwrap();
+    app.wait_for("text:Neon One")
+        .expect("the genre-scoped tracks");
+}
+
+/// The search: the titlebar field's write filters the flat listing in real
+/// time (the pump retargets the listing and the window reset is announced),
+/// and the Escape flow restores the full list and clears the needle.
+#[test]
+fn the_search_filters_the_flat_list_and_escape_restores() {
+    let mut app = start_browse();
+    app.wait_for("text:Paper Heart")
+        .expect("the full flat list");
+    app.wait_for("text:Golden One")
+        .expect("the other albums' rows");
+
+    app.press("id:set-query").unwrap();
+    app.wait_for_gone("text:Paper Heart", Duration::from_secs(2))
+        .expect("the needle filtered the listing");
+    app.wait_for("text:Neon One").expect("the matching rows");
+    app.wait_for("text:needle neon")
+        .expect("the needle's signal mirror");
+
+    app.press("id:escape-query").unwrap();
+    app.wait_for("text:Paper Heart")
+        .expect("the full list restored");
+    app.wait_for("text:needle ").expect("the needle cleared");
+}
+
+/// The search over the entity stages: the artists root filters to the
+/// store's hit artists under the same needle.
+#[test]
+fn the_search_filters_the_artists_root_to_the_hits() {
+    let mut app = start_browse();
+    app.press("id:nav-artists").unwrap();
+    app.wait_for("label:Amber Signals")
+        .expect("the unfiltered root");
+
+    app.press("id:set-query").unwrap();
+    app.wait_for_gone("label:Amber Signals", Duration::from_secs(2))
+        .expect("the non-hit artists filtered away");
+    app.wait_for("label:Paper Lanterns")
+        .expect("the hit artist stands");
+
+    app.press("id:escape-query").unwrap();
+    app.wait_for("label:Amber Signals")
+        .expect("the root restored");
+}
+
+/// The Escape restore with the field focused: the needle rides the
+/// trigger button (a headless engine has no typing surface), mod+k puts
+/// the keyboard focus in the field, and Escape - bound `When::Always`, the
+/// native input's own raw key path being custom-view-only - clears the
+/// needle and restores the full list.
+#[test]
+fn escape_with_the_field_focused_restores_the_full_list() {
+    let mut app = start_browse();
+    app.wait_for("text:Paper Heart")
+        .expect("the full flat list");
+
+    app.press("id:set-query").unwrap();
+    app.wait_for("text:needle neon").expect("the needle set");
+    app.wait_for_gone("text:Paper Heart", Duration::from_secs(2))
+        .expect("the listing filtered");
+
+    app.press_key("mod+k").unwrap();
+    app.press_key("escape").unwrap();
+    app.wait_for("text:needle ").expect("the needle cleared");
+    app.wait_for("text:Paper Heart")
+        .expect("the full list restored");
+}
+
+/// The Folders tree: roots from the session's registered paths, children
+/// read only when a folder expands (lazy — nothing below the roots before
+/// the press), and the tracks directly inside an expanded folder.
+#[test]
+fn the_folder_tree_loads_children_on_expand() {
+    let mut app = start_browse();
+    app.press("id:nav-folders").unwrap();
+    app.wait_for("id:folder-tree")
+        .expect("the folder stage mounted");
+    app.wait_for("label:music-lib")
+        .expect("the registered root");
+    app.wait_for_gone("label:Paper Lanterns", Duration::from_secs(2))
+        .expect("nothing below the roots before the expansion");
+
+    app.press("id:folder-row >> nth=0").unwrap();
+    app.wait_for("label:Paper Lanterns")
+        .expect("the child read at expand time");
+    app.wait_for("label:Amber Signals").expect("both children");
+
+    app.press("id:folder-row >> nth=1").unwrap();
+    app.wait_for("label:Neon Tide")
+        .expect("the album folder read at expand time");
+
+    app.press("id:folder-row >> nth=2").unwrap();
+    app.wait_for("text:Neon One")
+        .expect("the album folder's direct tracks");
+    app.wait_for("text:Neon Two").expect("both of them");
+}
+
+/// The scroll memory: the flat stage's position survives a stage switch —
+/// scroll deep, drill away, come back, and the remembered first row is at
+/// the top again.
+#[test]
+fn a_stage_switch_restores_the_remembered_scroll() {
+    let mut app = start_browse();
+    app.wait_for("text:Neon One").expect("the flat list primed");
+    // The stage's first pump tick remounts the slot (the total lands), so
+    // the scroll waits out that commit the way the N6 drive settled first.
+    std::thread::sleep(Duration::from_millis(400));
+
+    for _ in 0..3 {
+        app.scroll("id:track-list", px(1000.0)).unwrap();
+    }
+    app.wait_for("text:Filler 065").expect("scrolled deep");
+
+    app.press("id:nav-artists").unwrap();
+    app.wait_for("label:Paper Lanterns")
+        .expect("away on the artists stage");
+
+    app.press("id:nav-all-tracks").unwrap();
+    app.wait_for("text:Filler 065")
+        .expect("the remembered row back in view");
+}
+
+/// The phantom-segment cleanup: the traversal's list focus dies with the
+/// stage it focused. Into the list, switch stages, step — the ring enters
+/// at the chrome (a cleared traversal) instead of walking the dead list.
+#[test]
+fn a_stage_switch_clears_the_list_focus() {
+    let mut app = start_browse();
+    app.wait_for("text:Neon One").expect("the flat list primed");
+
+    for _ in 0..(7 + 9 + 1) {
+        app.press_key("down").unwrap();
+    }
+    app.press_key("enter").unwrap();
+    app.wait_for_gone("text:Nothing selected", Duration::from_secs(2))
+        .expect("Enter selected a track row in the list");
+
+    app.press("id:nav-artists").unwrap();
+    app.wait_for("label:Paper Lanterns")
+        .expect("the artists stage mounted");
+
+    // Space reads the cleanup: the phantom segment would select the dead
+    // focus's row again; the cleared traversal hands Space to the transport.
+    app.press_key("space").unwrap();
+    app.wait_for("label:Pause")
+        .expect("Space toggled playback, not a phantom row");
+}
+
+/// The N7 read-cost probe behind the stage numbers: pure browse-read
+/// timings at the fixture store's shape, no UI — what part of a stage
+/// transition is the seam's reads. Run: `cargo test -p riff-tests
+/// n7_read_cost_probe -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs the synthetic 50k fixture store at RIFF_N3_STORE"]
+fn n7_read_cost_probe() {
+    use riff_backend::app::store::SortDirection;
+    if std::env::var_os("RIFF_N3_STORE").is_none() {
+        panic!("set RIFF_N3_STORE to the synthetic fixture store");
+    }
+    let store_path = riff_gui_nsh::store_path();
+    let (mut rt, _lifecycle) =
+        riff_backend::composition::AppRuntime::spawn(&store_path).expect("fixture store");
+    let views = &mut rt.session_views;
+    let timed = |what: &str, run: &mut dyn FnMut()| {
+        let t0 = std::time::Instant::now();
+        run();
+        println!("N7 READS {what}: {:?}", t0.elapsed());
+    };
+    timed("genres()", &mut || {
+        let _ = views.genres();
+    });
+    timed("artist_count(asc)", &mut || {
+        let _ = views.artist_count(SortDirection::Ascending);
+    });
+    timed("artist_row x100 (all artists, ascending)", &mut || {
+        for at in 0..100 {
+            let _ = views.artist_row(SortDirection::Ascending, at);
+        }
+    });
+    timed("artist_albums(first artist)", &mut || {
+        let artist = views.artist_row(SortDirection::Ascending, 0).unwrap();
+        let _ = views.artist_albums(&artist.name);
+    });
+    timed("album_tracks(first album)", &mut || {
+        let artist = views.artist_row(SortDirection::Ascending, 0).unwrap();
+        let albums = views.artist_albums(&artist.name);
+        let album = albums.first().unwrap();
+        let _ = views.album_tracks(&album.artist, &album.title);
+    });
+    timed("track_count(flat)", &mut || {
+        let _ = views.track_count("", riff_backend::app::state::TrackSort::NumberAsc);
+    });
+    timed("hit_artist_count(query)", &mut || {
+        let _ = views.hit_artist_count("amber");
+    });
+    timed("hit_artist_row x5", &mut || {
+        for at in 0..5 {
+            let _ = views.hit_artist_row("amber", at);
+        }
+    });
+    let folder = std::path::Path::new("/nonexistent-folder-probe");
+    timed("folder_has_audio + children (cold miss)", &mut || {
+        let _ = views.folder_has_audio(folder);
+        let _ = views.folder_children(folder);
+    });
+}
+
+/// The N7 stage drive: the browse stages walked over the REAL fixture store
+/// through the real shell, each transition timed — the stage table's step
+/// cost, the N6 drive's protocol. Run: `cargo test -p riff-tests
+/// n7_stage_drive -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs the synthetic 50k fixture store at RIFF_N3_STORE"]
+fn n7_stage_drive_over_the_fixture_store() {
+    if std::env::var_os("RIFF_N3_STORE").is_none() {
+        panic!("set RIFF_N3_STORE to the synthetic fixture store");
+    }
+    let mut config = EngineConfig::new(Root::of::<DriveApp>());
+    config.environment.os = nsh_core::platform::Os::Windows;
+    config.viewport = size(px(1280.0), px(800.0));
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("label:All Tracks")
+        .expect("the library primed");
+
+    let timed_stage = |what: &str, run: &mut dyn FnMut()| {
+        let t0 = std::time::Instant::now();
+        run();
+        println!("N7 DRIVE {what}: {:?}", t0.elapsed());
+    };
+
+    // Artists root: the transition plus the rows' build — the wait reads a
+    // ROW, not the list (the stage mounts before the pump's build lands).
+    timed_stage("nav-artists -> artists root (100 artists)", &mut || {
+        app.press("id:nav-artists").unwrap();
+        app.wait_for("id:entity-row").unwrap();
+    });
+    // Drill into the first artist; the fixture's 100 artists each hold 5
+    // albums.
+    timed_stage("artist press -> albums stage", &mut || {
+        app.press("id:entity-row >> nth=0").unwrap();
+        app.wait_for("id:entity-row").unwrap();
+    });
+    timed_stage("album press -> tracks stage", &mut || {
+        app.press("id:entity-row >> nth=0").unwrap();
+        app.wait_for("id:row-title").unwrap();
+    });
+    timed_stage("nav-all-tracks -> flat stage", &mut || {
+        app.press("id:nav-all-tracks").unwrap();
+        app.wait_for("id:track-list").unwrap();
+    });
+    timed_stage("nav-albums -> albums root (500 albums)", &mut || {
+        app.press("id:nav-albums").unwrap();
+        app.wait_for("id:entity-row").unwrap();
+    });
+    timed_stage("nav-genres -> genres root (10 genres)", &mut || {
+        app.press("id:nav-genres").unwrap();
+        app.wait_for("id:entity-row").unwrap();
+    });
+    timed_stage("nav-folders -> folders stage (no roots)", &mut || {
+        app.press("id:nav-folders").unwrap();
+        app.wait_for("id:folders-stage").unwrap();
+    });
+    // The warm re-entry: the projection's caches hold the first build's
+    // reads, so the same stage costs its machinery alone.
+    timed_stage("nav-artists again (warm)", &mut || {
+        app.press("id:nav-artists").unwrap();
+        app.wait_for("id:entity-row").unwrap();
+    });
+}

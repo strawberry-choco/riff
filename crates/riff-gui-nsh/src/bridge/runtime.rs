@@ -10,11 +10,13 @@
 //! through `&mut` under the model's single borrow.
 
 use riff_backend::composition::{AppRuntime, RuntimeLifecycle};
+use riff_backend::domain::Track;
+use std::sync::Arc;
 
 use crate::bridge::covers::CoverCache;
 use crate::bridge::pump::PumpCache;
 use crate::bridge::state::UiState;
-use crate::model::{CoverViews, ListWindow};
+use crate::model::{CoverViews, ListWindow, ScrollMemory};
 
 /// What a component renders with: the backend's handles, the signals, and
 /// the cover halves. The pump and every handler reach the runtime through
@@ -43,6 +45,12 @@ pub struct UiModel {
     /// (sequential reads, P0 correction 22) and reset by the pump when the
     /// listing's rows move.
     pub(crate) list_window: ListWindow,
+    /// The track stage's display copy (an album's tracks, genre-scoped in
+    /// the Genres section, filtered and sorted) — read once by the pump per
+    /// stage build, indexed by the window's refill with no store read.
+    pub(crate) album_rows: Vec<Arc<Track>>,
+    /// The per-stage scroll memory (the egui contract, stage-keyed).
+    pub(crate) scroll_memory: ScrollMemory,
     /// The pump's per-tick comparison cache.
     pub(crate) pump: PumpCache,
 }
@@ -59,6 +67,8 @@ impl UiModel {
             covers: CoverCache::new(),
             cover_views: CoverViews::default(),
             list_window: ListWindow::default(),
+            album_rows: Vec::new(),
+            scroll_memory: ScrollMemory::default(),
             pump: PumpCache::new(),
         }
     }

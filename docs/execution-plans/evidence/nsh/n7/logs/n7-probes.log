@@ -1,0 +1,26 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.95s
+     Running mod.rs (C:\projects\riff\target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 2 tests
+N7 READS genres(): 47.0191ms
+N7 READS artist_count(asc): 275.3µs
+N7 READS artist_row x100 (all artists, ascending): 2.0131ms
+N7 READS artist_albums(first artist): 23.8222ms
+N7 READS album_tracks(first album): 23.5088ms
+N7 READS track_count(flat): 6.4216ms
+N7 READS hit_artist_count(query): 990.5931ms
+N7 DRIVE nav-artists -> artists root (100 artists): 1.6072116s
+N7 DRIVE artist press -> albums stage: 135.8141ms
+N7 DRIVE album press -> tracks stage: 165.7902ms
+N7 DRIVE nav-all-tracks -> flat stage: 134.7628ms
+N7 DRIVE nav-albums -> albums root (500 albums): 116.3652ms
+N7 READS hit_artist_row x5: 1.9494981s
+N7 READS folder_has_audio + children (cold miss): 252.3µs
+test nsh_shell_tests::n7_read_cost_probe ... ok
+N7 DRIVE nav-genres -> genres root (10 genres): 931.9814ms
+N7 DRIVE nav-folders -> folders stage (no roots): 115.879ms
+N7 DRIVE nav-artists again (warm): 301.7091ms
+test nsh_shell_tests::n7_stage_drive_over_the_fixture_store ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 904 filtered out; finished in 3.60s
+

@@ -13,8 +13,11 @@
 use nsh_core::element::{Signal, signal};
 use riff_backend::app::events::NoticePayload;
 use riff_backend::domain::TrackId;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::model::{NavView, PlaybackView, SettingsSnapshot, SidebarView};
+use crate::model::{EntityView, NavView, PlaybackView, SettingsSnapshot, SidebarView};
 use crate::theme::Palette;
 
 /// The number of typed notices the signal's history keeps. The notices
@@ -73,6 +76,40 @@ pub struct UiState {
     /// when covers land (P0 correction 21); the pixels live in the model's
     /// [`crate::model::CoverMap`].
     pub covers: Signal<u64>,
+    /// The titlebar search field's needle, as the field's handler last
+    /// wrote it — the session's `search_query` mirror (that write mutates no
+    /// store, so the pump cannot carry it; the pump reads the session
+    /// directly and retargets the listing, this signal is what the render
+    /// bindings subscribe to). The stage empty copies and the folder tree's
+    /// pruning read it; the pump never touches it.
+    pub search: Signal<String>,
+    /// The search field's own text, the controlled value — in the bundle
+    /// (not the field's local signal) so the shell's Escape, the one
+    /// `When::Always` binding, can clear it: a native input's raw key path
+    /// serves custom views only, so the restore cannot ride a listener on
+    /// the field itself.
+    pub search_text: Signal<String>,
+    /// The active entity stage's rows (the artists/albums/genres listings),
+    /// read and shaped by the pump — one batched read per stage build.
+    /// `Flat`/`Tracks` render track rows out of the row window instead and
+    /// leave this signal untouched.
+    pub browse: Signal<Arc<[EntityView]>>,
+    /// The Library session's folder roots, as the pump last read them —
+    /// the Folders tree's top level. A session read a render binding cannot
+    /// take (standing order 6); the pump already reads the paths every
+    /// sidebar build and mirrors them here.
+    pub folder_roots: Signal<Arc<[PathBuf]>>,
+    /// The Folders tree's expanded directories — the row presses' own
+    /// record, so the tree's dynamic rebuilds on a toggle and survives a
+    /// stage switch (the egui `CollapsingState`'s persistence, as a signal).
+    /// The children behind an expansion are read at expand time (lazy), so
+    /// a deep tree only ever reads the levels the walk opened.
+    pub folder_open: Signal<Arc<HashSet<PathBuf>>>,
+    /// The Folders tree's selected directory, the session's
+    /// `selected_folder` as the row presses last wrote it — the same mirror
+    /// the nav signal is for the view fields (a folder select mutates no
+    /// store). The row bands read it.
+    pub folder_selected: Signal<Option<PathBuf>>,
 }
 
 impl UiState {
@@ -92,6 +129,12 @@ impl UiState {
             palette: signal(Palette::dark()),
             notices: signal(Vec::new()),
             covers: signal(0),
+            search: signal(String::new()),
+            search_text: signal(String::new()),
+            browse: signal(Arc::from([])),
+            folder_roots: signal(Arc::from([])),
+            folder_open: signal(Arc::new(HashSet::new())),
+            folder_selected: signal(None),
         }
     }
 }

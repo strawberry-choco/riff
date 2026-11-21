@@ -17,18 +17,15 @@
 //! signal.
 
 use nsh_core::prelude::*;
-use riff_backend::app::MutexExt;
-use riff_backend::app::state::{BrowseMode, LibrarySection, ViewMode};
 use riff_backend::domain::Track;
 use std::sync::Arc;
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
-use crate::components::empty_state;
 use crate::components::track_row::{TrackRowView, row_of};
-use crate::model::NavView;
+use crate::model::StageKind;
 use crate::model::reads;
-use crate::screens::inspector;
+use crate::screens::library::search;
 use crate::theme::tokens;
 
 /// How far behind the viewport the warm window keeps rows, in rows (one
@@ -40,59 +37,74 @@ pub const PREFETCH_LOOKBACK: usize = 50;
 /// also bounds the read burst per report.
 pub const PREFETCH_LOOKAHEAD: usize = 250;
 
-/// Whether the nav state names the All Tracks listing — the one stage this
-/// unit mounts (the same liveness conditions the sidebar's All Tracks row
-/// highlights under).
-#[must_use]
-pub fn is_all_tracks(nav: &NavView) -> bool {
-    nav.view_mode == ViewMode::Library
-        && nav.browse_mode == BrowseMode::Library
-        && nav.smart_list.is_none()
-        && nav.playlist.is_none()
-        && nav.library_section == LibrarySection::AllTracks
-}
-
 /// The stage: the list beside the inspector. The list keeps its scroll
 /// while mounted (the framework's own) and its element ref reaches the
 /// shell's traversal, whose Enter selects and whose steps reveal through
-/// `scroll_to_index`.
+/// `scroll_to_index`. The search query rides the row window's stamp — the
+/// same listing the flat view always was, now under the stage table.
 pub fn stage(
     model: Stored<UiModel>,
     state: UiState,
     list: ElementRef,
     list_focus: Signal<Option<usize>>,
 ) -> impl IntoElement {
-    let palette = state.palette;
-    view()
-        .flex_1()
-        .flex_row()
-        .test_id("library-stage")
-        .bg(move || palette.get().surface_row)
-        .child(
-            view()
-                .flex_1()
-                .flex_col()
-                .p(px(tokens::SPACE_LG))
-                .child(list_view(model, state, list, list_focus)),
-        )
-        .child(inspector::panel(model, state))
+    let listing = track_listing(
+        model,
+        state,
+        list,
+        list_focus,
+        TrackListingSpec {
+            kind: Listing::Flat,
+            stage_id: StageKind::Flat,
+            plain: (
+                "No tracks yet",
+                "Add a folder from the sidebar to start scanning your library.",
+            ),
+            filtered: ("No matching tracks", "Nothing in your library matches"),
+            test_id: "track-list",
+        },
+    );
+    crate::screens::library::browse::stage_shell(model, state, listing)
 }
 
-/// The listing: the virtual list, its empty state, and the viewability
-/// handler that drives the prefetch window.
-fn list_view(
+/// Which listing a track stage renders and what it says when empty — the
+/// one spec the two track stages differ in, beside the handles they share.
+pub(crate) struct TrackListingSpec {
+    /// The listing the window serves (the flat seam or an album's display
+    /// copy).
+    pub kind: Listing,
+    /// The scroll memory slot the stage keeps.
+    pub stage_id: StageKind,
+    /// The empty state's wording when no needle stands.
+    pub plain: (&'static str, &'static str),
+    /// The empty state's wording when the needle matched nothing.
+    pub filtered: (&'static str, &'static str),
+    /// The virtual list's test id.
+    pub test_id: &'static str,
+}
+
+/// The one track listing every track stage renders: the virtual list over
+/// the warm row window, its query-aware empty state, and the viewability
+/// handler that restores and remembers the stage's scroll position and
+/// drives the prefetch window.
+pub(crate) fn track_listing(
     model: Stored<UiModel>,
     state: UiState,
     list: ElementRef,
     list_focus: Signal<Option<usize>>,
+    spec: TrackListingSpec,
 ) -> impl IntoElement {
     let palette = state.palette;
     let total = state.list_total;
-    let empty = empty_state::state(
+    let restore_armed = stored(true);
+    let empty = search::empty_state_for(
         palette,
-        "No tracks yet",
-        "Add a folder from the sidebar to start scanning your library.",
+        move || state.search.get(),
+        spec.plain,
+        spec.filtered,
     );
+    let kind = spec.kind;
+    let memory_stage = spec.stage_id;
     virtual_list(
         move || total.get(),
         move |at| {
@@ -104,7 +116,7 @@ fn list_view(
             let revision = state.list_revision;
             let facts = move || {
                 let _ = revision.get();
-                facts_of(model, at.index())
+                facts_of(model, at.index(), kind)
             };
             row_of(model, state, facts, list_focus)
         },
@@ -112,27 +124,31 @@ fn list_view(
     .estimated_item_size(px(tokens::ROW_H))
     .flex_1()
     .element_ref(&list)
-    .test_id("track-list")
+    .test_id(spec.test_id)
     .on_viewable_items_change(move |items: &ViewableItems| {
         // The report's own pair drives the window; a None report (no
-        // viewable row) skips the fill.
+        // viewable row) skips the fill. The restore reads the slot the
+        // previous visit left, the save records this report's position —
+        // that order, or the save would overwrite the memory before the
+        // restore read it.
         if let Some(viewable) = items.viewable {
-            prefetch(model, &state, viewable);
+            restore_position(model, &state, &memory_stage, list, restore_armed);
+            remember_position(model, &state, &memory_stage, viewable.0);
+            prefetch_as(model, &state, viewable, kind);
         }
     })
     .empty(empty)
 }
 
 /// One row's facts, out of the warm window — a miss falls back to the
-/// seam's own read (the first frame before the first report; the fallback
-/// runs inside the binding, the spike's direct pattern, and costs no more
-/// than the pattern it replaces).
-fn facts_of(model: Stored<UiModel>, index: usize) -> TrackRowView {
-    let track = model.with(|m| {
-        m.list_window
-            .row(index)
-            .or_else(|| reads::track_row(&mut m.rt.session_views, "", m.list_window.sort(), index))
-    });
+/// listing's own read under the window's own stamp (the first frame before
+/// the first report; the fallback runs inside the binding, the spike's
+/// direct pattern, and costs no more than the pattern it replaces). The
+/// stamp carries the search needle as well as the sort, so a filtered
+/// listing's rows read the same way the flat one did; an album listing's
+/// miss reads the stage's display copy, never the flat seam.
+fn facts_of(model: Stored<UiModel>, index: usize, kind: Listing) -> TrackRowView {
+    let track = model.with(|m| track_at(m, index, kind));
     facts_from(index, track)
 }
 
@@ -173,19 +189,39 @@ fn facts_from(index: usize, track: Option<Arc<Track>>) -> TrackRowView {
 /// No signal is written here: the covers repaint through the pump's
 /// revision bump, the rows through the cells' own rebinds.
 pub fn prefetch(model: Stored<UiModel>, state: &UiState, viewable: (usize, usize)) {
+    prefetch_as(model, state, viewable, Listing::Flat);
+}
+
+/// The one window the two track stages share, over the listing `kind`
+/// names: the flat list reads the seam by stamp, an album's tracks index
+/// the display copy the pump read for the stage. The stamp is re-checked
+/// here (the same values the pump stamps with), so a stale window never
+/// serves.
+pub(crate) fn prefetch_as(
+    model: Stored<UiModel>,
+    state: &UiState,
+    viewable: (usize, usize),
+    kind: Listing,
+) {
     let (first, last) = viewable;
     let total = state.list_total.get();
     let Some((start, end)) = window_bounds(first, last, total) else {
         return;
     };
     model.with(|m| {
-        // The sort is the session's — read under this handler's borrow, the
-        // same value the pump stamps the window with.
-        let sort = m.rt.library.lock_or_recover().track_sort;
-        m.list_window.set_sort(sort);
-        refill_window(m, start, end);
+        refill_window(m, start, end, kind);
         want_covers(m);
     });
+}
+
+/// Which listing a track stage's window serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Listing {
+    /// The flat All Tracks list (the search query included): rows read the
+    /// seam by the window's stamp.
+    Flat,
+    /// An album's tracks: rows index the stage's display copy.
+    Album,
 }
 
 /// The prefetch window's clamped bounds over `[start, end]`, or `None` when
@@ -206,7 +242,7 @@ fn window_bounds(first: usize, last: usize, total: usize) -> Option<(usize, usiz
 /// Fill the window over `[start, end]`, keeping the rows it already holds
 /// and reading the missing ones ascending. `start` may not exceed `end` —
 /// [`window_bounds`] guarantees it for the handler.
-fn refill_window(model: &mut UiModel, start: usize, end: usize) {
+pub(crate) fn refill_window(model: &mut UiModel, start: usize, end: usize, kind: Listing) {
     if let Some((held_start, held_end)) = model.list_window.covers()
         && held_start <= start
         && end <= held_end
@@ -229,14 +265,19 @@ fn refill_window(model: &mut UiModel, start: usize, end: usize) {
         }
     }
     // The reads, ascending — the projection's page fetches stay sequential
-    // and the FIFO window cache never thrashes (the span is bounded).
+    // and the FIFO window cache never thrashes (the span is bounded). The
+    // album listing's rows are already in hand (one read per stage build),
+    // so its refill copies with no store read at all.
     for index in &missing {
-        rows[*index - start] = reads::track_row(
-            &mut model.rt.session_views,
-            "",
-            model.list_window.sort(),
-            *index,
-        );
+        rows[*index - start] = match kind {
+            Listing::Flat => reads::track_row(
+                &mut model.rt.session_views,
+                model.list_window.query(),
+                model.list_window.sort(),
+                *index,
+            ),
+            Listing::Album => model.album_rows.get(*index).cloned(),
+        };
     }
     model.list_window.fill(start, rows);
 }
@@ -264,15 +305,75 @@ fn want_covers(model: &mut UiModel) {
 /// selection — the same window-then-seam read the row bindings take. Runs
 /// under the caller's stored borrow.
 #[must_use]
-pub(crate) fn track_at(model: &mut UiModel, index: usize) -> Option<Arc<Track>> {
-    model.list_window.row(index).or_else(|| {
-        reads::track_row(
+pub(crate) fn track_at(model: &mut UiModel, index: usize, kind: Listing) -> Option<Arc<Track>> {
+    model.list_window.row(index).or_else(|| match kind {
+        Listing::Flat => reads::track_row(
             &mut model.rt.session_views,
-            "",
+            model.list_window.query(),
             model.list_window.sort(),
             index,
-        )
+        ),
+        Listing::Album => model.album_rows.get(index).cloned(),
     })
+}
+
+/// The stage's content fingerprint for the scroll memory: the needle the
+/// search signal carries, the listing sort the window is stamped with, and
+/// the Library generation the UI last saw — the egui fingerprint's three
+/// parts, read where the handler already holds the model.
+fn fingerprint(model: &mut UiModel, state: &UiState) -> (String, u8, u64) {
+    (
+        state.search.get(),
+        model.list_window.sort().as_sort_key(),
+        state.library_revision.get(),
+    )
+}
+
+/// Save the stage's position: every viewability report records the stage's
+/// first viewable row — the egui protocol's per-frame end-section, adapted
+/// to the stage table. Cheap, and the restore below reads it back.
+pub(crate) fn remember_position(
+    model: Stored<UiModel>,
+    state: &UiState,
+    slot: &StageKind,
+    first_viewable: usize,
+) {
+    model.with(|m| {
+        let (query, sort_key, generation) = fingerprint(m, state);
+        m.scroll_memory
+            .remember(slot, &query, sort_key, generation, first_viewable);
+    });
+}
+
+/// Restore the stage's position once per mount: the first viewability
+/// report after the list remounts scrolls it back to the remembered row —
+/// `scroll_to_index`, the plan's restoration — when the memory's slot
+/// still matches the stage's content identity. A stale fingerprint (the
+/// query, the sort or the Library moved behind the position) leaves the
+/// list at the top, the egui reset contract. `armed` is the mount's
+/// one-shot flag, created by the stage component so it dies with it.
+pub(crate) fn restore_position(
+    model: Stored<UiModel>,
+    state: &UiState,
+    slot: &StageKind,
+    list: ElementRef,
+    armed: Stored<bool>,
+) {
+    if !armed.get() {
+        return;
+    }
+    armed.replace(false);
+    let (query, sort_key, generation) = model.with(|m| fingerprint(m, state));
+    let Some(row) = model.with(|m| m.scroll_memory.restore(slot, &query, sort_key, generation))
+    else {
+        return;
+    };
+    list.scroll_to_index(
+        u32::try_from(row).unwrap_or(u32::MAX),
+        percentage(0.0),
+        px(0.0),
+        false,
+    );
 }
 
 #[cfg(test)]

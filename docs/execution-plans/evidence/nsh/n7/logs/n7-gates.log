@@ -1,0 +1,22 @@
+== cargo fmt --check ==
+clean
+== cargo clippy -p riff-gui-nsh -p riff-tests --all-targets -- -D warnings ==
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.95s
+== cargo test -p riff-gui-nsh ==
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_nsh-785a9c3d3b9c9fe8.exe)
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src\main.rs (target\debug\deps\riff_nsh-9bf13df62e5f7af4.exe)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-09cf6a71e36c2b40.exe)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-0ff24b2fee74ba92.exe)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-4e7e73f5d75783b4.exe)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-9a5cc801ba79a5be.exe)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+== cargo test -p riff-tests nsh_ ==
+test result: ok. 32 passed; 0 failed; 4 ignored; 0 measured; 870 filtered out; finished in 26.69s
+== RUSTDOCFLAGS=-D warnings cargo doc ==
+   Generated C:\projects\riff\target\doc\riff_backend\index.html and 10 other files

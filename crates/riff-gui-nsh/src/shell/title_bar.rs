@@ -16,6 +16,7 @@ use nsh_core::element::desktop::{current_window, title_bar};
 use nsh_core::prelude::*;
 
 use crate::APP_NAME;
+use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::theme::Palette;
 use crate::theme::fonts::{INTER_FAMILY, WEIGHT_SEMIBOLD};
@@ -41,7 +42,12 @@ pub fn install_chrome() {
 /// take pointer events over their slice of it. The right padding reserves
 /// the platform caption buttons' region reactively, as the chrome spike
 /// proved the widths report.
-pub fn bar(state: UiState, search: &ElementRef, focus: Signal<Option<usize>>) -> impl IntoElement {
+pub fn bar(
+    model: Stored<UiModel>,
+    state: UiState,
+    search: &ElementRef,
+    focus: Signal<Option<usize>>,
+) -> impl IntoElement {
     let palette = state.palette;
     view()
         .h(px(tokens::TITLEBAR_H))
@@ -57,7 +63,7 @@ pub fn bar(state: UiState, search: &ElementRef, focus: Signal<Option<usize>>) ->
         .test_id("titlebar")
         .child(wordmark(palette))
         .child(status(state))
-        .child(search_field(state, search, focus))
+        .child(search_field(model, state, search, focus))
 }
 
 /// The wordmark, at the egui store's hero pairing (`SemiBold` Inter).
@@ -90,21 +96,38 @@ fn status(state: UiState) -> impl IntoElement {
         .test_id("status")
 }
 
-/// The global search field — the placeholder Ctrl+K focuses. Its text is
-/// local until N7 wires the query to the backend search; the value signal
-/// keeps it a controlled field so Escape's blur leaves the text as typed.
+/// The global search field — the placeholder Ctrl+K focuses, now wired to
+/// the search flow (N7): a keystroke writes the session's `search_query`
+/// through [`crate::screens::library::search::query_input`], and Escape
+/// clears and blurs through its `escape`. Escape is bound on the field
+/// itself: the framework's `When::Auto` keeps the window-level bindings out
+/// while the field is editing, so the restore rides the key-down the
+/// focused field reports instead. The value signal keeps it a controlled
+/// field so Escape's clear lands in the field's own text too.
 fn search_field(
+    model: Stored<UiModel>,
     state: UiState,
     search: &ElementRef,
     focus: Signal<Option<usize>>,
 ) -> impl IntoElement {
     let palette = state.palette;
     let query = signal(String::new());
+    let query_write = query;
+    let query_clear = query;
+    let search_ref = *search;
     ring(
         input()
             .element_ref(search)
             .value(query)
-            .on_change(move |text: &str| query.set(text.to_owned()))
+            .on_change(move |text: &str| {
+                query_write.set(text.to_owned());
+                crate::screens::library::search::query_input(model, text);
+            })
+            .on_key_down(move |event: &nsh_core::keyboard::KeyEvent| {
+                if event.key == "Escape" {
+                    crate::screens::library::search::escape(model, query_clear, search_ref);
+                }
+            })
             .placeholder("Search")
             .test_id("search")
             .label("Search")

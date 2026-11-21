@@ -10,11 +10,12 @@ use std::time::SystemTime;
 use nsh_core::element::ImageSrc;
 use riff_backend::app::cover_service::lru_insert;
 use riff_backend::app::state::{
-    BrowseMode, LibrarySection, LibrarySession, PlaybackState, RepeatMode, ReplayGainMode,
-    ScanPrefs, TrackSort, UiFlags, ViewMode,
+    BrowseMode, BrowserSelection, LibrarySection, LibrarySession, PlaybackState, RepeatMode,
+    ReplayGainMode, ScanPrefs, TrackSort, UiFlags, ViewMode,
 };
+use riff_backend::app::store::SortDirection;
 use riff_backend::app::views::{PlaylistView, SessionViews};
-use riff_backend::domain::{PlaylistId, SmartPlaylistKind, Track};
+use riff_backend::domain::{Album, PlaylistId, SmartPlaylistKind, Track, TrackId};
 
 /// One playback snapshot, exactly the plan's lines 200-213.
 ///
@@ -128,6 +129,11 @@ pub struct NavView {
     pub view_mode: ViewMode,
     pub browse_mode: BrowseMode,
     pub library_section: LibrarySection,
+    /// The ordered drill-down path, deepest entry last — the session's
+    /// `browser_path` as the selection handlers last wrote it (a drill-down
+    /// write mutates no store, so the pump cannot see it; the mirror is the
+    /// same contract the other view fields ride). The stage table reads it.
+    pub browser_path: Vec<BrowserSelection>,
     /// The built-in smart list opened over the Library view.
     pub smart_list: Option<SmartPlaylistKind>,
     /// The playlist opened over the Library view.
@@ -143,9 +149,170 @@ impl Default for NavView {
             view_mode: ViewMode::Library,
             browse_mode: BrowseMode::default(),
             library_section: LibrarySection::default(),
+            browser_path: Vec::new(),
             smart_list: None,
             playlist: None,
         }
+    }
+}
+
+/// The Library view's stages: which single listing the browser area mounts.
+/// The egui crate's `column_plan` renders the stage as side-by-side columns
+/// (root beside drill); here the stage is the one `flex_1` region and shows
+/// the deepest active listing — the drill-down is a walk, and the parent's
+/// highlight rides the path (the unit's own adaptation, recorded in the
+/// trail).
+///
+/// One variant per listing the pump sizes and refreshes: the stage key the
+/// pump's step-8 comparison and the scroll memory's slots both name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageKind {
+    /// The flat All Tracks listing (the search query rides the row window).
+    Flat,
+    /// A selected album's tracks — the stage's last column everywhere. In
+    /// the Genres section the listing is genre-scoped.
+    Tracks {
+        artist: String,
+        title: String,
+        genre: Option<String>,
+    },
+    /// The Artists root: every artist, name-ordered.
+    ArtistsRoot,
+    /// An artist's albums.
+    ArtistAlbums { artist: String },
+    /// The Albums root.
+    AlbumsRoot,
+    /// The Genres root.
+    GenresRoot,
+    /// The artists carrying a genre.
+    GenreArtists { genre: String },
+    /// One artist's albums within a genre.
+    GenreArtistAlbums { artist: String, genre: String },
+    /// The Folders browse mode's tree (folders.rs's own renderer).
+    Folders,
+}
+
+/// The stage for one Library session's view state, the pure `column_plan`
+/// shape: the deepest active listing for the section and drill-down path.
+/// Path entries of the wrong kind for their level are ignored (section
+/// switches reset the path, but the plan stays defensive), so a stale or
+/// foreign entry falls back to the root listing.
+#[must_use]
+pub fn stage_of_parts(
+    browse_mode: BrowseMode,
+    section: LibrarySection,
+    path: &[BrowserSelection],
+) -> StageKind {
+    match browse_mode {
+        BrowseMode::Folders => StageKind::Folders,
+        BrowseMode::Library => match section {
+            LibrarySection::AllTracks => StageKind::Flat,
+            LibrarySection::Artists => match path {
+                [BrowserSelection::Artist(artist)] => StageKind::ArtistAlbums {
+                    artist: artist.clone(),
+                },
+                [
+                    BrowserSelection::Artist(_),
+                    BrowserSelection::Album { artist, title },
+                ] => StageKind::Tracks {
+                    artist: artist.clone(),
+                    title: title.clone(),
+                    genre: None,
+                },
+                // The empty path and a foreign entry (a wrong-kind selection
+                // at this level) both land the root listing.
+                _ => StageKind::ArtistsRoot,
+            },
+            LibrarySection::Albums => match path {
+                [BrowserSelection::Album { artist, title }] => StageKind::Tracks {
+                    artist: artist.clone(),
+                    title: title.clone(),
+                    genre: None,
+                },
+                _ => StageKind::AlbumsRoot,
+            },
+            LibrarySection::Genres => match path {
+                [BrowserSelection::Genre(genre)] => StageKind::GenreArtists {
+                    genre: genre.clone(),
+                },
+                [
+                    BrowserSelection::Genre(genre),
+                    BrowserSelection::Artist(artist),
+                ] => StageKind::GenreArtistAlbums {
+                    artist: artist.clone(),
+                    genre: genre.clone(),
+                },
+                [
+                    BrowserSelection::Genre(genre),
+                    BrowserSelection::Artist(_),
+                    BrowserSelection::Album { artist, title },
+                ] => StageKind::Tracks {
+                    artist: artist.clone(),
+                    title: title.clone(),
+                    genre: Some(genre.clone()),
+                },
+                _ => StageKind::GenresRoot,
+            },
+        },
+    }
+}
+
+/// The stage the shell mounts for the nav state: `None` when the Library
+/// stage table does not own the view — a playlist or smart list opened over
+/// it (N10/N12's stages), or a non-Library view mode (Now Playing, Settings;
+/// their own units).
+#[must_use]
+pub fn stage_of(nav: &NavView) -> Option<StageKind> {
+    if nav.playlist.is_some() || nav.smart_list.is_some() || nav.view_mode != ViewMode::Library {
+        return None;
+    }
+    Some(stage_of_parts(
+        nav.browse_mode,
+        nav.library_section,
+        &nav.browser_path,
+    ))
+}
+
+/// One entity row of a browse stage — the egui `BrowserItem`'s facts minus
+/// the two the render resolves itself (the selection, from the path; the
+/// pixels, from the covers cache): the identity a press selects by, the
+/// label and muted detail line it paints, and the track whose cover the row
+/// asks for (`None` paints the placeholder).
+///
+/// An album's key carries the `artist\u{1f}title` separator — the store's
+/// album identity joined, the egui `album_item`'s key bytes — so a press
+/// selects and the dispatch reads the same value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityView {
+    pub key: String,
+    pub label: String,
+    pub detail: String,
+    pub cover_track: Option<TrackId>,
+}
+
+/// The track listings' display sort, the egui `sort_tracks` ported: the
+/// canonical order the store served is the `NumberAsc` anchor, `NumberDesc`
+/// its exact reversal, the title modes compare case-insensitively and —
+/// being stable sorts — keep the canonical order on ties. The display
+/// vocabulary's one crossing onto a copy the caller owns.
+pub(crate) fn sort_tracks(rows: &mut [Arc<Track>], sort: TrackSort) {
+    match sort {
+        TrackSort::NumberAsc => {}
+        TrackSort::NumberDesc => rows.reverse(),
+        TrackSort::TitleAsc => rows.sort_by_key(|track| {
+            track
+                .metadata
+                .display_title(&track.file_path)
+                .to_lowercase()
+        }),
+        TrackSort::TitleDesc => rows.sort_by_key(|track| {
+            std::cmp::Reverse(
+                track
+                    .metadata
+                    .display_title(&track.file_path)
+                    .to_lowercase(),
+            )
+        }),
     }
 }
 
@@ -311,6 +478,7 @@ impl CoverViews {
 #[derive(Default)]
 pub struct ListWindow {
     sort: TrackSort,
+    query: String,
     start: usize,
     rows: Vec<Option<Arc<Track>>>,
 }
@@ -322,6 +490,13 @@ impl ListWindow {
         self.sort
     }
 
+    /// The stamped query — the flat listing's needle (empty = the whole
+    /// library), the bindings' fallback read's other key.
+    #[must_use]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
     /// Re-stamp the listing's sort; the rows behind a sort change are a
     /// different listing, so they drop. Returns whether rows were dropped —
     /// the pump answers a drop with the list-revision bump that repaints
@@ -331,6 +506,19 @@ impl ListWindow {
             return false;
         }
         self.sort = sort;
+        self.rows.clear();
+        self.start = 0;
+        true
+    }
+
+    /// Re-stamp the listing's search needle; a keystroke retargets the
+    /// projection like a sort change does, so the rows drop the same way.
+    /// Returns whether rows were dropped.
+    pub fn set_query(&mut self, query: &str) -> bool {
+        if self.query == query {
+            return false;
+        }
+        query.clone_into(&mut self.query);
         self.rows.clear();
         self.start = 0;
         true
@@ -381,6 +569,90 @@ impl ListWindow {
     }
 }
 
+/// Per-stage scroll memory, the egui `ui/scroll_memory.rs` contract adapted
+/// to the stage table: a stage's list unmounts on every navigation, so the
+/// position is saved continuously (every viewability report records it —
+/// the egui protocol's per-frame `end_section`) and restored at the first
+/// report after a remount, through `scroll_to_index`.
+///
+/// The slot key is the stage's own identity ([`StageKind`], entity names
+/// included), the content fingerprint is the search query, the sort key and
+/// the Library generation the UI last saw — a fingerprint mismatch on
+/// restore resets to the top instead of restoring a stale offset, exactly
+/// the egui contract. The egui module held drill columns to no offset at
+/// all (their columns stayed mounted between selections, so egui's own
+/// state carried them); here every stage unmounts and the walk re-enters,
+/// so per-stage memory is the restoration contract the plan asks for.
+/// Slots are bounded (oldest evicted); a restart starts every stage at the
+/// top.
+#[derive(Default)]
+pub struct ScrollMemory {
+    slots: Vec<(StageKind, ScrollSlot)>,
+}
+
+/// How many stage slots the memory keeps — deeper than any real walk goes,
+/// bounded so a pathological session cannot grow it without end.
+const SCROLL_SLOTS: usize = 32;
+
+/// One stage's remembered position, under the fingerprint it was captured
+/// with.
+#[derive(Clone)]
+struct ScrollSlot {
+    query: String,
+    sort_key: u8,
+    generation: u64,
+    row: usize,
+}
+
+impl ScrollMemory {
+    /// Record the stage's first viewable row under the content identity it
+    /// was rendered with. One slot per stage: the same stage overwrites.
+    pub fn remember(
+        &mut self,
+        stage: &StageKind,
+        query: &str,
+        sort_key: u8,
+        generation: u64,
+        row: usize,
+    ) {
+        let slot = ScrollSlot {
+            query: query.to_owned(),
+            sort_key,
+            generation,
+            row,
+        };
+        if let Some((_, held)) = self.slots.iter_mut().find(|(held, _)| held == stage) {
+            *held = slot;
+        } else {
+            if self.slots.len() >= SCROLL_SLOTS {
+                self.slots.remove(0);
+            }
+            self.slots.push((stage.clone(), slot));
+        }
+    }
+
+    /// The row to restore the stage to, when a slot is held whose
+    /// fingerprint still matches the stage's content identity. A stale
+    /// fingerprint (the query, the sort or the Library moved behind the
+    /// position) answers `None` — the stage opens at the top.
+    #[must_use]
+    pub fn restore(
+        &self,
+        stage: &StageKind,
+        query: &str,
+        sort_key: u8,
+        generation: u64,
+    ) -> Option<usize> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|(held, _)| held == stage)
+            .map(|(_, slot)| slot)?;
+        (slot.query == query && slot.sort_key == sort_key && slot.generation == generation)
+            .then_some(slot.row)
+    }
+}
+
 /// The projection readers the bridge serves the screens through, over one
 /// `&mut SessionViews` (the runtime's owned read seam; P0 correction 6 —
 /// no second projection instance, no sharing across threads).
@@ -394,8 +666,9 @@ impl ListWindow {
 pub(crate) mod reads {
     use super::{PlaylistView, SessionViews};
     use riff_backend::app::state::TrackSort;
-    use riff_backend::app::store::CustomSmartPlaylist;
-    use riff_backend::domain::{Album, GenreCount, Playlist, PlaylistId, Track, TrackId};
+    use riff_backend::app::store::{CustomSmartPlaylist, SortDirection};
+    use riff_backend::domain::{Album, Artist, GenreCount, Playlist, PlaylistId, Track, TrackId};
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::SystemTime;
 
@@ -435,6 +708,146 @@ pub(crate) mod reads {
         views.album_tracks(album_artist, album_title)
     }
 
+    pub(crate) fn artist_first_track(views: &mut SessionViews, artist: &str) -> Option<TrackId> {
+        views.artist_first_track(artist)
+    }
+
+    // The browse roots and the search-hit roots, paged (the egui root
+    // columns' reads): a count and one row by index, the projection's
+    // bounded-window reads. `direction` is part of the query signature —
+    // the store applies it in SQL, so a row index names the same row before
+    // and after a flip.
+
+    pub(crate) fn artist_row(
+        views: &mut SessionViews,
+        direction: SortDirection,
+        index: usize,
+    ) -> Option<Arc<Artist>> {
+        views.artist_row(direction, index)
+    }
+
+    pub(crate) fn artist_count(views: &mut SessionViews, direction: SortDirection) -> usize {
+        views.artist_count(direction)
+    }
+
+    pub(crate) fn album_row(
+        views: &mut SessionViews,
+        direction: SortDirection,
+        index: usize,
+    ) -> Option<Arc<Album>> {
+        views.album_row(direction, index)
+    }
+
+    pub(crate) fn album_count(views: &mut SessionViews, direction: SortDirection) -> usize {
+        views.album_count(direction)
+    }
+
+    pub(crate) fn hit_artist_row(
+        views: &mut SessionViews,
+        query: &str,
+        index: usize,
+    ) -> Option<Arc<Artist>> {
+        views.hit_artist_row(query, index)
+    }
+
+    pub(crate) fn hit_artist_count(views: &mut SessionViews, query: &str) -> usize {
+        views.hit_artist_count(query)
+    }
+
+    pub(crate) fn hit_album_row(
+        views: &mut SessionViews,
+        query: &str,
+        index: usize,
+    ) -> Option<Arc<Album>> {
+        views.hit_album_row(query, index)
+    }
+
+    pub(crate) fn hit_album_count(views: &mut SessionViews, query: &str) -> usize {
+        views.hit_album_count(query)
+    }
+
+    // The scoped reads a drill column under a query needs: whether an
+    // entity is itself a name hit, and which of its rows match. The store
+    // owns the matching rule (the search_text column's rules); the drill
+    // holds none of its own.
+
+    pub(crate) fn artist_is_name_hit(views: &mut SessionViews, artist: &str, query: &str) -> bool {
+        views.artist_is_name_hit(artist, query)
+    }
+
+    pub(crate) fn album_is_name_hit(
+        views: &mut SessionViews,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> bool {
+        views.album_is_name_hit(album_artist, album_title, query)
+    }
+
+    pub(crate) fn album_hit_tracks(
+        views: &mut SessionViews,
+        album_artist: &str,
+        album_title: &str,
+        query: &str,
+    ) -> Arc<[Track]> {
+        views.album_hit_tracks(album_artist, album_title, query)
+    }
+
+    pub(crate) fn album_hit_tracks_in_genre(
+        views: &mut SessionViews,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+        query: &str,
+    ) -> Arc<[Track]> {
+        views.album_hit_tracks_in_genre(album_artist, album_title, genre, query)
+    }
+
+    pub(crate) fn album_tracks_in_genre(
+        views: &mut SessionViews,
+        album_artist: &str,
+        album_title: &str,
+        genre: &str,
+    ) -> Arc<[Track]> {
+        views.album_tracks_in_genre(album_artist, album_title, genre)
+    }
+
+    pub(crate) fn artists_in_genre(views: &mut SessionViews, genre: &str) -> Arc<[Artist]> {
+        views.artists_in_genre(genre)
+    }
+
+    pub(crate) fn artist_albums_in_genre(
+        views: &mut SessionViews,
+        artist: &str,
+        genre: &str,
+    ) -> Arc<[Album]> {
+        views.artist_albums_in_genre(artist, genre)
+    }
+
+    // The folder tree's reads, one cached answer per generation: the
+    // children of an expanded folder, the tracks directly inside it, and
+    // the two probes the egui node renderer gates and prunes with.
+
+    pub(crate) fn folder_has_audio(views: &mut SessionViews, folder: &Path) -> bool {
+        views.folder_has_audio(folder)
+    }
+
+    pub(crate) fn folder_search_match(
+        views: &mut SessionViews,
+        folder: &Path,
+        query: &str,
+    ) -> bool {
+        views.folder_search_match(folder, query)
+    }
+
+    pub(crate) fn folder_children(views: &mut SessionViews, folder: &Path) -> Arc<[PathBuf]> {
+        views.folder_children(folder)
+    }
+
+    pub(crate) fn folder_direct_tracks(views: &mut SessionViews, folder: &Path) -> Arc<[Track]> {
+        views.folder_direct_tracks(folder)
+    }
+
     pub(crate) fn playlists(views: &mut SessionViews) -> Arc<[Playlist]> {
         views.playlists()
     }
@@ -457,6 +870,208 @@ pub(crate) mod reads {
         views: &mut SessionViews,
     ) -> Result<Vec<CustomSmartPlaylist>, String> {
         views.try_custom_smart_playlists()
+    }
+}
+
+/// The active entity stage's rows, read through the seam and shaped into
+/// [`EntityView`]s. One batched read per stage build (the pump rebuilds on
+/// a stage, query, direction or generation move) — never per row: the
+/// drill reads are one generation-cached list each, the roots' rows are
+/// read ascending so the paged projections' window fetches stay sequential
+/// (the same discipline the row window keeps). The query filters per the
+/// backend's matching rules, the egui columns' scoping ported: the hit
+/// roots under a query, the Genres root never (hit-scoped genre counts are
+/// the egui spec's isolated cut), a name-hit drill expanding to its full
+/// list.
+pub(crate) fn entity_rows(
+    views: &mut SessionViews,
+    stage: &StageKind,
+    query: &str,
+    desc: bool,
+) -> Arc<[EntityView]> {
+    let direction = if desc {
+        SortDirection::Descending
+    } else {
+        SortDirection::Ascending
+    };
+    let rows: Vec<EntityView> = match stage {
+        StageKind::ArtistsRoot => {
+            let count = if query.is_empty() {
+                reads::artist_count(views, direction)
+            } else {
+                reads::hit_artist_count(views, query)
+            };
+            (0..count)
+                .filter_map(|at| {
+                    let artist = if query.is_empty() {
+                        reads::artist_row(views, direction, at)
+                    } else {
+                        reads::hit_artist_row(views, query, at)
+                    }?;
+                    Some(EntityView {
+                        // The artist row's cover is resolved lazily — the
+                        // first-track read per artist is the stage's
+                        // dominant cost on a big library, and only the
+                        // visible rows ever show one (the egui root asked
+                        // per visible row too). The row view and the
+                        // viewability handler resolve it for the rows they
+                        // serve, through the seam's own per-artist cache.
+                        cover_track: None,
+                        key: artist.name.clone(),
+                        label: artist.name.clone(),
+                        detail: album_word(artist.albums.len()),
+                    })
+                })
+                .collect()
+        }
+        StageKind::AlbumsRoot => {
+            let count = if query.is_empty() {
+                reads::album_count(views, direction)
+            } else {
+                reads::hit_album_count(views, query)
+            };
+            (0..count)
+                .filter_map(|at| {
+                    let album = if query.is_empty() {
+                        reads::album_row(views, direction, at)
+                    } else {
+                        reads::hit_album_row(views, query, at)
+                    }?;
+                    Some(album_view(&album, None))
+                })
+                .collect()
+        }
+        StageKind::GenresRoot => views
+            .genres()
+            .iter()
+            .map(|genre| EntityView {
+                cover_track: None,
+                key: genre.genre.clone(),
+                label: genre.genre.clone(),
+                detail: track_word(genre.tracks),
+            })
+            .collect(),
+        StageKind::ArtistAlbums { artist } => {
+            let all = reads::artist_albums(views, artist);
+            // A name-hit artist drills to *all* its albums (the downward
+            // name-hit expansion); a track-hit artist's hit albums show —
+            // the albums that are themselves name-hits or carry a matching
+            // track. The name-hit decision is the store's, asked through
+            // the read seam; the drill holds no hit rule of its own.
+            let albums: Vec<Album> = if query.is_empty()
+                || reads::artist_is_name_hit(views, artist, query)
+            {
+                all.iter().cloned().collect()
+            } else {
+                all.iter()
+                    .filter(|album| {
+                        reads::album_is_name_hit(views, &album.artist, &album.title, query)
+                            || !reads::album_hit_tracks(views, &album.artist, &album.title, query)
+                                .is_empty()
+                    })
+                    .cloned()
+                    .collect()
+            };
+            albums.iter().map(|album| album_view(album, None)).collect()
+        }
+        StageKind::GenreArtists { genre } => reads::artists_in_genre(views, genre)
+            .iter()
+            .map(|artist| {
+                let albums = reads::artist_albums_in_genre(views, &artist.name, genre);
+                EntityView {
+                    cover_track: albums
+                        .first()
+                        .and_then(|album| album.tracks.first())
+                        .cloned(),
+                    key: artist.name.clone(),
+                    label: artist.name.clone(),
+                    detail: album_word(albums.len()),
+                }
+            })
+            .collect(),
+        StageKind::GenreArtistAlbums { artist, genre } => {
+            reads::artist_albums_in_genre(views, artist, genre)
+                .iter()
+                .map(|album| album_view(album, None))
+                .collect()
+        }
+        // Track stages ride the row window; the folder tree renders itself.
+        StageKind::Flat | StageKind::Tracks { .. } | StageKind::Folders => Vec::new(),
+    };
+    rows.into()
+}
+
+/// One track stage's rows: the album's tracks in canonical order (or their
+/// genre-scoped set in the Genres section), filtered per the backend's
+/// matching rules under a query — a name-hit album opening its full list so
+/// the drill never dead-ends empty — then sorted into the display order the
+/// session's track sort names. One read per stage build; the row window
+/// copies from it.
+pub(crate) fn album_rows(
+    views: &mut SessionViews,
+    stage: &StageKind,
+    query: &str,
+    sort: TrackSort,
+) -> Vec<Arc<Track>> {
+    let StageKind::Tracks {
+        artist,
+        title,
+        genre,
+    } = stage
+    else {
+        return Vec::new();
+    };
+    let name_hit = !query.is_empty() && reads::album_is_name_hit(views, artist, title, query);
+    let tracks = match genre {
+        Some(genre) if !name_hit => {
+            if query.is_empty() {
+                reads::album_tracks_in_genre(views, artist, title, genre)
+            } else {
+                reads::album_hit_tracks_in_genre(views, artist, title, genre, query)
+            }
+        }
+        Some(genre) => reads::album_tracks_in_genre(views, artist, title, genre),
+        None if !name_hit && !query.is_empty() => {
+            reads::album_hit_tracks(views, artist, title, query)
+        }
+        None => reads::album_tracks(views, artist, title),
+    };
+    let mut rows: Vec<Arc<Track>> = tracks.iter().map(|track| Arc::new(track.clone())).collect();
+    sort_tracks(&mut rows, sort);
+    rows
+}
+
+/// One album entity row: the egui `album_item`'s shape — the store's
+/// `(album artist, title)` identity joined as the key, the title as the
+/// label, the `artist · year` line as the detail, the caller's cover track
+/// override.
+fn album_view(album: &Album, cover: Option<TrackId>) -> EntityView {
+    EntityView {
+        cover_track: cover.or_else(|| album.tracks.first().cloned()),
+        key: format!("{}\u{1f}{}", album.artist, album.title),
+        label: album.title.clone(),
+        detail: album.year.map_or_else(
+            || album.artist.clone(),
+            |year| format!("{} \u{b7} {year}", album.artist),
+        ),
+    }
+}
+
+/// The "N albums" detail line's plural shape, the egui count line's.
+fn album_word(count: usize) -> String {
+    if count == 1 {
+        "1 album".to_owned()
+    } else {
+        format!("{count} albums")
+    }
+}
+
+/// The "N tracks" detail line's plural shape.
+fn track_word(count: usize) -> String {
+    if count == 1 {
+        "1 track".to_owned()
+    } else {
+        format!("{count} tracks")
     }
 }
 
@@ -572,5 +1187,125 @@ mod tests {
         window.set_sort(TrackSort::TitleAsc);
         assert!(window.is_empty(), "the sort change dropped the rows");
         assert_eq!(window.sort(), TrackSort::TitleAsc);
+    }
+
+    /// A query re-stamp drops the rows the same way a sort change does: the
+    /// search retarget is a different listing.
+    #[test]
+    fn a_query_change_drops_the_window_rows() {
+        let mut window = ListWindow::default();
+        window.fill(0, vec![None, None]);
+        assert!(window.set_query("amber"), "the needle moved");
+        assert!(window.is_empty(), "the query change dropped the rows");
+        assert_eq!(window.query(), "amber");
+        assert!(!window.set_query("amber"), "the same needle keeps the rows");
+    }
+
+    /// The scroll memory: a stage's position survives navigation away and
+    /// back under a matching fingerprint, and a stale one (query, sort or
+    /// generation moved) resets to the top.
+    #[test]
+    fn the_scroll_memory_restores_only_under_a_matching_fingerprint() {
+        let mut memory = ScrollMemory::default();
+        let stage = StageKind::ArtistAlbums {
+            artist: "Amber Signals".to_owned(),
+        };
+        memory.remember(&stage, "", 0, 7, 42);
+        assert_eq!(
+            memory.restore(&stage, "", 0, 7),
+            Some(42),
+            "the same content restores"
+        );
+        assert_eq!(
+            memory.restore(&stage, "amber", 0, 7),
+            None,
+            "a moved query resets"
+        );
+        assert_eq!(
+            memory.restore(&stage, "", 1, 7),
+            None,
+            "a moved sort resets"
+        );
+        assert_eq!(
+            memory.restore(&stage, "", 0, 8),
+            None,
+            "a moved library resets"
+        );
+        let other = StageKind::ArtistAlbums {
+            artist: "Paper Lanterns".to_owned(),
+        };
+        assert_eq!(
+            memory.restore(&other, "", 0, 7),
+            None,
+            "another stage's slot is its own"
+        );
+        memory.remember(&stage, "", 0, 7, 10);
+        assert_eq!(
+            memory.restore(&stage, "", 0, 7),
+            Some(10),
+            "the same stage overwrites its slot"
+        );
+    }
+
+    /// The stage plan: the deepest active listing per section and path, and
+    /// a path entry of the wrong kind for its level falls back to the root.
+    #[test]
+    fn the_stage_plan_walks_the_drill_down_paths() {
+        let artist = BrowserSelection::Artist("Amber Signals".to_owned());
+        let album = BrowserSelection::Album {
+            artist: "Amber Signals".to_owned(),
+            title: "Neon Tide".to_owned(),
+        };
+        let genre = BrowserSelection::Genre("Ambient".to_owned());
+        assert_eq!(
+            stage_of_parts(BrowseMode::Library, LibrarySection::AllTracks, &[]),
+            StageKind::Flat
+        );
+        assert_eq!(
+            stage_of_parts(BrowseMode::Folders, LibrarySection::AllTracks, &[]),
+            StageKind::Folders
+        );
+        assert_eq!(
+            stage_of_parts(BrowseMode::Library, LibrarySection::Artists, &[]),
+            StageKind::ArtistsRoot
+        );
+        assert_eq!(
+            stage_of_parts(
+                BrowseMode::Library,
+                LibrarySection::Artists,
+                std::slice::from_ref(&artist)
+            ),
+            StageKind::ArtistAlbums {
+                artist: "Amber Signals".to_owned()
+            }
+        );
+        assert_eq!(
+            stage_of_parts(
+                BrowseMode::Library,
+                LibrarySection::Artists,
+                &[artist, album]
+            ),
+            StageKind::Tracks {
+                artist: "Amber Signals".to_owned(),
+                title: "Neon Tide".to_owned(),
+                genre: None,
+            }
+        );
+        assert_eq!(
+            stage_of_parts(
+                BrowseMode::Library,
+                LibrarySection::Genres,
+                std::slice::from_ref(&genre)
+            ),
+            StageKind::GenreArtists {
+                genre: "Ambient".to_owned()
+            }
+        );
+        // A foreign entry at the album level (an artist there, say) never
+        // spawns a track listing: the plan falls back to the root listing.
+        assert_eq!(
+            stage_of_parts(BrowseMode::Library, LibrarySection::Albums, &[genre]),
+            StageKind::AlbumsRoot
+        );
     }
 }

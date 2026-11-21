@@ -392,6 +392,7 @@ pub(crate) fn apply(model: Stored<UiModel>, target: SidebarTarget) {
         nav.view_mode = library.view_mode;
         nav.browse_mode = library.browse_mode;
         nav.library_section = library.library_section;
+        library.browser_path.clone_into(&mut nav.browser_path);
         nav
     });
     nav_signal.set(nav);
@@ -421,6 +422,7 @@ fn toggle_smart_lists(model: Stored<UiModel>) {
         nav.view_mode = library.view_mode;
         nav.browse_mode = library.browse_mode;
         nav.library_section = library.library_section;
+        library.browser_path.clone_into(&mut nav.browser_path);
         nav
     });
     nav_signal.set(nav);

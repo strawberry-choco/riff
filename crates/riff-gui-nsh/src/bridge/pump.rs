@@ -26,19 +26,21 @@
 //! regression gate.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nsh_core::element::{Stored, set_interval};
 use riff_backend::app::MutexExt;
 use riff_backend::app::events::{BackendEvent, NoticePayload};
-use riff_backend::app::state::{PlaybackSession, PlaybackState, RepeatMode};
+use riff_backend::app::state::{PlaybackSession, PlaybackState, RepeatMode, TrackSort};
 use riff_backend::composition::AppRuntime;
 
 use crate::bridge::covers::{CoverArrival, CoverCache};
 use crate::bridge::runtime::UiModel;
 use crate::model::{
-    CoverViews, ListWindow, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView, reads,
+    CoverViews, EntityView, ListWindow, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView,
+    StageKind, album_rows, entity_rows, reads, stage_of_parts,
 };
 
 /// How far ahead of the current track the projection's Up Next window is
@@ -61,6 +63,8 @@ struct TickOutcome {
     covers_arrived: bool,
     list_total: Option<usize>,
     list_revision: Option<u64>,
+    browse: Option<Arc<[EntityView]>>,
+    folder_roots: Option<Arc<[PathBuf]>>,
 }
 
 /// The pump's per-tick comparison state: what the last tick saw, so a tick
@@ -76,6 +80,10 @@ pub(crate) struct PumpCache {
     primed: bool,
     list_total: usize,
     list_revision: u64,
+    /// The stage's identity the last build served: the kind, the search
+    /// needle, the listing sort and the entity roots' direction — the
+    /// content identity a move rebuilds against.
+    stage: Option<(StageKind, String, TrackSort, bool)>,
 }
 
 impl PumpCache {
@@ -95,6 +103,7 @@ impl PumpCache {
             primed: true,
             list_total: 0,
             list_revision: 0,
+            stage: None,
         }
     }
 }
@@ -199,6 +208,7 @@ pub fn install(model: Stored<UiModel>) {
                 &mut m.covers,
                 &mut m.cover_views,
                 &mut m.list_window,
+                &mut m.album_rows,
             )
         });
         // Every write below is outside the borrow: `set` notifies bindings
@@ -228,6 +238,12 @@ pub fn install(model: Stored<UiModel>) {
         if let Some(revision) = outcome.list_revision {
             sigs.list_revision.set(revision);
         }
+        if let Some(rows) = outcome.browse {
+            sigs.browse.set(rows);
+        }
+        if let Some(roots) = outcome.folder_roots {
+            sigs.folder_roots.set(roots);
+        }
         if outcome.covers_arrived {
             // `update` always notifies, which is right here: the count only
             // moves when covers landed (P0 correction 9).
@@ -244,6 +260,7 @@ fn tick(
     covers: &mut CoverCache,
     cover_views: &mut CoverViews,
     list_window: &mut ListWindow,
+    album_rows_out: &mut Vec<Arc<riff_backend::domain::Track>>,
 ) -> TickOutcome {
     let mut outcome = TickOutcome {
         playback: None,
@@ -255,6 +272,8 @@ fn tick(
         covers_arrived: false,
         list_total: None,
         list_revision: None,
+        browse: None,
+        folder_roots: None,
     };
     let mut sidebar_dirty = cache.primed;
 
@@ -295,14 +314,34 @@ fn tick(
 
     // 3. The Library session's scalars: the sidebar's folder-root count when
     //    the sidebar is due, the listing's sort for the track list's reads,
-    //    and the settings comparison (compare first, so a nothing-moved tick
-    //    rebuilds nothing).
+    //    the stage the view state names (the mount table's and the row
+    //    window's shared computation, from the same pure fn the layout
+    //    reads), and the settings comparison (compare first, so a
+    //    nothing-moved tick rebuilds nothing). The search needle is cloned
+    //    only when it moved — a per-tick keystroke clone is the clone
+    //    discipline's one exception, not a habit.
     let folder_roots;
     let track_sort;
+    let stage;
+    let stage_desc;
+    let mut stage_query: Option<String> = None;
     {
         let library = rt.library.lock_or_recover();
         folder_roots = library.library_paths.paths().len();
         track_sort = library.track_sort;
+        stage = stage_of_parts(
+            library.browse_mode,
+            library.library_section,
+            &library.browser_path,
+        );
+        stage_desc = library.browser_sort_desc;
+        if cache
+            .stage
+            .as_ref()
+            .is_none_or(|(_, held, _, _)| held != library.search_query.as_str())
+        {
+            stage_query = Some(library.search_query.clone());
+        }
         let moved = cache.last_settings.as_ref().is_none_or(|last| {
             !last.matches_sessions(cheap.replaygain_enabled, cheap.replaygain_mode, &library)
         });
@@ -382,8 +421,20 @@ fn tick(
     //    sends the LibraryChanged event the later ticks wait for), then
     //    refreshed when the Library generation moves or the playlists
     //    refetched. The signal's own equality absorbs a same-value rewrite.
+    //    The folder roots ride the same build: the Folders tree's top level
+    //    is the session's registered paths, and a render binding cannot
+    //    lock the session to read them.
     if sidebar_dirty {
         let counts = rt.session_views.sidebar_counts(folder_roots);
+        let roots: Arc<[PathBuf]> = rt
+            .library
+            .lock_or_recover()
+            .library_paths
+            .paths()
+            .iter()
+            .cloned()
+            .collect();
+        outcome.folder_roots = Some(roots);
         let rows = playlists
             .iter()
             .map(|playlist| PlaylistRow {
@@ -418,26 +469,73 @@ fn tick(
         outcome.covers_arrived = true;
     }
 
-    // 8. The track list's signals: the All Tracks listing's total (a cached
-    //    projection read — a settled tick costs no store read), and the warm
-    //    row window's freshness. A committed Library mutation moved the rows
-    //    behind every binding, so the window resets and the list revision
-    //    bumps; a sort change drops the rows the same way, and its reset is
-    //    announced with the same bump (nothing writes track_sort until N7,
-    //    but the contract holds from here). The row bindings read the
-    //    revision, so they repaint from the refilled window. The query is
-    //    the flat list's empty needle; the search retarget is N7's.
-    let total = reads::track_count(&mut rt.session_views, "", track_sort);
+    // 8. The stage's signals: the listing's total (the track stages' virtual
+    //    list sizes with it; other stages size nothing), the warm row
+    //    window's freshness, and the entity stages' rows. The stage
+    //    identity — kind, search needle, listing sort, entity direction —
+    //    or the Library generation moving is a different listing behind the
+    //    bindings: the window resets and the list revision bumps, the
+    //    announcement the bindings repaint from (N6's sort/reset seam, now
+    //    answering for every stage). A search keystroke retargets the
+    //    projection the same way a sort change does.
+    let stage_moved =
+        cache
+            .stage
+            .as_ref()
+            .is_none_or(|(held, held_query, held_sort, held_desc)| {
+                held != &stage
+                    || held_query != stage_query.as_deref().unwrap_or("")
+                    || *held_sort != track_sort
+                    || *held_desc != stage_desc
+            });
+    if stage_moved {
+        let needle = stage_query.clone().unwrap_or_else(|| {
+            cache
+                .stage
+                .as_ref()
+                .map_or_else(String::new, |(_, held, _, _)| held.clone())
+        });
+        cache.stage = Some((stage.clone(), needle, track_sort, stage_desc));
+    }
+    let query: &str = stage_query.as_deref().unwrap_or_else(|| {
+        cache
+            .stage
+            .as_ref()
+            .map_or("", |(_, held, _, _)| held.as_str())
+    });
+    let total = match &stage {
+        StageKind::Flat => reads::track_count(&mut rt.session_views, query, track_sort),
+        StageKind::Tracks { .. } => {
+            if stage_moved {
+                *album_rows_out = album_rows(&mut rt.session_views, &stage, query, track_sort);
+            }
+            album_rows_out.len()
+        }
+        StageKind::ArtistsRoot
+        | StageKind::AlbumsRoot
+        | StageKind::GenresRoot
+        | StageKind::ArtistAlbums { .. }
+        | StageKind::GenreArtists { .. }
+        | StageKind::GenreArtistAlbums { .. } => {
+            if stage_moved {
+                outcome.browse = Some(entity_rows(
+                    &mut rt.session_views,
+                    &stage,
+                    query,
+                    stage_desc,
+                ));
+            }
+            0
+        }
+        StageKind::Folders => 0,
+    };
     if total != cache.list_total {
         cache.list_total = total;
         outcome.list_total = Some(total);
     }
-    let sort_dropped = list_window.set_sort(track_sort);
-    let list_moved = outcome.library_revision.is_some();
-    if sort_dropped || list_moved {
-        if list_moved {
-            list_window.reset();
-        }
+    let window_dropped = list_window.set_query(query) | list_window.set_sort(track_sort);
+    if stage_moved || window_dropped {
+        list_window.reset();
         cache.list_revision += 1;
         outcome.list_revision = Some(cache.list_revision);
     }

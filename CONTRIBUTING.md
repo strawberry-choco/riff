@@ -1,6 +1,6 @@
 # Contributing to riff
 
-Thanks for helping. riff is a lightweight, offline-first desktop music player written in Rust and egui, and a contribution can be any size — a bug report, a one-line fix, a test, or a feature. Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues).
+Thanks for helping. riff is a lightweight, offline-first desktop music player written in Rust with the nsh UI stack, and a contribution can be any size — a bug report, a one-line fix, a test, or a feature. Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues).
 
 This file is a starting point, not a manual. The detail lives in [`docs/`](docs/README.md), which indexes every document in the repository. Two of them matter most before you write code: [docs/engineering/contributing.md](docs/engineering/contributing.md) (how to orient yourself, the crate architecture, and the rules a change must respect) and [docs/engineering/coding-standards.md](docs/engineering/coding-standards.md) (layering rules, lint configuration, and the implementation gotchas that trip contributors up).
 
@@ -11,7 +11,7 @@ Be decent to each other. riff follows the [Contributor Covenant](https://www.con
 ## Prerequisites
 
 - **Rust stable**, installed via [rustup](https://rustup.rs/), which brings `cargo`, `rustfmt`, and `clippy` with it. Every crate manifest declares `rust-version = "1.97"` and edition 2024, so you want a toolchain at or above that; CI pins one exact toolchain (`toolchain:` in `.github/workflows/ci.yml`) rather than tracking `stable`. The MSRV is informational — no CI job enforces it, so an older compiler may happen to work but is not supported.
-- **A C toolchain**, and on Linux the system libraries below. The pure-Rust crates build with no native dependencies at all; `riff-infra` (bundled SQLite, ALSA), `riff-gui` (wgpu, winit) and `riff-gui-nsh` (GTK 4) are the ones that need them.
+- **A C toolchain**, and on Linux the system libraries below. The pure-Rust crates build with no native dependencies at all; `riff-infra` (bundled SQLite, ALSA) and `riff-gui-nsh` (GTK 4 on Linux, via nsh) are the ones that need them.
 
 On Linux, install the development headers. This is the exact list CI installs on its Linux runners, which is also the full list for any Debian/Ubuntu derivative. The list has one home, [`.github/actions/linux-deps/action.yml`](.github/actions/linux-deps/action.yml), which both workflows call; `tests/repo_invariant_tests.rs` fails if the copy below drifts from it.
 
@@ -23,21 +23,20 @@ sudo apt-get install pkg-config libasound2-dev libudev-dev \
   libgtk-4-dev clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
-The families involved: ALSA development headers for `cpal`, X11/xcb and Wayland development headers for `winit`, plus `libxkbcommon-x11-dev` and `pkg-config`. `libudev-dev` covers cpal's device handling, and `mesa-vulkan-drivers` provides the software Vulkan adapter that renders the headless golden-image tests. **`libgtk-3-dev` is intentionally not needed** — the tray icon and native dialog stack (`tray-icon`, `muda`, `rfd`) are gated to non-Linux targets, and the Linux folder picker is a text input. **`libgtk-4-dev` is needed** from N1 on, because `nsh-platform-linux` builds the second frontend against GTK 4. `clang` and the two GStreamer packages are a deliberate superset: `nsh-platform-linux`'s build script has not been read, so the first Linux CI run is what measures whether they are consumed. WebKitGTK is absent because the nsh `webview` feature is off.
+The families involved: ALSA development headers for `cpal`, plus `pkg-config` and `libudev-dev` for cpal's device handling. **`libgtk-4-dev` is needed** because `nsh-platform-linux` builds the frontend against GTK 4.14 or newer. `clang` and the two GStreamer packages are a deliberate superset: `nsh-platform-linux`'s build script has not been read, so the first Linux CI run is what measures whether they are consumed. WebKitGTK is absent because the nsh `webview` feature is off.
 
-The egui crates have no feature flags, no code-generation step, and no migrations to run by hand. The one feature exception is the nsh frontend: `riff-gui-nsh` declares `default-features = false` and selects the `shader` and `svg` features on each `nsh-platform-*` crate, so the platform choice is a feature selection rather than a plain target dependency.
+There is no feature-flag matrix to remember: `riff-gui-nsh` declares `default-features = false` on `nsh-base`/`nsh-engine` and selects the `shader` and `svg` features on each `nsh-platform-*` crate, so the platform choice is a feature selection rather than a plain target dependency.
 
 ## Build and verify
 
 ```bash
-cargo run -p riff-gui                      # run in dev mode
-cargo run -p riff-gui-nsh                  # run the nsh frontend (second binary, N1 scaffold)
-cargo build --release -p riff-gui          # release build (LTO, stripped)
+cargo run                                  # run in dev mode
+cargo build --release                      # release build (LTO, stripped)
 cargo fmt                                  # format
 cargo check --all-targets                  # type/borrow checking across all targets
 cargo clippy --all-targets -- -D warnings  # lint with warnings as errors
 cargo test --all-targets                   # run all unit and integration tests
-cargo test -p riff-gui-nsh                 # run the nsh frontend's scaffold tests
+cargo test -p riff-gui-nsh                 # run the frontend's unit and token-sweep tests
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items  # build docs, rustdoc warnings are errors
 ```
 
@@ -47,7 +46,7 @@ Run all of these before you open a pull request — it is the same gate CI runs 
 - **`cargo fmt` must produce no diff** (CI runs `cargo fmt --check`). There is no `rustfmt.toml` in the repository, so this is rustfmt's default style.
 - **The doc build fails on any rustdoc warning** (`RUSTDOCFLAGS="-D warnings"`). Intra-doc links must resolve, and doc comments are linted rather than treated as decoration; run it whenever a change touches doc comments.
 
-For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand — much of the interface is exercised manually rather than by an automated test. New logic should come with new tests; [docs/engineering/testing-strategy.md](docs/engineering/testing-strategy.md) says which suite a given change belongs in.
+For UI changes, also run `cargo run` and check the behavior by hand — much of the interface is exercised manually rather than by an automated test. New logic should come with new tests; [docs/engineering/testing-strategy.md](docs/engineering/testing-strategy.md) says which suite a given change belongs in.
 
 A local hook validates commit messages at commit time, so you learn about a malformed message before CI does. One command wires the hook in:
 
@@ -57,9 +56,9 @@ git config core.hooksPath .githooks
 
 The hook is a thin shim over `tools/validate-commit-msg.py` and needs `python3` on your `PATH`; without it the hook prints a notice and steps aside — CI (the `commit-lint` job in `ci.yml`) is the real gate.
 
-## Golden-image tests
+## UI tests
 
-The committed golden snapshots are byte-exact baselines authored on a specific machine, with a **zero-pixel threshold** on macOS. wgpu picks a different adapter per machine, and GPU-rasterized shapes — 1px strokes, rounded-rect edges, dividers, image sampling — drift with the driver, so a golden that fails on your hardware is often a hardware difference rather than a change you made. Read the diff PNG before you assume either way, and never re-baseline to make an unexplained failure disappear: [docs/engineering/golden-image-testing.md](docs/engineering/golden-image-testing.md) documents the workflow, the determinism rules, and how to prove a re-baseline is what you think it is.
+UI behavior is covered by the headless nsh suites in `tests/nsh_shell_tests.rs` and `tests/nsh_flow_tests.rs` (selectors by `testID`) and by a manual walkthrough per change. The egui golden-image baselines were deleted with the egui crates (ADR 0022); there is no pixel-diff suite to re-baseline. Before claiming a UI change works, drive it in the running app.
 
 If the `riff-tests` binary dies mid-run with `STATUS_ACCESS_VIOLATION` and no failing test, that is a known open flake, already investigated and documented in [docs/engineering/access-violation-flake.md](docs/engineering/access-violation-flake.md) — read it before you start bisecting.
 

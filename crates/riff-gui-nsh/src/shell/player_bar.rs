@@ -397,11 +397,19 @@ fn now_playing_toggle(model: Stored<UiModel>, state: UiState) -> impl IntoElemen
             }
         })
         .test_id("now-playing-toggle")
-        .label(move || if open() { "Close Now Playing" } else { "Now Playing" })
+        .label(move || {
+            if open() {
+                "Close Now Playing"
+            } else {
+                "Now Playing"
+            }
+        })
         .p(px(tokens::SPACE_SM))
         .rounded(px(tokens::RADIUS_FULL))
         .hover(|s| s.bg(move || palette.get().row_hover))
-        .child(dynamic(move || icon(glyph(), Icon::ICON_SIZE, move || palette.get().ink)))
+        .child(dynamic(move || {
+            icon(glyph(), Icon::ICON_SIZE, move || palette.get().ink)
+        }))
 }
 
 /// The queue panel's toggle: the egui bar's `ToggleQueue`, opening the panel

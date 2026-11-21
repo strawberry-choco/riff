@@ -10,18 +10,13 @@ use nsh_core::prelude::*;
 use crate::bridge::UiModel;
 
 use super::{
-    CollectionTarget, add_batch_to_queue, play_batch, play_next_batch, shuffle_batch,
-    target_ids,
+    CollectionTarget, add_batch_to_queue, play_batch, play_next_batch, shuffle_batch, target_ids,
 };
 
 /// Open the menu at the context event's page position.
-pub fn open_collection_menu(
-    model: Stored<UiModel>,
-    target: CollectionTarget,
-    at: Point<Points>,
-) {
+pub fn open_collection_menu(model: Stored<UiModel>, target: CollectionTarget, at: Point<Points>) {
     let items = collection_menu_items(model, &target);
-    let _ = popup_menu_at(items, at);
+    drop(popup_menu_at(items, at));
 }
 
 /// The four shared rows, in the components crate's order.

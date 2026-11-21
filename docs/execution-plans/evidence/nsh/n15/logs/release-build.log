@@ -1,0 +1,9 @@
+   Compiling riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+error[E0425]: cannot find function `debug_keys` in this scope
+   --> crates\riff-gui-nsh\src\shell\layout.rs:276:5
+    |
+276 |     debug_keys(model, state, list);
+    |     ^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `riff-gui-nsh` (lib) due to 1 previous error

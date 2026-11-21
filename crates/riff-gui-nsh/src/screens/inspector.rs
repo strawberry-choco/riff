@@ -201,11 +201,9 @@ fn tag_section(model: Stored<UiModel>, state: UiState, track: &Track) -> impl In
                         .p(px(tokens::SPACE_XS))
                         .rounded(px(tokens::RADIUS_SM))
                         .hover(|s| s.bg(move || palette.get().row_hover))
-                        .child(icon(
-                            Icon::Pencil,
-                            Icon::ICON_SIZE,
-                            move || palette.get().ink_2,
-                        )),
+                        .child(icon(Icon::Pencil, Icon::ICON_SIZE, move || {
+                            palette.get().ink_2
+                        })),
                 ),
         )
         .child(tag_row(palette, "Title", title))

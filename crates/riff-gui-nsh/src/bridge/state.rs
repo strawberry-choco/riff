@@ -178,12 +178,12 @@ pub struct UiState {
     pub library_add_draft: Signal<String>,
     pub settings_status: Signal<Option<String>>,
     pub clear_confirm: Signal<bool>,
-    /// The thumbnail cache clear's settled outcome, and the ReplayGain
+    /// The thumbnail cache clear's settled outcome, and the `ReplayGain`
     /// pass's progress and settled report.
     pub cache_status: Signal<Option<String>>,
     pub pass_progress: Signal<(usize, usize)>,
     pub pass_status: Signal<Option<String>>,
-    /// The ReplayGain pass's force switch (session state, like the egui
+    /// The `ReplayGain` pass's force switch (session state, like the egui
     /// Settings surface's).
     pub pass_force: Signal<bool>,
     /// The newest handler-reported line (a drop's outcome, a picker's

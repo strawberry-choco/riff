@@ -32,12 +32,7 @@ pub fn judge(path: &Path) -> Result<PathBuf, String> {
 /// Register every accepted candidate, deduping against the session, and
 /// (for a drop) request each new root's scan. Refusals win the status line,
 /// exactly the egui report order.
-pub fn accept_paths(
-    model: Stored<UiModel>,
-    state: UiState,
-    candidates: &[PathBuf],
-    scan: bool,
-) {
+pub fn accept_paths(model: Stored<UiModel>, state: UiState, candidates: &[PathBuf], scan: bool) {
     let mut registered = Vec::new();
     let mut rejections = Vec::new();
     for candidate in candidates {
@@ -45,8 +40,7 @@ pub fn accept_paths(
             Err(refusal) => rejections.push(refusal),
             Ok(canonical) => {
                 let known = model.with(|m| {
-                    m.rt
-                        .library
+                    m.rt.library
                         .lock_or_recover()
                         .library_paths
                         .paths()
@@ -78,10 +72,9 @@ pub fn accept_paths(
             )
         };
         state.action_status.set(Some(line));
-        state.settings_status.set(Some(format!(
-            "Added {} folder(s)",
-            registered.len()
-        )));
+        state
+            .settings_status
+            .set(Some(format!("Added {} folder(s)", registered.len())));
     }
     for refusal in rejections {
         state.action_status.set(Some(refusal.clone()));
@@ -127,11 +120,7 @@ pub fn path_from_uri(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let decoded = percent_decode(rest);
     #[cfg(windows)]
-    {
-        let without_slash = decoded.strip_prefix('/').unwrap_or(&decoded);
-        return Some(PathBuf::from(without_slash));
-    }
-    #[cfg(not(windows))]
+    let decoded = decoded.strip_prefix('/').unwrap_or(&decoded).to_owned();
     Some(PathBuf::from(decoded))
 }
 

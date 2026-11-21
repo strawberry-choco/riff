@@ -411,10 +411,7 @@ impl PartialEq for PlaylistRowView {
 
 /// Build one playlist's detail from the read seam, or `None` when the store
 /// no longer knows the list.
-pub(crate) fn playlist_detail(
-    views: &mut SessionViews,
-    id: &PlaylistId,
-) -> Option<PlaylistDetail> {
+pub(crate) fn playlist_detail(views: &mut SessionViews, id: &PlaylistId) -> Option<PlaylistDetail> {
     let name = reads::playlists(views)
         .iter()
         .find(|playlist| &playlist.id == id)
@@ -506,23 +503,28 @@ impl TagDraft {
     /// The draft from one track's metadata.
     #[must_use]
     pub fn of_track(track: &Track) -> Self {
-        let mut draft = Self::default();
-        draft.title = track.metadata.title.clone().unwrap_or_default();
-        draft.artist = track.metadata.artist.clone().unwrap_or_default();
-        draft.album = track.metadata.album.clone().unwrap_or_default();
-        draft.album_artist = track.metadata.album_artist.clone().unwrap_or_default();
-        draft.genre = track.metadata.genre.clone().unwrap_or_default();
-        draft.year = track.metadata.year.map(|y| y.to_string()).unwrap_or_default();
-        draft.track_number = track
-            .metadata
-            .track_number
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        draft.track_gain = number(track.metadata.replaygain_track_gain);
-        draft.track_peak = number(track.metadata.replaygain_track_peak);
-        draft.album_gain = number(track.metadata.replaygain_album_gain);
-        draft.album_peak = number(track.metadata.replaygain_album_peak);
-        draft
+        Self {
+            title: track.metadata.title.clone().unwrap_or_default(),
+            artist: track.metadata.artist.clone().unwrap_or_default(),
+            album: track.metadata.album.clone().unwrap_or_default(),
+            album_artist: track.metadata.album_artist.clone().unwrap_or_default(),
+            genre: track.metadata.genre.clone().unwrap_or_default(),
+            year: track
+                .metadata
+                .year
+                .map(|y| y.to_string())
+                .unwrap_or_default(),
+            track_number: track
+                .metadata
+                .track_number
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            track_gain: number(track.metadata.replaygain_track_gain),
+            track_peak: number(track.metadata.replaygain_track_peak),
+            album_gain: number(track.metadata.replaygain_album_gain),
+            album_peak: number(track.metadata.replaygain_album_peak),
+            different: [false; 11],
+        }
     }
 
     /// The album aggregate: a field all tracks share keeps its value; one
@@ -626,7 +628,7 @@ impl TagDraft {
         }
     }
 
-    /// The ReplayGain half of the draft, only non-empty values.
+    /// The `ReplayGain` half of the draft, only non-empty values.
     #[must_use]
     pub fn replaygain(&self) -> riff_backend::app::traits::ReplayGainTags {
         riff_backend::app::traits::ReplayGainTags {
@@ -763,8 +765,6 @@ impl AppearanceMode {
         }
     }
 }
-
-
 
 /// The covers the View half holds, keyed by the decision half's composite
 /// [`crate::bridge::covers::CoverCacheKey`]: one artwork identity at one
@@ -1260,10 +1260,7 @@ pub(crate) mod reads {
 
     /// One built-in smart list's tracks under its own bound, the sidebar's
     /// and the stage's shared limit choice.
-    pub(crate) fn smart_list(
-        views: &mut SessionViews,
-        kind: SmartPlaylistKind,
-    ) -> Arc<[Track]> {
+    pub(crate) fn smart_list(views: &mut SessionViews, kind: SmartPlaylistKind) -> Arc<[Track]> {
         views.smart_list(kind, crate::menus::smart_list_limit(kind))
     }
 
@@ -1722,5 +1719,70 @@ mod tests {
             stage_of_parts(BrowseMode::Library, LibrarySection::Albums, &[genre]),
             StageKind::AlbumsRoot
         );
+    }
+
+    fn tag_track(title: &str, year: u32) -> Track {
+        Track::fresh_scan(
+            crate::model::TrackId(format!("/music/{title}.wav")),
+            std::path::PathBuf::from(format!("/music/{title}.wav")),
+            riff_backend::domain::TrackMetadata {
+                title: Some(title.to_owned()),
+                artist: Some("Shared Artist".to_owned()),
+                album: Some("Shared Album".to_owned()),
+                year: Some(year),
+                ..riff_backend::domain::TrackMetadata::default()
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// The album aggregate keeps a shared value and blanks a field the
+    /// tracks disagree on, marking it `(different)`.
+    #[test]
+    fn the_album_draft_marks_what_the_tracks_disagree_on() {
+        let tracks = [tag_track("One", 2001), tag_track("Two", 2002)];
+        let draft = TagDraft::of_album(&tracks);
+        assert_eq!(draft.artist, "Shared Artist");
+        assert_eq!(draft.album, "Shared Album");
+        assert!(draft.title.is_empty(), "the title differs");
+        assert!(draft.different[0], "the title is marked");
+        assert!(!draft.different[1], "the artist is shared");
+        assert_eq!(draft.placeholder(0), "(different)");
+        assert_eq!(
+            draft.placeholder(1),
+            "(none)",
+            "the field is shared but unset"
+        );
+    }
+
+    /// Only non-empty fields travel: a blank field never clears a tag, and a
+    /// bad number is no number.
+    #[test]
+    fn the_draft_writes_only_what_it_carries() {
+        let mut draft = TagDraft::of_track(&tag_track("One", 2001));
+        draft.genre = "  ".to_owned();
+        draft.track_number = "not a number".to_owned();
+        let edit = draft.edit();
+        assert_eq!(edit.title.as_deref(), Some("One"));
+        assert_eq!(edit.genre, None, "blank text is not written");
+        assert_eq!(
+            edit.track_number, None,
+            "an unreadable number is not written"
+        );
+        assert_eq!(edit.year, Some(2001));
+    }
+
+    /// Dirtiness compares against the track's own values.
+    #[test]
+    fn a_draft_is_dirty_only_when_a_field_moves() {
+        let track = tag_track("One", 2001);
+        let same = TagDraft::of_track(&track);
+        assert!(!same.differs_from(&track));
+        let mut changed = same.clone();
+        changed.title = "Renamed".to_owned();
+        assert!(changed.differs_from(&track));
     }
 }

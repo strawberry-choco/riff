@@ -1,6 +1,10 @@
-//! The riff frontend on nsh: the `riff-nsh` binary, a second frontend beside
-//! `riff-gui` until feature parity, when the three egui crates are deleted
-//! (ADR 0022).
+//! The riff frontend on nsh: the `riff` binary, the workspace's one frontend
+//! since the egui crates were deleted at N15 (ADR 0022).
+
+#![allow(
+    clippy::large_types_passed_by_value,
+    reason = "UiState is a Copy bundle of signal handles, not data; a reference would outlive every closure that renders from it"
+)]
 //!
 //! N2 ports the design system: [`theme`] carries the palette, tokens,
 //! fonts and icons ported from `crates/riff-gui-theme/src/theme.rs`, and

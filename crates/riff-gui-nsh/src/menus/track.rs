@@ -1,7 +1,7 @@
 //! The track context menu: the egui components crate's track menu ported to
 //! a native popup. The item order and labels are that renderer's — Play,
 //! Play Next, Add to Queue, Add to Playlist, the Favourite flip, Remove from
-//! Playlist (playlist rows), Edit Tags and Measure ReplayGain (resolved
+//! Playlist (playlist rows), Edit Tags and Measure `ReplayGain` (resolved
 //! tracks) — with a missing row reduced to what needs no Track.
 //!
 //! The dispatch is the egui host's: every playback item is one transport
@@ -25,7 +25,7 @@ pub struct TrackMenuSubject {
     pub id: TrackId,
     pub favorite: bool,
     /// `false` for a dangling playlist entry: no playback, no favourite, no
-    /// tag or ReplayGain items.
+    /// tag or `ReplayGain` items.
     pub resolved: bool,
     /// `Some` only for a user playlist's row.
     pub playlist: Option<PlaylistId>,
@@ -46,14 +46,10 @@ impl TrackMenuSubject {
 
 /// Open the menu at the context event's page position. Opening selects the
 /// row first, exactly the egui host's order.
-pub fn open_track_menu(
-    model: Stored<UiModel>,
-    subject: TrackMenuSubject,
-    at: Point<Points>,
-) {
+pub fn open_track_menu(model: Stored<UiModel>, subject: TrackMenuSubject, at: Point<Points>) {
     select_track(model, subject.id.clone());
     let items = track_menu_items(model, &subject);
-    let _ = popup_menu_at(items, at);
+    drop(popup_menu_at(items, at));
 }
 
 /// The item list, built at open time so the playlist submenu and the
@@ -75,7 +71,7 @@ pub fn track_menu_items(model: Stored<UiModel>, subject: &TrackMenuSubject) -> V
             let id = id.clone();
             move || add_to_queue(model, id.clone())
         }));
-        let choices = model.with(|m| playlist_choices(m));
+        let choices = model.with(playlist_choices);
         items.push(MenuItem::submenu(
             "Add to Playlist",
             add_to_playlist_items(model, &choices, &id),
@@ -94,25 +90,22 @@ pub fn track_menu_items(model: Stored<UiModel>, subject: &TrackMenuSubject) -> V
     }
     if subject.playlist.is_some() {
         items.push(MenuItem::separator());
-        items.push(
-            MenuItem::new("Remove from Playlist").on_select({
-                let playlist = subject.playlist.clone();
-                let id = subject.id.clone();
-                move || {
-                    if let Some(playlist) = playlist.clone() {
-                        remove_from_playlist(model, playlist, id.clone());
-                    }
+        items.push(MenuItem::new("Remove from Playlist").on_select({
+            let playlist = subject.playlist.clone();
+            let id = subject.id.clone();
+            move || {
+                if let Some(playlist) = playlist.clone() {
+                    remove_from_playlist(model, playlist, id.clone());
                 }
-            }),
-        );
+            }
+        }));
     }
     if subject.resolved {
         items.push(MenuItem::separator());
         let edit_id = subject.id.clone();
-        items.push(
-            MenuItem::new("Edit Tags")
-                .on_select(move || crate::screens::inspector::tag_editor::begin(model, edit_id.clone())),
-        );
+        items.push(MenuItem::new("Edit Tags").on_select(move || {
+            crate::screens::inspector::tag_editor::begin(model, edit_id.clone());
+        }));
         items.push(MenuItem::new("Measure ReplayGain").on_select({
             let id = subject.id.clone();
             move || measure_replaygain(model, id.clone())
@@ -141,11 +134,7 @@ pub(crate) fn set_favorite(model: Stored<UiModel>, id: TrackId, favorite: bool) 
     });
 }
 
-pub(crate) fn remove_from_playlist(
-    model: Stored<UiModel>,
-    playlist: PlaylistId,
-    id: TrackId,
-) {
+pub(crate) fn remove_from_playlist(model: Stored<UiModel>, playlist: PlaylistId, id: TrackId) {
     model.with(|m| {
         if let Err(e) = m.rt.playlists.remove_playlist_entries(&playlist, &id) {
             tracing::warn!("Failed to remove the track from the playlist: {e}");
@@ -153,7 +142,7 @@ pub(crate) fn remove_from_playlist(
     });
 }
 
-/// One targeted ReplayGain measurement, submitted through the pass service
+/// One targeted `ReplayGain` measurement, submitted through the pass service
 /// (the egui menu's command). The pass writes the measured pair itself.
 pub(crate) fn measure_replaygain(model: Stored<UiModel>, id: TrackId) {
     model.with(|m| {

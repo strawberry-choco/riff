@@ -108,8 +108,9 @@ pub fn parse_duration(text: &str) -> Result<u64, String> {
 pub fn today() -> CivilDateTime {
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| i64::try_from(elapsed.as_secs() / 86_400).unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs() / 86_400).unwrap_or(0)
+        });
     let (year, month, day) = civil_from_days(days);
     CivilDateTime {
         year,

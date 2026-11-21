@@ -2,7 +2,7 @@
 
 This document describes how riff is built for distribution. For the development build workflow, see [development-setup.md](./development-setup.md); for the feature catalog the release ships, see [../product/features.md](../product/features.md).
 
-riff is a Cargo workspace that compiles to a single standalone binary (the `riff` binary in `riff-gui`). The workspace also builds a second binary, `riff-nsh` in `riff-gui-nsh`, the nsh rewrite's scaffold. The pipeline does not ship it until N16 (ADR 0022). The shipped binary has no feature flags, no runtime plugin system, and no external assets that must ship alongside the executable, which is what makes packaging a matter of building one binary per platform and wrapping it in the thinnest container each platform's users expect. There is no installer and no code signing, and those omissions are deliberate at this stage rather than oversights: they are the same limitations the release notes state to users. Windows ships the bare `riff.exe`; macOS ships a `.dmg` holding a minimal, ad-hoc-signed `.app` bundle with the brand icon.
+riff is a Cargo workspace that compiles to one frontend binary (`riff` in `riff-gui-nsh`). From N16 the artifact shape is nsh's: `nsh package --target <slug>` writes `.nsh/out/riff/` with the executable and its asset folder, plus a zip and (on Windows) an Inno Setup script. The release workflow archives that output under the stable asset name per platform: a zip for Windows and macOS, a tarball for Linux. There is no code signing, and that omission is deliberate: the release notes state it. macOS keeps its ad-hoc-signed `.app` bundle inside the zip.
 
 ## The release pipeline
 
@@ -37,9 +37,9 @@ The published names are `riff-<tag>-<slug>.<ext>` where the extension follows th
 
 The Linux leg's apt list comes from the shared `.github/actions/linux-deps` action, a superset of what `riff` alone needs until N16. Jammy ships GTK 4.6, below the GTK 4.14 floor nsh states for its Linux backend. The leg builds only `riff`, which needs no GTK 4. The runner move to `ubuntu-24.04` waits for N16, and the glibc 2.39 claim behind it is unconfirmed.
 
-**The executable carries its own fonts and icons; the containers carry nothing extra.** The Inter faces are `include_bytes!`-ed and the Lucide icons `include_str!`-ed by `crates/riff-gui-theme/src/fonts.rs` and `crates/riff-gui-theme/src/icons.rs`, so no assets folder is needed. The Linux leg uses `tar -czf` with a member name, which keeps the archive flat at one entry. The Windows leg copies `target/release/riff.exe` into `dist/` under the published name and uploads it directly — GitHub release assets must be single files, and the `.exe` already is one, so there is no zip wrapper; the `.exe` suffix matters, and a Unix path there would package nothing at all.
+**The artifact is nsh's directory, not a bare executable.** The Inter faces are embedded, the Lucide icons are embedded, and the brand icon travels in the packaged directory. `nsh package` writes `.nsh/out/riff/`, `.nsh/out/riff.zip` and `.nsh/out/riff.iss` on Windows; Linux writes the directory plus `.nsh/out/riff.tar.gz`; macOS writes `.nsh/out/riff.app`. The workflow copies or archives that output under the release asset's name, because GitHub assets must be single files.
 
-The macOS leg assembles a minimal `.app` bundle around the binary: `Contents/MacOS/riff`, an `Info.plist` (identifier `io.github.strawberry-choco.riff`, version taken from the tag), and the brand icon `crates/riff-gui/assets/brand/riff.icns`. The bundle is ad-hoc signed (`codesign -s -`), which is what an arm64 Mach-O needs to run at all; it is not identified with Apple, so Gatekeeper still quarantines the download — the release notes carry the instructions. The image is built with `hdiutil create -format UDZO` and holds the app plus an `/Applications` symlink for the drag-to-install gesture. The icon is the packaging copy of the mark the app generates at runtime: `mark_svg()` in `crates/riff-gui/src/ui/chrome.rs` derives four equalizer bars from `WORDMARK_BARS`, and `assets/brand/mark.svg` is the same geometry as a file (source for regenerating the `.icns` via `iconutil`). If the in-app mark changes, regenerate both — the two must not drift.
+The macOS leg takes nsh's ad-hoc-signed `riff.app` (identifier `io.github.strawberry-choco.riff`, the brand icon from `crates/riff-gui-nsh/assets/brand/`) and zips it. Gatekeeper still quarantines the download because the bundle is not identified with Apple; the release notes carry the `xattr` instructions.
 
 `if-no-files-found: error` on the upload step is the backstop: a packaging step that silently produced nothing must fail the leg rather than publish a zero-byte download.
 
@@ -94,8 +94,8 @@ The `dev` profile is the mirror image for iteration speed: it sets
 producing a binary responsive enough for interactive UI work. The trade-off is
 compile time — a release build is significantly slower than a debug build because
 LTO and `codegen-units = 1` defeat incremental parallel codegen. This is expected
-and normal: use `cargo run -p riff-gui` while iterating and reserve
-`cargo build --release -p riff-gui` for producing distributable binaries, which is
+and normal: use `cargo run` while iterating and reserve
+`cargo build --release` for producing distributable binaries, which is
 exactly the command the release workflow's four legs run.
 
 ### Build command
@@ -103,7 +103,7 @@ exactly the command the release workflow's four legs run.
 Produce a release binary with:
 
 ```bash
-cargo build --release -p riff-gui
+cargo build --release
 ```
 
 The resulting binary is written to `target/release/` (for example `target/release/riff` on Linux/macOS or `target/release/riff.exe` on Windows).
@@ -111,7 +111,7 @@ The resulting binary is written to `target/release/` (for example `target/releas
 ### Binary characteristics
 
 - **Single standalone binary.** riff links its dependencies statically into one executable; there is no separate runtime or library to install. The Linux build is the one exception, and it is dynamic against `libasound2` only, which the release notes name.
-- **One workspace, one shipped artifact.** Two members produce binaries: `riff-gui` (the `riff` package target) and `riff-gui-nsh` (the `riff-nsh` scaffold). The pipeline ships only `riff`, and `riff-nsh` is not released until N16, so there is no multi-artifact assembly.
+- **One workspace, one shipped artifact.** One member produces a binary: `riff-gui-nsh`'s `riff` package target. The pipeline ships that one program, packaged per platform by nsh.
 - **No feature flags on the shipped binary.** Every `riff` build includes the same set of capabilities; the only conditional compilation is per-target-OS for system integration (tray icon and native file dialogs on non-Linux platforms). The nsh platform crates carry a trimmed feature list (`shader` and `svg`), single-sourced in the root manifest, and it never reaches the `riff` build.
 - **No companion assets.** Fonts and icons are compiled into the executable. The one deliberate addition is the macOS app bundle's brand icon (`assets/brand/riff.icns`), which is packaging, not a runtime asset.
 - **Stripped.** Debug symbols are removed, reducing binary size.

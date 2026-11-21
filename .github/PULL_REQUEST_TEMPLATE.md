@@ -25,4 +25,4 @@ The same list, with the reasoning behind each item, is in [docs/engineering/cont
 
 CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets` on Linux and Windows, plus a warning-free rustdoc build on the Linux leg — that is the gate, and clippy and rustdoc treat any warning as a failure. Run them locally first.
 
-For UI changes, also run `cargo run -p riff-gui` and check the behavior by hand; much of the interface is exercised manually rather than by an automated test. If a golden-image test fails, read [docs/engineering/golden-image-testing.md](docs/engineering/golden-image-testing.md) before re-baselining — the committed snapshots are byte-exact and legitimately differ across hardware.
+For UI changes, also run `cargo run` and check the behavior by hand; the headless nsh suites cover the flows, but the live surface is still exercised manually. There is no golden-image suite to re-baseline (ADR 0022).

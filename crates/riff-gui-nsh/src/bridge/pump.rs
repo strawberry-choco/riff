@@ -66,7 +66,10 @@ struct TickOutcome {
     browse: Option<Arc<[EntityView]>>,
     folder_roots: Option<Arc<[PathBuf]>>,
     custom_lists: Option<Result<Arc<[crate::model::CustomListRow]>, String>>,
+    #[allow(clippy::option_option)]
+    // Some(None) clears the signal when the open list goes; None keeps it.
     playlist_detail: Option<Option<crate::model::PlaylistDetail>>,
+    #[allow(clippy::option_option)]
     smart_list_detail: Option<Option<crate::model::SmartListDetail>>,
     custom_list_total: Option<usize>,
     library_paths: Option<Arc<[crate::model::LibraryPathView]>>,
@@ -320,7 +323,7 @@ pub fn install(model: Stored<UiModel>) {
 }
 
 /// One tick: read the backend, decide what moved, return the writes.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn tick(
     rt: &mut AppRuntime,
     cache: &mut PumpCache,
@@ -594,15 +597,14 @@ fn tick(
     if detail_moved {
         cache.open_playlist = open_playlist.cloned();
         outcome.playlist_detail = Some(
-            open_playlist
-                .and_then(|id| crate::model::playlist_detail(&mut rt.session_views, id)),
+            open_playlist.and_then(|id| crate::model::playlist_detail(&mut rt.session_views, id)),
         );
     }
 
     // 6d. The open built-in smart list: its tracks re-read when the list
     //     opens or the Library generation moves.
-    let smart_moved = cache.open_smart_list != open_smart_list
-        || outcome.library_revision.is_some();
+    let smart_moved =
+        cache.open_smart_list != open_smart_list || outcome.library_revision.is_some();
     if smart_moved {
         cache.open_smart_list = open_smart_list;
         outcome.smart_list_detail = Some(

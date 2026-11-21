@@ -17,9 +17,7 @@ use crate::platform::window_state;
 
 /// Install the tray. Off desktops `set_tray` is a no-op.
 pub fn install(model: Stored<UiModel>, _state: UiState) {
-    let show = {
-        move || window_state::show()
-    };
+    let show = window_state::show;
     let play_pause = move || {
         model.with(|m| {
             let session = m.rt.playback.lock_or_recover();

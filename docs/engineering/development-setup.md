@@ -1,6 +1,6 @@
 # Development Setup
 
-This guide gets a new contributor from a fresh machine to a running build of riff. riff is a lightweight, offline-first desktop music player written in Rust. Its shipping frontend is egui; a second frontend on the nsh UI stack builds beside it until feature parity (ADR 0022). It is a Cargo workspace with no code-generation step and, apart from the nsh frontend's platform features (noted under [Notes](#notes)), no feature flags, so the setup is deliberately minimal: install a recent Rust toolchain, clone the repository, and run `cargo`.
+This guide gets a new contributor from a fresh machine to a running build of riff. riff is a lightweight, offline-first desktop music player written in Rust. Its frontend renders through the nsh UI stack (ADR 0022). It is a Cargo workspace with no code-generation step and, apart from the nsh frontend's platform features (noted under [Notes](#notes)), no feature flags, so the setup is deliberately minimal: install a recent Rust toolchain, clone the repository, and run `cargo`.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ Audio output is provided by the `cpal` crate, which talks to each operating syst
 | macOS | CoreAudio | None — ships with the OS |
 | Linux | ALSA | ALSA development headers are required to compile `cpal` |
 
-Note that ALSA is not the only Linux dependency. The windowing stack in `riff-gui` (`winit`) also needs X11/xcb and Wayland development headers, and `cpal` needs `libudev-dev`, so a first build of the GUI fails without them too — the ALSA headers are just the most commonly-missing piece. The full list CI installs on its Linux runners, which is authoritative, is in [../../CONTRIBUTING.md](../../CONTRIBUTING.md#prerequisites):
+Note that ALSA is not the only Linux dependency. `nsh-platform-linux` needs GTK 4.14 development headers, and `cpal` needs `libudev-dev`, so a first build of the GUI fails without them too — the ALSA headers are just the most commonly-missing piece. The full list CI installs on its Linux runners, which is authoritative, is in [../../CONTRIBUTING.md](../../CONTRIBUTING.md#prerequisites):
 
 ```bash
 sudo apt-get install pkg-config libasound2-dev libudev-dev \
@@ -47,7 +47,7 @@ cd riff
 cargo build
 ```
 
-The first build downloads and compiles all dependencies. Subsequent builds are incremental and much faster. To run the application during development, use `cargo run -p riff-gui`, which builds (if needed) and launches the player in one step.
+The first build downloads and compiles all dependencies. Subsequent builds are incremental and much faster. To run the application during development, use `cargo run`, which builds (if needed) and launches the player in one step.
 
 Commit messages are validated locally too, so a malformed message is caught while the change is still fresh. One command wires the hook in:
 
@@ -63,21 +63,20 @@ The full day-to-day command set is below. There is no project script runner, tas
 
 | Command | Purpose | Notes |
 |---|---|---|
-| `cargo run -p riff-gui` | Build and launch in dev mode | Uses the workspace `dev` profile (`opt-level = 1`) |
-| `cargo run -p riff-gui-nsh` | Build and launch the nsh frontend | The second binary (N1 scaffold); same `dev` profile |
+| `cargo run` | Build and launch in dev mode | Uses the workspace `dev` profile (`opt-level = 1`) |
 | `cargo check --workspace` | Fast type-check without codegen | Preferred for quick feedback while editing |
-| `cargo build --release -p riff-gui` | Optimized release binary | LTO + strip; slow to compile, small binary |
+| `cargo build --release` | Optimized release binary | LTO + strip; slow to compile, small binary |
 | `cargo fmt` | Format all source files | No `rustfmt.toml`; uses default style |
 | `cargo clippy --all-targets` | Lint the codebase | Pedantic lints enabled as warnings |
 | `cargo test --all-targets` | Run the test suites | `riff-infra/tests/` plus the root `tests/` crate; see [testing-strategy.md](./testing-strategy.md) |
 | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items` | Build the documentation | Runs in CI on the Linux leg; every rustdoc warning is an error |
 | `cargo test -p riff-infra` | Run the adapter/store suite | Real SQLite and real adapters, without building the UI |
-| `cargo test -p riff-tests` | Run the workspace-root suite | Cross-crate integration, UI, and golden-image tests |
-| `cargo test -p riff-gui-nsh` | Run the nsh frontend's suite | The scaffold tests; no window and no engine |
+| `cargo test -p riff-tests` | Run the workspace-root suite | Cross-crate integration plus the nsh bridge, shell and flow suites |
+| `cargo test -p riff-gui-nsh` | Run the frontend's suite | Scaffold, palette, cover-decision and token-sweep tests; no window and no engine |
 
 A typical inner loop is `cargo check` while editing, `cargo fmt` and `cargo clippy` before committing, and `cargo test` before opening a pull request. See [coding-standards.md](./coding-standards.md) for the lint and formatting conventions in detail, and [testing-strategy.md](./testing-strategy.md) for how the suites are organized.
 
-One practical note: because the workspace splits pure logic from the adapter stack, you can type-check and test the pure crates (`cargo test -p riff-playback -p riff-library -p riff-persistence`) without a C compiler or platform audio libraries — only `riff-infra` (bundled SQLite) and `riff-gui` need the native toolchain.
+One practical note: because the workspace splits pure logic from the adapter stack, you can type-check and test the pure crates (`cargo test -p riff-playback -p riff-library -p riff-persistence`) without a C compiler or platform audio libraries — only `riff-infra` (bundled SQLite) and `riff-gui-nsh` need the native toolchain.
 
 The two build profiles and their trade-offs are described in [release-and-packaging.md](./release-and-packaging.md).
 
@@ -85,7 +84,7 @@ The two build profiles and their trade-offs are described in [release-and-packag
 
 A few facts about the project shape that simplify expectations:
 
-- **No feature flags, with one nsh exception.** The egui crates have no Cargo features to enable or disable. Their only conditional compilation is per-target-OS (`#[cfg(target_os = "linux")]` and its negation) for platform-specific system integration such as the tray icon and native file dialogs. The nsh frontend `riff-gui-nsh` is the exception: it declares `default-features = false` and selects the `shader` and `svg` features on each target-gated `nsh-platform-*` dependency. Those features are set in the manifest, not toggled by the person building.
+- **No feature flags to toggle.** `riff-gui-nsh` declares `default-features = false` and selects the `shader` and `svg` features on each target-gated `nsh-platform-*` dependency. Those features are set in the manifest, not toggled by the person building.
 - **No codegen step.** There is no build script output, no schema generation, and no asset pipeline to run before compiling.
 - **Embedded migrations.** State persists in the Application Store (`riff.sqlite3` via rusqlite, bundled — in `riff-infra`). Schema evolution runs through ordered, checksummed migrations applied automatically on open — there is no external migration tooling to run.
 - **CI pipeline.** `.github/workflows/ci.yml` runs the quality gate (`cargo fmt --check`, `cargo clippy --all-targets`, `cargo test`) on push and pull requests to master, on Linux and Windows runners, plus a warning-free rustdoc build (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --document-private-items`) on the Linux leg. A commit-message hook is available locally (`git config core.hooksPath .githooks`) — optional, with the CI jobs as the real gate; see [commit-conventions.md](./commit-conventions.md). Pull requests are merged with rebase-and-merge only, and the `commit messages (pull request)` job (`commit-lint`) is the required branch-protection check behind it — every commit lands on `master` as written, so each must be well-formed. The full story is in [CONTRIBUTING.md](../../CONTRIBUTING.md#merge-strategy).

@@ -7,12 +7,12 @@
 //! three field/comparison/value gaps, and the catalog's value-type sentence.
 
 use riff_backend::app::store::{SmartPlaylistTree, UnreadableRule};
-use riff_backend::domain::{
-    CivilDateTime, Combine, Comparison, MatchableField, Rule, RuleBox, RuleChild, RuleValue,
-    RootBox,
-};
-use riff_backend::domain::{field_catalog, ValueType};
 use riff_backend::domain::PlaylistId;
+use riff_backend::domain::{
+    CivilDateTime, Combine, Comparison, MatchableField, RootBox, Rule, RuleBox, RuleChild,
+    RuleValue,
+};
+use riff_backend::domain::{ValueType, field_catalog};
 
 /// The words an unreadable row wears, the egui editor's copy.
 pub const UNREADABLE_ROW_WORDS: &str = "riff can't understand this rule";
@@ -202,20 +202,18 @@ pub fn parse_value(
             text.parse()
                 .map_err(|_| "this rule's value can't be read as this field's kind".to_owned())?,
         ),
-        ValueType::Duration => {
-            RuleValue::DurationMillis(crate::screens::smart_playlists::date_picker::parse_duration(
-                text,
-            )?)
-        }
+        ValueType::Duration => RuleValue::DurationMillis(
+            crate::screens::smart_playlists::date_picker::parse_duration(text)?,
+        ),
         ValueType::Date => {
             if comparison == Comparison::InLast {
                 RuleValue::Days(text.parse().map_err(|_| {
                     "this rule's value can't be read as this field's kind".to_owned()
                 })?)
             } else {
-                RuleValue::DateTime(
-                    crate::screens::smart_playlists::date_picker::parse_civil(text)?,
-                )
+                RuleValue::DateTime(crate::screens::smart_playlists::date_picker::parse_civil(
+                    text,
+                )?)
             }
         }
         ValueType::YesNo => RuleValue::YesNo(parse_yes_no(text)?),
@@ -244,9 +242,7 @@ pub fn display_value(value: &RuleValue) -> String {
             (millis / 1000) % 60
         ),
         RuleValue::Days(days) => days.to_string(),
-        RuleValue::DateTime(at) => {
-            crate::screens::smart_playlists::date_picker::format_civil(*at)
-        }
+        RuleValue::DateTime(at) => crate::screens::smart_playlists::date_picker::format_civil(*at),
         RuleValue::YesNo(yes) => {
             if *yes {
                 "yes".to_owned()
@@ -261,7 +257,10 @@ pub fn display_value(value: &RuleValue) -> String {
 #[must_use]
 pub fn next_field(field: MatchableField) -> MatchableField {
     let all = MatchableField::ALL;
-    let at = all.iter().position(|candidate| *candidate == field).unwrap_or(0);
+    let at = all
+        .iter()
+        .position(|candidate| *candidate == field)
+        .unwrap_or(0);
     all[(at + 1) % all.len()]
 }
 
@@ -317,13 +316,12 @@ pub fn value_hint(field: MatchableField, comparison: Comparison) -> &'static str
         field_catalog::ValueWidget::DateTime => "YYYY-MM-DD HH:MM",
         field_catalog::ValueWidget::DateWindow => "days",
         field_catalog::ValueWidget::YesNo => "yes or no",
-        field_catalog::ValueWidget::Text => "text",
-        field_catalog::ValueWidget::ChooseFromLibrary => "text",
+        field_catalog::ValueWidget::Text | field_catalog::ValueWidget::ChooseFromLibrary => "text",
     })
 }
 
 /// The zone-less day a `CivilDateTime` names, for the "Today" shortcut.
-pub use crate::screens::smart_playlists::date_picker::today as today;
+pub use crate::screens::smart_playlists::date_picker::today;
 
 #[allow(unused_imports)]
 use CivilDateTime as _;
@@ -356,7 +354,9 @@ mod tests {
             value: "not a year".to_owned(),
         })];
         let reasons = draft.to_tree().expect_err("an unreadable value blocks");
-        assert!(reasons.contains(&"this rule's value can't be read as this field's kind".to_owned()));
+        assert!(
+            reasons.contains(&"this rule's value can't be read as this field's kind".to_owned())
+        );
     }
 
     #[test]

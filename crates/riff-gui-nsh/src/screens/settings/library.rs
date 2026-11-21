@@ -80,7 +80,7 @@ fn add_row(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
                 .text_color(move || palette.get().ink),
         )
         .child(action_row(state, "library-add", "Add folder", move || {
-            add_path(model, state)
+            add_path(model, state);
         }))
         .child(action_row(
             state,
@@ -162,29 +162,28 @@ fn path_rows(model: Stored<UiModel>, state: UiState) -> AnyElement {
                         })
                         .test_id("library-watch")
                         .label("Watch for changes")
-                        .child(text(if watching {
-                            "Watching"
-                        } else {
-                            "Watch for changes"
-                        })
-                        .text_xs()
-                        .text_color(move || {
-                            if watching {
-                                palette.get().on_brand
+                        .child(
+                            text(if watching {
+                                "Watching"
                             } else {
-                                palette.get().ink_2
-                            }
-                        })),
+                                "Watch for changes"
+                            })
+                            .text_xs()
+                            .text_color(move || {
+                                if watching {
+                                    palette.get().on_brand
+                                } else {
+                                    palette.get().ink_2
+                                }
+                            }),
+                        ),
                 )
                 .child(action_row(state, "library-rescan", "Rescan", move || {
                     model.with(|m| m.rt.scans.request(rescan_path.clone()));
                 }))
-                .child(action_row(
-                    state,
-                    "library-remove",
-                    "Remove",
-                    move || remove_path_row(model, remove_path.clone()),
-                ))
+                .child(action_row(state, "library-remove", "Remove", move || {
+                    remove_path_row(model, remove_path.clone());
+                }))
                 .into_element()
         }))
         .into_element()
@@ -271,24 +270,20 @@ fn set_watch(model: Stored<UiModel>, path: std::path::PathBuf, watching: bool) {
     model.with(|m| {
         let mut watcher = m.rt.watcher_manager.lock_or_recover();
         let mut library = m.rt.library.lock_or_recover();
-        library.library_paths.set_watch(
-            &path,
-            watching,
-            &mut watcher,
-            m.rt.settings.as_mut(),
-        );
+        library
+            .library_paths
+            .set_watch(&path, watching, &mut watcher, m.rt.settings.as_mut());
     });
 }
 
 fn rescan_all(model: Stored<UiModel>) {
     model.with(|m| {
-        let paths = m
-            .rt
-            .library
-            .lock_or_recover()
-            .library_paths
-            .paths()
-            .to_vec();
+        let paths =
+            m.rt.library
+                .lock_or_recover()
+                .library_paths
+                .paths()
+                .to_vec();
         for path in paths {
             m.rt.scans.request(path);
         }
@@ -306,9 +301,9 @@ fn clear_library(model: Stored<UiModel>, state: UiState) {
     });
     match result {
         Ok(removed) => {
-            state
-                .settings_status
-                .set(Some(format!("Cleared the library: {removed} tracks removed")));
+            state.settings_status.set(Some(format!(
+                "Cleared the library: {removed} tracks removed"
+            )));
         }
         Err(e) => state.settings_status.set(Some(e.to_string())),
     }

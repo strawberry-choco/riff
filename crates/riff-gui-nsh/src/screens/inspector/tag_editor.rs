@@ -1,6 +1,6 @@
 //! The inline tag editor: the eleven editable values the egui
 //! `ui/app/tag_editor.rs` edits — title, artist, album, album artist,
-//! genre, year, track number and the four ReplayGain facts — with the album
+//! genre, year, track number and the four `ReplayGain` facts — with the album
 //! aggregate's `(different)` and `(none)` display, a per-track save and an
 //! album save over `rt.tag_edits`.
 //!
@@ -20,7 +20,7 @@ use riff_backend::domain::{Track, TrackId};
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
-use crate::model::{reads, TagDraft, TAG_FIELDS};
+use crate::model::{TAG_FIELDS, TagDraft, reads};
 use crate::theme::icons::{Icon, icon};
 use crate::theme::tokens;
 
@@ -34,9 +34,8 @@ pub fn begin(model: Stored<UiModel>, id: TrackId) {
         m.rt.library.lock_or_recover().selected_track = Some(id.clone());
     });
     let draft = model.with(|m| {
-        reads::selected_track(&mut m.rt.session_views, &id).map_or_else(TagDraft::default, |track| {
-            TagDraft::of_track(&track)
-        })
+        reads::selected_track(&mut m.rt.session_views, &id)
+            .map_or_else(TagDraft::default, |track| TagDraft::of_track(&track))
     });
     state.selection.set(Some(id.clone()));
     state.tag_edit.set(Some(id));
@@ -88,9 +87,7 @@ pub fn install(model: Stored<UiModel>, state: UiState) {
         state.tag_failures.set(failures.clone());
         if pending.is_empty() {
             state.tag_saving.set(false);
-            state
-                .tag_status
-                .set(Some(status_line(saved, &failures)));
+            state.tag_status.set(Some(status_line(saved, &failures)));
             if failures.is_empty() {
                 state.tag_edit.set(None);
             }
@@ -99,7 +96,10 @@ pub fn install(model: Stored<UiModel>, state: UiState) {
 }
 
 fn path_label(path: Option<&PathBuf>) -> String {
-    path.map_or_else(|| "Unknown file".to_owned(), |path| path.display().to_string())
+    path.map_or_else(
+        || "Unknown file".to_owned(),
+        |path| path.display().to_string(),
+    )
 }
 
 fn status_line(saved: usize, failures: &[String]) -> String {
@@ -118,6 +118,7 @@ fn status_line(saved: usize, failures: &[String]) -> String {
 
 /// The form: the eleven fields, the album toggle, Save track, Save album,
 /// Cancel, and the status line. Mounted once per edit session.
+#[allow(clippy::too_many_lines)]
 pub fn form(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
     let palette = state.palette;
     let draft = state.tag_draft.get();
@@ -297,7 +298,7 @@ fn album_tracks(model: &mut UiModel, track: &Track) -> Vec<Track> {
     reads::album_tracks(&mut model.rt.session_views, &artist, &album).to_vec()
 }
 
-/// Save one track: the draft's non-empty fields and ReplayGain values.
+/// Save one track: the draft's non-empty fields and `ReplayGain` values.
 fn save_track(model: Stored<UiModel>, state: UiState) {
     let Some(id) = state.tag_edit.get() else {
         return;
@@ -369,7 +370,10 @@ fn submit(
     state: UiState,
     requests: Vec<(TrackId, PathBuf, TagEdit, ReplayGainTags)>,
 ) {
-    let pending: Vec<PathBuf> = requests.iter().map(|(_, path, _, _)| path.clone()).collect();
+    let pending: Vec<PathBuf> = requests
+        .iter()
+        .map(|(_, path, _, _)| path.clone())
+        .collect();
     let count = requests.len();
     model.with(|m| {
         for (id, path, edit, replaygain) in requests {

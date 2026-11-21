@@ -21,7 +21,6 @@ use riff_backend::app::traits::RequestedSize;
 use crate::bridge::UiModel;
 use crate::bridge::covers::cover_cache_key;
 use crate::bridge::state::UiState;
-use crate::theme::icons::{Icon, icon};
 use crate::theme::tokens;
 
 /// The tile for `identity` at `requested`, filling the box the caller gives
@@ -52,8 +51,14 @@ pub fn tile(
     .otherwise(move || placeholder(palette))
 }
 
-/// The shared placeholder well: the `surface_2` block with the music glyph
-/// tinted `ink_3` (the egui tile's design, as an element).
+/// The shared placeholder well: the `surface_2` block with a music glyph
+/// (the egui tile's design, as an element).
+///
+/// The glyph is text, not `svg()`. The tile rebuilds whenever the covers
+/// revision moves (every artless verdict bumps it), and re-mounting an SVG
+/// inside a recycled list cell painted the framework's broken-image block in
+/// the live drive. A text glyph has no asset to re-register and renders the
+/// same design.
 fn placeholder(palette: Signal<crate::theme::Palette>) -> impl IntoElement {
     view()
         .w_full()
@@ -63,7 +68,9 @@ fn placeholder(palette: Signal<crate::theme::Palette>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .test_id("cover-placeholder")
-        .child(icon(Icon::Music, tokens::PLACEHOLDER_GLYPH, move || {
-            palette.get().ink_3
-        }))
+        .child(
+            text("\u{266a}")
+                .text_size(px(tokens::PLACEHOLDER_GLYPH))
+                .text_color(move || palette.get().ink_3),
+        )
 }

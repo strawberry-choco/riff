@@ -1,5 +1,5 @@
 //! The Advanced page: progressive disclosure, notifications, close-to-quit,
-//! the thumbnail cache, and the library-wide ReplayGain pass.
+//! the thumbnail cache, and the library-wide `ReplayGain` pass.
 
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
@@ -12,6 +12,7 @@ use crate::theme::tokens;
 use super::{action_row, heading, status_line, toggle_row};
 
 /// The page.
+#[allow(clippy::too_many_lines)]
 pub fn page(model: Stored<UiModel>, state: UiState) -> AnyElement {
     let palette = state.palette;
     let flags = move || {
@@ -148,7 +149,7 @@ pub fn page(model: Stored<UiModel>, state: UiState) -> AnyElement {
                     move || model.with(|m| m.rt.passes.cancel()),
                 ))
                 .child(
-                    text(move || progress())
+                    text(progress)
                         .text_xs()
                         .text_color(move || palette.get().ink_3)
                         .test_id("settings-pass-progress"),

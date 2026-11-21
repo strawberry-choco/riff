@@ -17,8 +17,8 @@ use riff_backend::domain::{PlaylistId, TrackId};
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::components::empty_state;
-use crate::components::track_row::{row_of_in, TrackRowView};
-use crate::model::{reads, PlaylistDetail, PlaylistRowView};
+use crate::components::track_row::{TrackRowView, row_of_in};
+use crate::model::{PlaylistDetail, PlaylistRowView, reads};
 use crate::theme::icons::{Icon, icon};
 use crate::theme::tokens;
 
@@ -177,9 +177,13 @@ fn rename_band(model: Stored<UiModel>, state: UiState) -> AnyElement {
             view()
                 .flex_row()
                 .gap(px(tokens::SPACE_SM))
-                .child(header_action(palette, "playlist-rename-save", "Save name", "Save", {
-                    move || rename(model, state)
-                }))
+                .child(header_action(
+                    palette,
+                    "playlist-rename-save",
+                    "Save name",
+                    "Save",
+                    move || rename(model, state),
+                ))
                 .child(header_action(
                     palette,
                     "playlist-rename-cancel",
@@ -279,7 +283,15 @@ fn body(model: Stored<UiModel>, state: UiState) -> AnyElement {
                         rows.get()
                             .and_then(|detail| detail.rows.get(at.index()).cloned())
                     };
-                    row(model, state, facts, playlist, never_focus, drag_from, at.index())
+                    row(
+                        model,
+                        state,
+                        facts,
+                        playlist,
+                        never_focus,
+                        drag_from,
+                        at.index(),
+                    )
                 },
             )
             .estimated_item_size(px(tokens::ROW_H))
@@ -300,10 +312,7 @@ fn row(
 ) -> impl IntoElement {
     let palette = state.palette;
     let row_facts = facts.clone();
-    let missing = move || {
-        row_facts()
-            .is_some_and(|row| row.track.is_none())
-    };
+    let missing = move || row_facts().is_some_and(|row| row.track.is_none());
     let start = drag_from;
     let end = drag_from;
     let end_playlist = playlist.clone();
@@ -338,8 +347,14 @@ fn row(
                 missing_row(palette, missing_facts.clone()).into_element()
             })
             .otherwise(move || {
-                resolved_row(model, state, resolved_facts.clone(), playlist.clone(), never_focus)
-                    .into_element()
+                resolved_row(
+                    model,
+                    state,
+                    resolved_facts.clone(),
+                    playlist.clone(),
+                    never_focus,
+                )
+                .into_element()
             }),
         )
 }

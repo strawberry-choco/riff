@@ -205,10 +205,10 @@ jobs:
               '' \
               '| Platform | File |' \
               '|---|---|' \
-              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.dmg` |' \
-              '| macOS, Intel | `riff-<tag>-macos-x86_64.dmg` |' \
+              '| macOS, Apple silicon | `riff-<tag>-macos-arm64.zip` |' \
+              '| macOS, Intel | `riff-<tag>-macos-x86_64.zip` |' \
               '| Linux, x86-64 | `riff-<tag>-linux-x86_64.tar.gz` |' \
-              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.exe` |' \
+              '| Windows, x86-64 | `riff-<tag>-windows-x86_64.zip` |' \
               '' \
               '`<tag>` stands for this release tag, so every file name starts with' \
               '`riff-` followed by it. Take the four downloads from this page' \
@@ -216,57 +216,29 @@ jobs:
               '' \
               '## What each platform actually gives you' \
               '' \
-              '**Windows — the bare `riff.exe`,** straight from the build, with' \
-              'no zip wrapper and no installer. The executable is unsigned, so' \
-              'SmartScreen warns the first time you open it: choose "More info",' \
-              'then "Run anyway". Wrapping this same unsigned binary in an NSIS' \
-              'installer would hit the identical wall; an installer buys a setup' \
-              'experience, not trust. Only a code-signing certificate buys' \
-              'trust, and riff does not have one.' \
+              '**Windows — a zip containing `riff.exe` and its `assets` folder.**' \
+              'Unzip it anywhere and run `riff.exe`. The executable is unsigned,' \
+              'so SmartScreen warns the first time: choose "More info", then' \
+              '"Run anyway". Only a code-signing certificate buys trust, and' \
+              'riff does not have one.' \
               '' \
-              '**macOS — a `.dmg` containing `riff.app`,** with the riff brand' \
-              'icon. The bundle is ad-hoc signed but NOT identified with Apple,' \
-              'so Gatekeeper quarantines the download and blocks the first' \
-              'launch. There is one extra step, and doing it BEFORE opening the' \
-              'image is the easy way — it needs no password and no permission:' \
-              '' \
-              '    xattr -d com.apple.quarantine ~/Downloads/riff-*.dmg' \
-              '' \
-              'Run it on the file you actually downloaded, then open the image,' \
-              'drag riff into Applications, and launch it. Do that first and it' \
-              'just runs. (If the command complains — "no matches found" or' \
-              '"No such xattr" — there was nothing left to clear, which is' \
-              'harmless: the usual cause is a different download folder, or' \
-              'running it twice.)' \
-              '' \
-              'The reason order matters: the quarantine attribute is not on the' \
-              'app inside the image, it is copied onto the app when you drag it' \
-              'out. Clearing it on the image first means the app never picks it' \
-              'up at all.' \
-              '' \
-              'Already dragged it out? Then clear it where it landed instead:' \
+              '**macOS — a zip containing `riff.app`,** with the riff brand icon.' \
+              'The bundle is ad-hoc signed but NOT identified with Apple, so' \
+              'Gatekeeper quarantines the download and blocks the first launch.' \
+              'Unzip it, drag riff into Applications, then clear the quarantine' \
+              'where it landed:' \
               '' \
               '    xattr -dr com.apple.quarantine /Applications/riff.app' \
               '' \
-              'That needs no time limit and clears either of the two warnings' \
-              'macOS shows, but writing to /Applications may ask for your' \
-              'password.' \
+              'If you would rather not use Terminal: launch riff once and let it' \
+              'fail, then go to System Settings -> Privacy & Security, scroll to' \
+              'the blocked app, and choose "Open Anyway". That button only exists' \
+              'for about an hour after a blocked launch.' \
               '' \
-              'If you would rather not use Terminal at all: launch riff and let' \
-              'it fail, THEN go to System Settings → Privacy & Security → scroll' \
-              'to the blocked app → "Open Anyway". The order is not optional —' \
-              'that button only exists for about an hour after a blocked launch,' \
-              'and it is not there at all if you open System Settings first.' \
-              '(The old right-click → Open bypass no longer works on macOS' \
-              'Sequoia and later.)' \
-              '' \
-              '**Linux — a `tar.gz` of the `riff` executable,** dynamically linked' \
-              'against `libasound2` (ALSA). On Debian and Ubuntu:' \
-              '' \
-              '    sudo apt install libasound2' \
-              '' \
-              'There is no tray icon on Linux by design, so closing the window' \
-              'quits.' \
+              '**Linux — a `tar.gz` of the nsh output directory,** with the `riff`' \
+              'executable and its assets beside it. Unpack it and run `riff`.' \
+              'nsh requires GTK 4.14 or newer; Debian 13 and Ubuntu 24.04 ship it.' \
+              'A tray icon needs AppIndicator support on GNOME.' \
               '' \
               '## This is a pre-release' \
               '' \
@@ -322,7 +294,7 @@ jobs:
             target: macos-arm64
           - os: macos-15-intel
             target: macos-x86_64
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             target: linux-x86_64
           - os: windows-latest
             target: windows-x86_64
@@ -334,12 +306,10 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The one Linux apt list lives in the shared composite action ci.yml also
-      # calls, so the two cannot drift. Until N16 the list is a SUPERSET of what
-      # this leg builds: `cargo build --release -p riff-gui` needs only the egui
-      # stack's headers, while the action also carries the nsh platform additions.
-      # This leg stays on ubuntu-22.04 (jammy), whose GTK 4.6 is below nsh's stated
-      # GTK 4.14 floor. N16 moves the runner after verifying the glibc claim, and
-      # only then does this leg build the nsh binary.
+      # calls, so the two cannot drift. nsh's Linux backend is GTK 4, whose
+      # floor is 4.14; ubuntu-24.04 (noble) ships it, which is why this leg
+      # moved from jammy at N16. The glibc claim behind the move is still
+      # documented as a risk in the rewrite plan.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
@@ -353,94 +323,60 @@ jobs:
         with:
           toolchain: 1.99.0
 
-      # `--locked` for the same reason the verify job repeats it: the four published
-      # artifacts must be the program the committed Cargo.lock describes, not what a
-      # fresh resolution happened to pick for a caret range like `egui = "0.35"` on
-      # build day.
-      - name: Build
-        run: cargo build --locked --release -p riff-gui
+      # The nsh CLI is the packaging tool from N16 on. `NSH_VERSION` pins the
+      # installer to the same 0.6.1 the crates pin; the cache is the CLI's own
+      # `~/.nsh` tree, written by the installer.
+      - name: Install nsh
+        if: runner.os != 'Windows'
+        env:
+          NSH_VERSION: v0.6.1
+        shell: bash
+        run: curl -fsSL https://nsh.dev/install.sh | sh
 
-      # Nothing here is archived on Windows any more: the release asset IS the
-      # executable. GitHub release assets must be single files, but a bare
-      # `riff.exe` already is one, so the zip wrapper (and the unzip step it
-      # forced on every user) is gone. The `if-no-files-found: error` upload
-      # below is still the backstop for a packaging step that produced nothing.
+      - name: Install nsh
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:NSH_VERSION = 'v0.6.1'
+          irm https://nsh.dev/install.ps1 | iex
+
+      - name: Build
+        run: cargo build --locked --release --workspace --bins
+
+      # nsh owns the artifact shape: a directory with the executable and its
+      # asset folder, a zip beside it, and (on Windows) the Inno Setup script.
+      # Each leg archives that output under the release's stable asset name.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # The Windows binary is riff.exe, not riff — the same path as on Unix
-          # would silently package nothing.
-          Copy-Item target/release/riff.exe dist/riff-${{ github.ref_name }}-windows-x86_64.exe
-          if (-not (Test-Path "dist/riff-${{ github.ref_name }}-windows-x86_64.exe")) { throw "asset not produced: dist/riff-${{ github.ref_name }}-windows-x86_64.exe" }
-          Write-Host "packaged dist/riff-${{ github.ref_name }}-windows-x86_64.exe"
+          Push-Location crates/riff-gui-nsh
+          nsh package --target windows
+          Pop-Location
+          Copy-Item crates/riff-gui-nsh/.nsh/out/riff.zip "dist/riff-${{ github.ref_name }}-windows-x86_64.zip"
+          if (-not (Test-Path "dist/riff-${{ github.ref_name }}-windows-x86_64.zip")) { throw "asset not produced" }
 
-      # Linux keeps a tar.gz of the bare binary. The Inter faces are
-      # `include_bytes!`-ed and the Lucide SVGs are `include_str!`-ed by
-      # `crates/riff-gui-theme/src/fonts.rs` and `.../icons.rs`, so the executable
-      # carries its own fonts and icons — no assets folder is needed, and the
-      # binary is the whole product.
       - name: Package (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          archive="dist/riff-${{ github.ref_name }}-linux-x86_64.tar.gz"
-          # -C target/release + a bare member name keeps the archive flat: one
-          # entry, `riff`, with no `target/release/` prefix around it.
-          tar -czf "${archive}" -C target/release riff
-          echo "packaged ${archive}"
+          ( cd crates/riff-gui-nsh && nsh package --target linux )
+          cp crates/riff-gui-nsh/.nsh/out/riff.tar.gz "dist/riff-${{ github.ref_name }}-linux-x86_64.tar.gz"
+          test -f "dist/riff-${{ github.ref_name }}-linux-x86_64.tar.gz"
 
-      # macOS ships a real .app bundle inside a .dmg: the bundle gets the brand
-      # icon (crates/riff-gui/assets/brand/riff.icns, the packaging copy of the
-      # mark that chrome.rs generates at runtime), a Dock icon, and the
-      # drag-to-Applications install gesture via the /Applications symlink.
-      # The bundle is ad-hoc signed (`codesign -s -`), which is what an arm64
-      # Mach-O needs to run at all; it is NOT identified with Apple, so
-      # Gatekeeper still quarantines the download (caveat in the release
-      # notes). hdiutil UDZO is the stock compressed read-only image format —
-      # no third-party tooling, no license concerns.
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euo pipefail
-          app="dist/riff.app"
-          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
-          cp target/release/riff "${app}/Contents/MacOS/riff"
-          cp crates/riff-gui/assets/brand/riff.icns "${app}/Contents/Resources/riff.icns"
-          version="${GITHUB_REF_NAME#v}"
-          cat > "${app}/Contents/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>riff</string>
-            <key>CFBundleDisplayName</key><string>riff</string>
-            <key>CFBundleExecutable</key><string>riff</string>
-            <key>CFBundleIdentifier</key><string>io.github.strawberry-choco.riff</string>
-            <key>CFBundleVersion</key><string>${version}</string>
-            <key>CFBundleShortVersionString</key><string>${version}</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleIconFile</key><string>riff</string>
-            <key>NSHighResolutionCapable</key><true/>
-          </dict>
-          </plist>
-          PLIST
-          # Ad-hoc signature on the binary first, then the bundle (so the seal
-          # covers Info.plist and the resources). `-s -` needs no certificate.
-          codesign --force -s - "${app}/Contents/MacOS/riff"
-          codesign --force -s - "${app}"
-          # Standard dmg layout: the app plus an Applications symlink, so the
-          # Finder window reads "drag riff into Applications".
-          stage="$(mktemp -d)"
-          cp -R "${app}" "${stage}/"
-          ln -s /Applications "${stage}/Applications"
-          dmg="dist/riff-${{ github.ref_name }}-${{ matrix.target }}.dmg"
-          hdiutil create -volname "riff" -srcfolder "${stage}" -ov -format UDZO "${dmg}"
-          rm -rf "${stage}"
-          echo "packaged ${dmg}"
+          mkdir -p dist
+          ( cd crates/riff-gui-nsh && nsh package --target macos )
+          ( cd crates/riff-gui-nsh/.nsh/out && zip -qry "$GITHUB_WORKSPACE/dist/riff-${{ github.ref_name }}-${{ matrix.target }}.zip" riff.app )
+          test -f "dist/riff-${{ github.ref_name }}-${{ matrix.target }}.zip"
 
       # `if-no-files-found: error` is the backstop for the packaging steps above
       # silently producing nothing: an empty artifact would otherwise be
@@ -449,8 +385,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: riff-${{ github.ref_name }}-${{ matrix.target }}-${{ runner.os == 'macOS' && 'dmg' || runner.os == 'Windows' && 'exe' || 'tar.gz' }}
-          path: ${{ runner.os == 'macOS' && 'dist/*.dmg' || runner.os == 'Windows' && 'dist/*.exe' || 'dist/*.tar.gz' }}
+          name: riff-${{ github.ref_name }}-${{ matrix.target }}-${{ runner.os == 'Linux' && 'tar.gz' || 'zip' }}
+          path: ${{ runner.os == 'Linux' && 'dist/*.tar.gz' || 'dist/*.zip' }}
           if-no-files-found: error
 
   release:
@@ -510,9 +446,8 @@ jobs:
           assets=()
           for target in macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64; do
             case "${target}" in
-              macos-*) ext="dmg" ;;
-              windows-*) ext="exe" ;;
-              *) ext="tar.gz" ;;
+              linux-*) ext="tar.gz" ;;
+              *) ext="zip" ;;
             esac
             assets+=("release-assets/riff-${GITHUB_REF_NAME}-${target}.${ext}")
           done

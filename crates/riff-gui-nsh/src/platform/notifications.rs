@@ -25,25 +25,20 @@ pub fn install(model: Stored<UiModel>, state: UiState) {
         if seen.replace(count) >= count {
             return;
         }
-        let enabled = model.with(|m| {
-            m.rt.library
-                .lock_or_recover()
-                .ui_flags
-                .system_notifications
-        });
+        let enabled = model.with(|m| m.rt.library.lock_or_recover().ui_flags.system_notifications);
         if !enabled {
             return;
         }
         let Some(notice) = notices.last() else {
             return;
         };
-        let _ = show_notification(
+        drop(show_notification(
             Notification::new(
                 format!("riff-{count}"),
                 crate::APP_NAME,
                 notice.message.clone(),
             )
             .silent(true),
-        );
+        ));
     });
 }

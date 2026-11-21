@@ -4,7 +4,7 @@
 //! list per surface); the dispatch is the app layer's, exactly the egui
 //! `apply_track_menu` / `apply_list_menu_intent` calls.
 //!
-//! A menu opens through [`popup_menu_at`] at the context event's
+//! A menu opens through `popup_menu_at` at the context event's
 //! `page_position`, so the platform renders and keyboard-drives it. The
 //! handlers run under the caller's stored borrow, on the engine thread.
 
@@ -225,11 +225,7 @@ pub(crate) fn add_to_playlist_items(
             let track = track.clone();
             MenuItem::new(choice.name.clone()).on_select(move || {
                 model.with(|m| {
-                    if let Err(e) = m
-                        .rt
-                        .playlists
-                        .add_playlist_entry(&playlist, &track)
-                    {
+                    if let Err(e) = m.rt.playlists.add_playlist_entry(&playlist, &track) {
                         tracing::warn!("Failed to add the track to the playlist: {e}");
                     }
                 });

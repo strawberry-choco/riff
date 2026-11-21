@@ -24,55 +24,52 @@ pub fn page(model: Stored<UiModel>, state: UiState) -> AnyElement {
         .gap(px(tokens::SPACE_MD))
         .test_id("settings-appearance")
         .child(heading(state, "Theme"))
-        .child(
-            view()
-                .flex_col()
-                .gap(px(tokens::SPACE_XS))
-                .children(AppearanceMode::ALL.iter().map(|mode| {
-                    let mode = *mode;
-                    let selected = move || state.appearance.get() == mode;
-                    view()
-                        .on_press(move || choose(model, state, mode))
-                        .test_id(&format!(
-                            "settings-appearance-{}",
-                            mode.label().to_lowercase().replace(' ', "-")
-                        ))
-                        .label(mode.label())
-                        .flex_row()
-                        .items_center()
-                        .gap(px(tokens::SPACE_SM))
-                        .px(px(tokens::SPACE_SM))
-                        .py(px(tokens::SPACE_XS))
-                        .rounded(px(tokens::RADIUS_SM))
-                        .bg(move || {
-                            if selected() {
-                                palette.get().surface_3
-                            } else {
-                                transparent_black()
-                            }
-                        })
-                        .hover(|s| s.bg(move || palette.get().row_hover))
-                        .child(
-                            view()
-                                .w(px(tokens::SWITCH_H))
-                                .h(px(tokens::SWITCH_H))
-                                .rounded(px(tokens::RADIUS_FULL))
-                                .bg(move || {
-                                    if selected() {
-                                        palette.get().brand_primary
-                                    } else {
-                                        palette.get().line
-                                    }
-                                }),
-                        )
-                        .child(
-                            text(mode.label())
-                                .text_sm()
-                                .text_color(move || palette.get().ink),
-                        )
-                        .into_element()
-                })),
-        )
+        .child(view().flex_col().gap(px(tokens::SPACE_XS)).children(
+            AppearanceMode::ALL.iter().map(|mode| {
+                let mode = *mode;
+                let selected = move || state.appearance.get() == mode;
+                view()
+                    .on_press(move || choose(model, state, mode))
+                    .test_id(&format!(
+                        "settings-appearance-{}",
+                        mode.label().to_lowercase().replace(' ', "-")
+                    ))
+                    .label(mode.label())
+                    .flex_row()
+                    .items_center()
+                    .gap(px(tokens::SPACE_SM))
+                    .px(px(tokens::SPACE_SM))
+                    .py(px(tokens::SPACE_XS))
+                    .rounded(px(tokens::RADIUS_SM))
+                    .bg(move || {
+                        if selected() {
+                            palette.get().surface_3
+                        } else {
+                            transparent_black()
+                        }
+                    })
+                    .hover(|s| s.bg(move || palette.get().row_hover))
+                    .child(
+                        view()
+                            .w(px(tokens::SWITCH_H))
+                            .h(px(tokens::SWITCH_H))
+                            .rounded(px(tokens::RADIUS_FULL))
+                            .bg(move || {
+                                if selected() {
+                                    palette.get().brand_primary
+                                } else {
+                                    palette.get().line
+                                }
+                            }),
+                    )
+                    .child(
+                        text(mode.label())
+                            .text_sm()
+                            .text_color(move || palette.get().ink),
+                    )
+                    .into_element()
+            }),
+        ))
         .child(heading(state, "Motion"))
         .child(toggle_row(
             state,
@@ -88,9 +85,7 @@ pub fn page(model: Stored<UiModel>, state: UiState) -> AnyElement {
         ))
         .child(
             text(match state.settings_page.get() {
-                SettingsPage::Appearance => {
-                    "High contrast is one of the theme choices above."
-                }
+                SettingsPage::Appearance => "High contrast is one of the theme choices above.",
                 _ => "",
             })
             .text_xs()

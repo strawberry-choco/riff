@@ -1,0 +1,51 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.67s
+     Running mod.rs (target\debug\deps\integration-97bbe857af0cc4f4.exe)
+
+running 44 tests
+test nsh_perf_fixture::the_50k_fixture_prints_its_numbers ... ignored, seeds 50k tracks and 500 covers; run with --ignored --nocapture
+test nsh_bridge_tests::notices_reach_the_signal ... ok
+test nsh_bridge_tests::a_play_command_changes_the_playback_view_within_one_pump_tick ... ok
+test nsh_bridge_tests::a_volume_write_round_trips_to_the_store_through_commit_if_changed ... ok
+test nsh_bridge_tests::library_and_playlist_revisions_move_with_their_generations ... ok
+test nsh_shell_tests::a_double_press_plays_the_row ... ok
+test nsh_bridge_tests::a_queue_change_from_the_engine_lands_in_the_signal ... ok
+test nsh_shell_tests::a_row_press_selects_and_the_inspector_follows ... ok
+test nsh_flow_tests::the_settings_toggle_writes_the_session ... ok
+test nsh_shell_tests::a_selection_write_lands_the_land_on_library_field_set ... ok
+test nsh_shell_tests::n6_read_cost_probe ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_shell_tests::n6_scroll_drive_over_the_fixture_store ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_shell_tests::n7_read_cost_probe ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_shell_tests::n7_stage_drive_over_the_fixture_store ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_bridge_tests::pause_resume_seek_round_trip_through_the_pump ... ok
+test nsh_shell_tests::cover_arrivals_swap_the_placeholder_for_the_image ... ok
+test nsh_flow_tests::a_tag_edit_submits_one_request ... ok
+test nsh_shell_tests::space_toggles_playback_over_the_shell ... ok
+test nsh_flow_tests::the_queue_promotes_and_clears ... ok
+test nsh_shell_tests::the_albums_root_walks_to_its_tracks ... ok
+test nsh_shell_tests::the_missing_marker_renders_on_a_synthetic_row ... ok
+test nsh_shell_tests::escape_with_the_field_focused_restores_the_full_list ... ok
+test nsh_shell_tests::the_playing_marker_paints_on_the_current_row ... ok
+test nsh_shell_tests::the_frame_commit_is_the_shell_report_alone ... ok
+test nsh_shell_tests::the_artists_walk_lands_on_albums_then_tracks ... ok
+test nsh_shell_tests::the_now_playing_toggle_switches_the_stage_and_close_returns ... ok
+test nsh_shell_tests::the_fold_chevron_collapses_the_smart_lists ... ok
+test nsh_flow_tests::a_playlist_is_created_renamed_and_deleted ... ok
+test nsh_shell_tests::the_folder_tree_loads_children_on_expand ... ok
+test nsh_shell_tests::the_shell_restores_the_persisted_frame_at_launch ... ok
+test nsh_shell_tests::the_sidebar_primes_on_a_settled_library ... ok
+test nsh_shell_tests::the_prefetch_window_requests_ascending_in_a_bounded_window ... ok
+test nsh_shell_tests::the_stage_renders_the_virtual_track_list ... ok
+test nsh_shell_tests::the_genres_walk_reaches_the_tracks ... ok
+test nsh_shell_tests::the_queue_toggle_opens_and_closes_the_up_next_panel ... ok
+test nsh_shell_tests::the_shell_persists_its_window_frame_through_the_settings_commit ... ok
+test nsh_shell_tests::the_search_filters_the_flat_list_and_escape_restores ... ok
+test nsh_shell_tests::the_search_filters_the_artists_root_to_the_hits ... ok
+test nsh_shell_tests::arrows_reach_every_section_and_enter_activates ... ok
+test nsh_shell_tests::a_stage_switch_clears_the_list_focus ... ok
+test nsh_bridge_tests::a_search_write_bumps_the_list_revision_through_the_window_reset ... ok
+test nsh_shell_tests::the_traversal_reaches_the_list_and_enter_selects ... ok
+test nsh_shell_tests::a_stage_switch_restores_the_remembered_scroll ... ok
+test nsh_shell_tests::the_selection_survives_recycling ... ok
+
+test result: ok. 39 passed; 0 failed; 5 ignored; 0 measured; 318 filtered out; finished in 31.61s
+

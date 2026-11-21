@@ -1,0 +1,13 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.67s
+     Running mod.rs (target\debug\deps\integration-97bbe857af0cc4f4.exe)
+
+running 1 test
+fixture build: 78 ms
+cold count+first row (50000 tracks, first true): 0 ms
+warm window: 300 rows, 0.001 ms/row
+covers: 500 held, 6.0 MB RGBA, 3 ms to build
+rss: record from the live app's evidence log (same fixture)
+test nsh_perf_fixture::the_50k_fixture_prints_its_numbers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 361 filtered out; finished in 0.11s
+

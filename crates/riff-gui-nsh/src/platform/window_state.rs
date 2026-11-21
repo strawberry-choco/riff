@@ -17,13 +17,10 @@ pub fn install(model: Stored<UiModel>, _state: UiState) {
     attributes.close_on_press = Some(false);
     current_window().set(attributes);
     current_window().on_close_press(move |_reason| {
-        let quit = model.with(|m| {
-            m.rt.library.lock_or_recover().ui_flags.close_quits_app
-        });
+        let quit = model.with(|m| m.rt.library.lock_or_recover().ui_flags.close_quits_app);
         if quit {
             model.with(|m| {
-                m.rt
-                    .quit_flag
+                m.rt.quit_flag
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             });
             current_window().close();
@@ -41,8 +38,7 @@ pub fn show() {
 /// Quit for real: the tray's Quit and the close path both end here.
 pub fn quit(model: Stored<UiModel>) {
     model.with(|m| {
-        m.rt
-            .quit_flag
+        m.rt.quit_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
     });
     nsh_core::element::desktop::quit();

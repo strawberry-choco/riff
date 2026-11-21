@@ -306,9 +306,11 @@ fn create_row(model: Stored<UiModel>, state: UiState) -> AnyElement {
                         .py(px(tokens::SPACE_XS))
                         .rounded(px(tokens::RADIUS_SM))
                         .bg(move || palette.get().brand_primary)
-                        .child(text("Create").text_xs().text_color(move || {
-                            palette.get().on_brand
-                        })),
+                        .child(
+                            text("Create")
+                                .text_xs()
+                                .text_color(move || palette.get().on_brand),
+                        ),
                 )
                 .child(
                     view()
@@ -331,16 +333,16 @@ fn create_row(model: Stored<UiModel>, state: UiState) -> AnyElement {
                 ),
         )
         .child(dynamic(move || {
-            state
-                .playlist_error
-                .get()
-                .map_or_else(|| view().into_element(), |reason| {
+            state.playlist_error.get().map_or_else(
+                || view().into_element(),
+                |reason| {
                     text(move || reason.clone())
                         .text_xs()
                         .text_color(move || palette.get().error)
                         .test_id("playlist-error")
                         .into_element()
-                })
+                },
+            )
         }))
         .into_element()
 }
@@ -351,11 +353,12 @@ fn create_row(model: Stored<UiModel>, state: UiState) -> AnyElement {
 fn create_playlist(model: Stored<UiModel>, state: UiState) {
     let name = state.playlist_draft.get().trim().to_owned();
     if name.is_empty() {
-        state.playlist_error.set(Some("Enter a playlist name".to_owned()));
+        state
+            .playlist_error
+            .set(Some("Enter a playlist name".to_owned()));
         return;
     }
-    if let Some(reason) =
-        riff_backend::app::playlist_name::builtin_smart_list_name_conflict(&name)
+    if let Some(reason) = riff_backend::app::playlist_name::builtin_smart_list_name_conflict(&name)
     {
         state.playlist_error.set(Some(reason));
         return;
@@ -663,7 +666,7 @@ fn footer(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
                 .test_id("add-folder")
                 .label("Add folder")
                 .on_press(move || {
-                    crate::platform::library_paths::pick_folders(model, state)
+                    crate::platform::library_paths::pick_folders(model, state);
                 })
                 .child(icon(Icon::Plus, Icon::ICON_SIZE, move || {
                     palette.get().ink_2

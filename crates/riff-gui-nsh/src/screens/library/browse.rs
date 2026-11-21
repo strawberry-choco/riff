@@ -183,6 +183,7 @@ pub fn tracks_stage(
 /// `apply_entity_selection`), clearing the track selection with it —
 /// `LibrarySession::select_at`'s mutual-exclusion rule, mirrored to the
 /// selection signal the same way the nav mirror rides the path.
+#[allow(clippy::too_many_lines)]
 fn entity_row(
     model: Stored<UiModel>,
     state: UiState,
@@ -249,11 +250,7 @@ fn entity_row(
                 if let Some((level, selection)) = selection_at(&menu_kind, &row.key) {
                     select_entity(model, level, selection);
                 }
-                crate::menus::collection::open_collection_menu(
-                    model,
-                    target,
-                    event.page_position,
-                );
+                crate::menus::collection::open_collection_menu(model, target, event.page_position);
             }
         })
         .child(
@@ -358,15 +355,11 @@ fn collection_target(stage: &StageKind, key: &str) -> Option<crate::menus::Colle
     use crate::menus::CollectionTarget;
     match stage {
         StageKind::ArtistsRoot => Some(CollectionTarget::Artist(key.to_owned())),
-        StageKind::AlbumsRoot => {
+        StageKind::AlbumsRoot | StageKind::ArtistAlbums { .. } => {
             let (artist, title) = split_album_key(key)?;
             Some(CollectionTarget::Album { artist, title })
         }
         StageKind::GenresRoot => Some(CollectionTarget::Genre(key.to_owned())),
-        StageKind::ArtistAlbums { .. } => {
-            let (artist, title) = split_album_key(key)?;
-            Some(CollectionTarget::Album { artist, title })
-        }
         StageKind::GenreArtists { genre } => Some(CollectionTarget::GenreArtist {
             artist: key.to_owned(),
             genre: genre.clone(),

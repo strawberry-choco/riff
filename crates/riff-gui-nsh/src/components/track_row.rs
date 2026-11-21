@@ -299,12 +299,15 @@ fn missing_marker(palette: Signal<crate::theme::Palette>) -> impl IntoElement {
 }
 
 /// The playing marker: the glyph the egui row paints on the track currently
-/// loaded in the player, brand-tinted like the egui row's label.
+/// loaded in the player, brand-tinted like the egui row's label. Text, for
+/// the same reason the cover placeholder is: a recycled cell rebuilds it on
+/// every covers revision, and a re-mounted SVG painted the framework's
+/// broken-image block in the live drive.
 fn now_playing_marker(palette: Signal<crate::theme::Palette>) -> impl IntoElement {
-    icon(Icon::Play, tokens::PLACEHOLDER_GLYPH, move || {
-        palette.get().brand_primary
-    })
-    .test_id("row-playing")
+    text("\u{25b6}")
+        .text_size(px(tokens::PLACEHOLDER_GLYPH))
+        .text_color(move || palette.get().brand_primary)
+        .test_id("row-playing")
 }
 
 /// The duration's right-aligned value: `m:ss`, or the dash for an unknown

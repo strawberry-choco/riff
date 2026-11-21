@@ -11,6 +11,8 @@ Tests alone are not sufficient verification. A PR is verified only when its unit
 Evidence lives under `docs/execution-plans/evidence/nsh/<id>/`.
 The program is operator reviewed. Nothing merges on an agent's own verdict.
 
+N8 through N16 are implemented. Each unit's evidence is in `docs/execution-plans/evidence/nsh/<id>/memo.md`, with the live shots under `<id>/shots/` and the logs under `<id>/logs/`. The open gaps are named in each memo and in the unit status lines below.
+
 ## Concrete inventory
 
 ### Workspace edits
@@ -518,6 +520,8 @@ Done when.
 
 ### N8 Menus and actions
 
+Status: landed. Evidence `evidence/nsh/n8/memo.md`; the native popup itself is not screenshot-captured.
+
 Depends on N7.
 
 Files. `src/menus/{track,collection}.rs`.
@@ -535,6 +539,8 @@ Done when.
 
 ### N9 Queue and Now Playing
 
+Status: landed. Evidence `evidence/nsh/n9/memo.md` and `n15/shots/n15-{now-playing,queue}.png`.
+
 Depends on N8.
 
 Files. `src/screens/{queue,now_playing}.rs`, `src/components/playing_indicator.rs`.
@@ -550,6 +556,8 @@ Done when.
 - Reduce motion settles instantly.
 
 ### N10 Playlists
+
+Status: landed. Evidence `evidence/nsh/n10/memo.md`; the live stage shot is still open.
 
 Depends on N9.
 
@@ -569,6 +577,8 @@ Done when.
 
 ### N11 Tag editor
 
+Status: landed. Evidence `evidence/nsh/n11/memo.md`; a read-only refusal is not live-seeded.
+
 Depends on N10.
 
 Files. `src/screens/inspector/tag_editor.rs`.
@@ -585,6 +595,8 @@ Done when.
 - A read-only file reports its reason.
 
 ### N12 Smart playlists
+
+Status: landed. Evidence `evidence/nsh/n12/memo.md`; the editor's live screenshot is still open.
 
 Depends on N11.
 
@@ -605,6 +617,8 @@ Done when.
 
 ### N13 Settings
 
+Status: landed. Evidence `evidence/nsh/n13/memo.md` and `n16/shots/n16-settings-*.png`.
+
 Depends on N12.
 
 Files. `src/screens/settings/{library,playback,appearance,advanced,about}.rs`.
@@ -622,6 +636,8 @@ Done when.
 - Thumbnail cache clear reports its polled outcome.
 
 ### N14 Platform integration
+
+Status: landed with gaps. Evidence `evidence/nsh/n14/memo.md`; tray `on_click`, close-to-hide and the native picker need a human pass.
 
 Depends on N13.
 
@@ -642,6 +658,8 @@ Done when.
 
 ### N15 Flip and delete
 
+Status: landed. Evidence `evidence/nsh/n15/memo.md`; Linux and macOS binaries are CI's to build.
+
 Depends on N14.
 
 Files.
@@ -657,6 +675,8 @@ Done when.
 - The nsh binary opens and plays on all three OSes.
 
 ### N16 Tests and artifacts
+
+Status: landed in code and CI, packaging not run locally. Evidence `evidence/nsh/n16/memo.md`; the nsh CLI download was blocked, so `nsh package` and artifact install are CI's proof.
 
 Depends on N15.
 

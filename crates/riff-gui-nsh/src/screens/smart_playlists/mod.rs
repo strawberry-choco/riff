@@ -104,9 +104,13 @@ fn builtin_header(model: Stored<UiModel>, state: UiState) -> AnyElement {
                 .test_id("smart-list-count"),
         )
         .child(view().flex_1())
-        .child(action(palette, "smart-list-play", "Play smart list", "Play", {
-            move || crate::menus::play_batch(model, ids_of(&play))
-        }))
+        .child(action(
+            palette,
+            "smart-list-play",
+            "Play smart list",
+            "Play",
+            move || crate::menus::play_batch(model, ids_of(&play)),
+        ))
         .child(action(
             palette,
             "smart-list-shuffle",

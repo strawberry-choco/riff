@@ -12,8 +12,8 @@ pub mod appearance;
 pub mod library;
 pub mod playback;
 
-use nsh_core::prelude::*;
 use nsh_core::Checked;
+use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
 use riff_backend::app::state::ViewMode;
 
@@ -188,11 +188,7 @@ pub(crate) fn toggle_row(
             view()
                 .flex_1()
                 .flex_col()
-                .child(
-                    text(label)
-                        .text_sm()
-                        .text_color(move || palette.get().ink),
-                )
+                .child(text(label).text_sm().text_color(move || palette.get().ink))
                 .child(
                     text(detail)
                         .text_xs()
@@ -258,16 +254,16 @@ pub(crate) fn choice_row(
     choices: impl IntoIterator<Item = (&'static str, bool, Box<dyn Fn()>)>,
 ) -> impl IntoElement {
     let palette = state.palette;
-    let mut row = view().flex_col().gap(px(tokens::SPACE_XS)).test_id(id).child(
-        text(label)
-            .text_sm()
-            .text_color(move || palette.get().ink),
-    );
+    let mut row = view()
+        .flex_col()
+        .gap(px(tokens::SPACE_XS))
+        .test_id(id)
+        .child(text(label).text_sm().text_color(move || palette.get().ink));
     let mut buttons = view().flex_row().gap(px(tokens::SPACE_SM));
     for (text_label, selected, on_press) in choices {
         buttons = buttons.child(
             view()
-                .on_press(move || on_press())
+                .on_press(on_press)
                 .px(px(tokens::SPACE_MD))
                 .py(px(tokens::SPACE_XS))
                 .rounded(px(tokens::RADIUS_SM))
@@ -278,17 +274,13 @@ pub(crate) fn choice_row(
                         palette.get().surface_2
                     }
                 })
-                .child(
-                    text(text_label)
-                        .text_xs()
-                        .text_color(move || {
-                            if selected {
-                                palette.get().on_brand
-                            } else {
-                                palette.get().ink_2
-                            }
-                        }),
-                ),
+                .child(text(text_label).text_xs().text_color(move || {
+                    if selected {
+                        palette.get().on_brand
+                    } else {
+                        palette.get().ink_2
+                    }
+                })),
         );
     }
     row = row.child(buttons);

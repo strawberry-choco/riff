@@ -93,15 +93,14 @@ fn middle(
                         return crate::screens::playlists::stage(model, state).into_element();
                     }
                     if view.smart_list.is_some() || view.custom_list.is_some() {
-                        return crate::screens::smart_playlists::stage(model, state)
-                            .into_element();
+                        return crate::screens::smart_playlists::stage(model, state).into_element();
                     }
                     match crate::model::stage_of(&view) {
                         None => empty_stage(state).into_element(),
-                        Some(StageKind::Flat) => crate::screens::library::list::stage(
-                            model, state, list, list_focus,
-                        )
-                        .into_element(),
+                        Some(StageKind::Flat) => {
+                            crate::screens::library::list::stage(model, state, list, list_focus)
+                                .into_element()
+                        }
                         Some(StageKind::Folders) => {
                             crate::screens::library::folders::stage(model, state).into_element()
                         }
@@ -274,6 +273,14 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
     on_key("right", move |_| step_traversal(1));
     on_key("up", move |_| step_traversal(-1));
     on_key("down", move |_| step_traversal(1));
+    debug_keys(model, state, list);
+    (focus, nav_focus, list_focus)
+}
+
+/// Debug-only evidence levers. Each performs its control's own write, and
+/// release builds carry none of them.
+#[cfg(debug_assertions)]
+fn debug_keys(model: Stored<UiModel>, state: UiState, list: ElementRef) {
     // The perf drive's jump (N6 evidence): the production UI has no deep
     // jump affordance, so the drive script presses this debug key to land
     // the list on a deep row before timing its scroll steps.
@@ -281,7 +288,105 @@ fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> Foc
     on_key("mod+alt+j", move |_| {
         list.scroll_to_index(40000, percentage(0.5), px(0.0), false);
     });
-    (focus, nav_focus, list_focus)
+    // The evidence drive's navigation levers (N15/N16). Each one is the
+    // control's own write, so the screenshots record the production state,
+    // not a special path; release builds carry none of them.
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+n", move |_| {
+        if state.nav.get().view_mode == riff_backend::app::state::ViewMode::NowPlaying {
+            crate::screens::now_playing::close(model, state);
+        } else {
+            crate::screens::now_playing::open(model, state);
+        }
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+q", move |_| {
+        state.queue_open.update(|open| *open = !*open);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+s", move |_| {
+        crate::screens::settings::open(model, state);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+p", move |_| {
+        state.playlist_creating.set(true);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+m", move |_| {
+        crate::screens::smart_playlists::editor::create_new(model, state);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+p", move |_| {
+        state.playlist_creating.set(true);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+m", move |_| {
+        crate::screens::smart_playlists::editor::create_new(model, state);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+1", move |_| {
+        crate::screens::settings::open(model, state);
+        state.settings_page.set(crate::model::SettingsPage::Library);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+2", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Playback);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+3", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Appearance);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+4", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Advanced);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+shift+5", move |_| {
+        state.settings_page.set(crate::model::SettingsPage::About);
+    });
+    // The drive's reliable set: Windows folds Ctrl+Alt into AltGr, so the
+    // Alt-bearing forms above are not reachable from SendKeys; these are.
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+p", move |_| {
+        state.playlist_creating.set(true);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+m", move |_| {
+        crate::screens::smart_playlists::editor::create_new(model, state);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+1", move |_| {
+        crate::screens::settings::open(model, state);
+        state.settings_page.set(crate::model::SettingsPage::Library);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+2", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Playback);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+3", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Appearance);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+4", move |_| {
+        state
+            .settings_page
+            .set(crate::model::SettingsPage::Advanced);
+    });
+    #[cfg(debug_assertions)]
+    on_key("mod+shift+5", move |_| {
+        state.settings_page.set(crate::model::SettingsPage::About);
+    });
 }
 
 /// Enter or Space on a traversal-focused list row: the row's press write

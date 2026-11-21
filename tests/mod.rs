@@ -24,6 +24,8 @@ pub mod app_tests;
 pub mod domain_tests;
 pub mod integration_tests;
 pub mod nsh_bridge_tests;
+pub mod nsh_flow_tests;
+pub mod nsh_perf_fixture;
 pub mod nsh_shell_tests;
 pub mod repo_invariant_tests;
 
@@ -152,7 +154,6 @@ pub mod test_utils {
             None,
         )
     }
-
 }
 
 /// Shared fakes for exercising the port boundaries without real audio

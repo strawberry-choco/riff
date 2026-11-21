@@ -53,7 +53,7 @@ For the full treatment, including key flows and the threading model, see [../tec
 
 ## Design Tokens
 
-`crates/riff-gui-theme/src/theme.rs` is the only place a design value is written, and the only place view code reads one from (ADR 0004). It holds the colors and the `Palette` slots, the corner radii, the type scale, the spacing scale (`SPACE_*`), the chrome dimensions, and the component geometry under `theme::geometry`.
+`crates/riff-gui-nsh/src/theme/` is the only place a design value is written, and the only place view code reads one from (ADR 0004): `palette.rs` holds the colors and the `Palette` slots, `tokens.rs` the corner radii, type scale, spacing scale, chrome dimensions and shadows, `fonts.rs` the Inter faces and `icons.rs` the Lucide glyphs.
 
 The rules, and what each one is for:
 

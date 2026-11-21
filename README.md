@@ -89,12 +89,12 @@ riff is a Rust workspace. With a recent stable toolchain:
 ```bash
 git clone https://github.com/strawberry-choco/riff
 cd riff
-cargo run -p riff-gui
+cargo run
 ```
 
 ## Contributing
 
-**[CONTRIBUTING.md](CONTRIBUTING.md) is the starting point** — it has the prerequisites, the exact build and verify commands, the pull request checklist, and the honest warning that the committed golden-image baselines are byte-exact and can fail on different hardware.
+**[CONTRIBUTING.md](CONTRIBUTING.md) is the starting point** — it has the prerequisites, the exact build and verify commands, and the pull request checklist.
 
 Bug reports and feature requests go to [the issue tracker](https://github.com/strawberry-choco/riff/issues). [docs/README.md](docs/README.md) indexes the product specs, the architecture reference, and the engineering conventions the project follows.
 
@@ -104,4 +104,4 @@ The design has a hard boundary: riff stays offline. Features that would need a s
 
 riff is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
-It ships with the [Inter](crates/riff-gui-theme/assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](crates/riff-gui-theme/assets/icons/LICENSE-Lucide.txt) icons (ISC license). Both are embedded in the binary, so the fonts and icons travel with the executable.
+It ships with the [Inter](crates/riff-gui-nsh/assets/fonts/Inter-LICENSE-OFL.txt) typeface (SIL Open Font License) and [Lucide](crates/riff-gui-nsh/assets/icons/LICENSE-Lucide.txt) icons (ISC license). Both are embedded in the binary, so the fonts and icons travel with the executable.

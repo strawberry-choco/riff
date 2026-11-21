@@ -1,6 +1,6 @@
 # riff Documentation
 
-Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with egui. This is the single place for everything about the product, its architecture, and how to work on it.
+Welcome to the documentation for **riff** — a lightweight, offline-first desktop music player built in Rust with the nsh UI stack. This is the single place for everything about the product, its architecture, and how to work on it.
 
 riff is a Cargo workspace that plays local audio files (MP3, AAC, Opus, FLAC, OGG Vorbis, WAV) using pure-Rust libraries, manages a music library from one or more folders, and runs cross-platform on Linux, Windows, and macOS. It keeps no cloud dependencies by design.
 
@@ -41,7 +41,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0001: SQLite is the authoritative Application Store](adr/0001-sqlite-is-the-authoritative-application-store.md) — supersedes decision 004.
 - [ADR 0002: The UI reads the store through Session Projections](adr/0002-ui-reads-the-store-through-session-projections.md).
 - [ADR 0003: Store query model](adr/0003-store-query-model.md).
-- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `crates/riff-gui-theme/src/theme.rs` as the single store and read source for every design value (amended 2026-10-15: the store moved to its own crate).
+- [ADR 0004: Dual-theme tokens despite a dark-only design source](adr/0004-dual-theme-tokens.md) — two palettes with High Contrast as a variant over each, and `riff-gui-nsh`'s `Signal<Palette>` as the single store and read source for every design value (amended 2026-11-21: the egui design crate was deleted with its frontend).
 - [ADR 0005: Custom window chrome (frameless) on all platforms](adr/0005-frameless-window-chrome-on-all-platforms.md) — amended 2026-09-28: the decision stands on Windows and Linux; macOS keeps its native decorations, with a transparent title bar and the system's traffic lights as the window controls; the windowed macOS spike passed and its gate is closed, with the native path confirmed as the shipping path.
 - [ADR 0006: Background workers behind app-layer service seams](adr/0006-background-workers-behind-app-layer-service-seams.md) — Tag Edit and Cover services replace the worker threads spawned inline by `RiffApp`.
 - [ADR 0007: No write-side SessionStore facade](adr/0007-no-write-side-sessionstore-facade.md) — the three store-mutation ports stay separate; the store owns generation bumps, so a facade would be a pass-through.
@@ -58,7 +58,7 @@ What riff is, what it does, and how to use it.
 - [ADR 0019: Folder drops are the third Library Path entry point](adr/0019-folder-drop-is-the-third-library-path-entry-point.md) — a folder dropped onto the window joins the picker and the typed path on one acceptance and one fact-set, with the one deliberate divergence (a drop auto-scans because it is an impatient gesture) and no platform conditional added.
 - [ADR 0020: Rule matching lowercases at query time](adr/0020-rule-matching-lowercases-at-query-time.md) — Custom Smart Playlist Rules fold case in the predicate (`lower(column)` against a Rust-lowercased needle) rather than in stored lowercase twins; SQLite's ASCII-only folding is accepted, so non-Latin tags do not fold, and reversing the choice means superseding the ADR rather than editing it.
 - [ADR 0021: Smart playlist rules are collection data](adr/0021-smart-playlist-rules-are-collection-data.md) — a Custom Smart Playlist's Rules are authored on a Settings page but stored as collection data in their own typed tables; the same change widens name uniqueness across both list tables and rewrites the ordinary playlist port's duplicate-name contract.
-- [ADR 0022: The nsh UI stack replaces egui, behind a second binary until parity](adr/0022-nsh-ui-stack-replaces-egui.md) — a presentation-only rewrite ships as `riff-nsh` beside `riff` until feature parity at N15; seven exact pins at 0.6.1, a trimmed platform feature list, resolver 2 kept for the golden baselines, MSRV 1.97, and a coexistence amendment to ADR 0004.
+- [ADR 0022: The nsh UI stack replaces egui, behind a second binary until parity](adr/0022-nsh-ui-stack-replaces-egui.md) — the presentation rewrite landed as the `riff` binary; seven exact pins at 0.6.1, a trimmed platform feature list, MSRV 1.97, and the coexistence amendments to ADR 0004. N15 deleted the three egui crates.
 
 The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is expected rather than a lost file.
 
@@ -67,7 +67,7 @@ The numbering skips 0008: no ADR 0008 was ever written, so a missing `0008` is e
 How riff is built and how it works at runtime.
 
 - [Architecture](technical/architecture.md) — the workspace crate split, the dependency chain, each crate's membership criterion, boundary rules, validation checklist, and anti-patterns.
-- [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`riff-gui-theme`'s `theme.rs`), what view code may read and derive, and the per-crate source sweeps that enforce it.
+- [Design tokens](engineering/coding-standards.md#design-tokens) — where a design value lives (`riff-gui-nsh`'s `theme/` module), what view code may read and derive, and the per-crate source sweeps that enforce it.
 - [Threading model](technical/threading-model.md) — the threads (all workers spawned by the Composition Root), the crossbeam channels between them, shared state, and real-time constraints.
 - [Data flow](technical/data-flow.md) — step-by-step sequences for the three primary flows: play a track, scan a library, resolve cover art.
 - [Data model](technical/data-model.md) — the domain entities, `AppState`, the Application Store ports, and the port traits.
@@ -80,8 +80,7 @@ How to work on riff correctly.
 - [Coding standards](engineering/coding-standards.md) — layering rules, the per-OS branch rule, clippy, rustdoc and formatting configuration, the error-handling pattern, and the implementation gotchas.
 - [Contributing](engineering/contributing.md) — how to orient yourself and the pull-request checklist.
 - [Commit conventions](engineering/commit-conventions.md) — the commit-message profile the validator enforces, the type-to-section-to-bump table from `cliff.toml`, and the three enforcement points.
-- [Testing strategy](engineering/testing-strategy.md) — the per-crate suites and the workspace-root integration/golden suite, plus prioritized recommendations.
-- [Golden-image testing](engineering/golden-image-testing.md) — the snapshot-test harness for visual parity: authoring goldens, re-baselining, and reviewing image diffs.
+- [Testing strategy](engineering/testing-strategy.md) — the per-crate suites, the workspace-root integration suite, the nsh bridge and flow suites, and prioritized recommendations.
 - [Access-violation flake](engineering/access-violation-flake.md) — the closed `STATUS_ACCESS_VIOLATION` crash of the `riff-tests` binary: the harness-concurrency cap that now covers every suite, and the evidence that closed it.
 - [Release and packaging](engineering/release-and-packaging.md) — the tag-triggered release pipeline in `.github/workflows/release.yml` (version guard, four-platform build matrix, artifact packaging, pre-release publish) and how to cut a release.
 
@@ -89,7 +88,7 @@ How to work on riff correctly.
 
 Plans for work in flight. They describe intended changes, not the current repository.
 
-- [nsh UI rewrite](execution-plans/nsh-ui-rewrite.md) — the unit-by-unit plan for replacing the egui frontend with nsh, from the P0 spike to N16. A plan, not current state. Each unit lands with its own evidence under `execution-plans/evidence/nsh/`.
+- [nsh UI rewrite](execution-plans/nsh-ui-rewrite.md) — the unit-by-unit record of replacing the egui frontend with nsh, from P0 to N16. Every unit landed with its evidence under `execution-plans/evidence/nsh/`.
 
 ### Reference
 
@@ -102,4 +101,4 @@ Quick lookup.
 - All documents are plain Markdown with no YAML front-matter.
 - Cross-links are relative, so the tree renders correctly anywhere Markdown is supported.
 - "Current State" sections describe the repository as verified; "Recommendations" sections are clearly labeled suggestions that are not yet implemented.
-- Source filenames in examples are the real ones from the workspace crates (`riff-backend/src/`, `riff-gui/src/`, and so on).
+- Source filenames in examples are the real ones from the workspace crates (`riff-backend/src/`, `riff-gui-nsh/src/`, and so on).

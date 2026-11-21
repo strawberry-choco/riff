@@ -201,7 +201,10 @@ fn seek_slider(model: Stored<UiModel>, state: UiState) -> nsh_base::SliderElemen
 fn up_next(model: Stored<UiModel>, state: UiState) -> AnyElement {
     let palette = state.palette;
     let queue = state.playback.get().up_next;
-    let mut list = view().flex_col().gap(px(tokens::SPACE_XS)).test_id("now-playing-up-next");
+    let mut list = view()
+        .flex_col()
+        .gap(px(tokens::SPACE_XS))
+        .test_id("now-playing-up-next");
     list = list.child(
         text("Up Next")
             .text_xs()

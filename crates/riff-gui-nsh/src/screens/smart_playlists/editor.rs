@@ -17,8 +17,7 @@ use riff_backend::domain::Combine;
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::screens::smart_playlists::rules::{
-    self, BoxDraft, ChildDraft, RuleDraft, SmartDraft, MAX_RULE_BOX_LEVELS,
-    UNREADABLE_ROW_WORDS,
+    self, BoxDraft, ChildDraft, MAX_RULE_BOX_LEVELS, RuleDraft, SmartDraft, UNREADABLE_ROW_WORDS,
 };
 use crate::theme::icons::{Icon, icon};
 use crate::theme::tokens;
@@ -59,6 +58,7 @@ pub fn edit_list(model: Stored<UiModel>, state: UiState, id: riff_backend::domai
 }
 
 /// The editor screen.
+#[allow(clippy::too_many_lines)]
 pub fn screen(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
     let palette = state.palette;
     let rev = state.smart_draft_rev;
@@ -135,9 +135,15 @@ fn header(model: Stored<UiModel>, state: UiState) -> impl IntoElement {
                 .text_color(move || palette.get().ink),
         )
         .child(view().flex_1())
-        .child(button_like(palette, "smart-save", "Save list", "Save", move || {
-            save(model, state)
-        }))
+        .child(button_like(
+            palette,
+            "smart-save",
+            "Save list",
+            "Save",
+            move || {
+                save(model, state);
+            },
+        ))
         .child(button_like(
             palette,
             "smart-back",
@@ -170,6 +176,7 @@ fn button_like(
 }
 
 /// One box: the combine toggle, its rows, and its add/remove controls.
+#[allow(clippy::cast_precision_loss)]
 fn render_box(
     model: Stored<UiModel>,
     state: UiState,
@@ -185,7 +192,9 @@ fn render_box(
             .flex_row()
             .items_center()
             .gap(px(tokens::SPACE_SM))
-            .pl(px(tokens::SPACE_MD * u32::try_from(depth).unwrap_or(0) as f32))
+            .pl(px(
+                tokens::SPACE_MD * u32::try_from(depth).unwrap_or(0) as f32
+            ))
             .test_id("smart-box")
             .child(
                 text("MATCH")
@@ -212,19 +221,23 @@ fn render_box(
                     move || add_rule(model, state, &path)
                 },
             ))
-            .children(
-                (depth + 1 < MAX_RULE_BOX_LEVELS).then(|| {
-                    button_like(palette, "smart-add-group", "Add group", "+ Group", {
-                        let path = path.clone();
-                        move || add_group(model, state, &path)
-                    })
-                }),
-            )
-            .children((!is_root).then(|| {
-                icon_button(palette, "smart-remove-group", "Remove group", Icon::Trash, {
+            .children((depth + 1 < MAX_RULE_BOX_LEVELS).then(|| {
+                button_like(palette, "smart-add-group", "Add group", "+ Group", {
                     let path = path.clone();
-                    move || remove_child(model, state, &path)
+                    move || add_group(model, state, &path)
                 })
+            }))
+            .children((!is_root).then(|| {
+                icon_button(
+                    palette,
+                    "smart-remove-group",
+                    "Remove group",
+                    Icon::Trash,
+                    {
+                        let path = path.clone();
+                        move || remove_child(model, state, &path)
+                    },
+                )
             }))
             .into_element(),
     );
@@ -365,9 +378,12 @@ fn unreadable(_model: Stored<UiModel>, state: UiState) -> AnyElement {
                         state
                             .smart_draft
                             .get()
-                            .and_then(|draft| draft.unreadable.get(at).map(|row| {
-                                format!("{} {}", row.field_id(), row.operator_id())
-                            }))
+                            .and_then(|draft| {
+                                draft
+                                    .unreadable
+                                    .get(at)
+                                    .map(|row| format!("{} {}", row.field_id(), row.operator_id()))
+                            })
                             .unwrap_or_default()
                     })
                     .text_xs()
@@ -402,8 +418,12 @@ fn count_line(model: Stored<UiModel>, state: UiState) -> AnyElement {
             return "0 songs".to_owned();
         };
         match draft.to_tree() {
-            Ok(tree) => match m.rt.session_views.custom_list_match_count(&SmartPlaylistTree::new(tree)) {
-                Ok(total) if total == 1 => "1 song".to_owned(),
+            Ok(tree) => match m
+                .rt
+                .session_views
+                .custom_list_match_count(&SmartPlaylistTree::new(tree))
+            {
+                Ok(1) => "1 song".to_owned(),
                 Ok(total) => format!("{total} songs"),
                 Err(_) => "The count could not be read".to_owned(),
             },
@@ -606,13 +626,10 @@ fn save(model: Stored<UiModel>, state: UiState) {
     };
     let name = draft.name.trim().to_owned();
     if name.is_empty() {
-        state
-            .smart_status
-            .set(Some("Enter a list name".to_owned()));
+        state.smart_status.set(Some("Enter a list name".to_owned()));
         return;
     }
-    if let Some(reason) =
-        riff_backend::app::playlist_name::builtin_smart_list_name_conflict(&name)
+    if let Some(reason) = riff_backend::app::playlist_name::builtin_smart_list_name_conflict(&name)
     {
         state.smart_status.set(Some(reason));
         return;
@@ -661,11 +678,7 @@ fn close(model: Stored<UiModel>, state: UiState) {
 }
 
 /// Navigate to a saved list: the nav slots and the pump's open custom list.
-pub fn open_list(
-    model: Stored<UiModel>,
-    state: UiState,
-    id: riff_backend::domain::PlaylistId,
-) {
+pub fn open_list(model: Stored<UiModel>, state: UiState, id: riff_backend::domain::PlaylistId) {
     let nav = state.nav;
     let mut view = nav.get();
     view.custom_list = Some(id.clone());
@@ -700,7 +713,10 @@ pub fn delete_open(model: Stored<UiModel>, state: UiState) {
 
 /// The ids of the open custom list, for its Play/Shuffle actions.
 #[must_use]
-pub fn open_list_ids(model: &mut UiModel, id: &riff_backend::domain::PlaylistId) -> Vec<riff_backend::domain::TrackId> {
+pub fn open_list_ids(
+    model: &mut UiModel,
+    id: &riff_backend::domain::PlaylistId,
+) -> Vec<riff_backend::domain::TrackId> {
     let total = model
         .rt
         .session_views

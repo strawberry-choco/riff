@@ -44,7 +44,9 @@ pub fn App() -> impl IntoElement {
     });
     if high_contrast {
         palette.set(Palette::dark().high_contrast());
-        state.appearance.set(crate::model::AppearanceMode::DarkHighContrast);
+        state
+            .appearance
+            .set(crate::model::AppearanceMode::DarkHighContrast);
     }
 
     // The dev fixture's control surface (N2), plus the N3 readout's toggles.

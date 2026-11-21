@@ -1,4 +1,4 @@
-//! The Playback page: the ReplayGain switch and its Track/Album mode.
+//! The Playback page: the `ReplayGain` switch and its Track/Album mode.
 
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
@@ -59,8 +59,7 @@ pub fn page(model: Stored<UiModel>, state: UiState) -> AnyElement {
                     mode() == ReplayGainMode::Album,
                     Box::new(move || {
                         model.with(|m| {
-                            m.rt.playback.lock_or_recover().replaygain_mode =
-                                ReplayGainMode::Album;
+                            m.rt.playback.lock_or_recover().replaygain_mode = ReplayGainMode::Album;
                         });
                     }),
                 ),

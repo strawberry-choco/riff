@@ -139,3 +139,14 @@ theme API involved.
   sweeps the nsh crate's own source for color constructions, dimension
   declarations and numeric spacing gaps; the four `src/theme/` store files are
   the exempt ones, as `theme.rs` was.
+
+## Amendment 2026-11-21 — the egui store is deleted
+
+N15 deleted `crates/riff-gui-theme` with the other two egui crates. The
+`Signal<Palette>` in `riff-gui-nsh`'s `UiState` is now the only theme store and
+the only read source; there is no second store to keep in step. The palette,
+tokens, fonts and icons live in `crates/riff-gui-nsh/src/theme/`, and the token
+sweeps in `crates/riff-gui-nsh/tests/token_sweeps.rs` remain the enforcement.
+`theme.json` still only restyles `nsh_base` defaults. The dual-theme decision
+itself is unchanged: dark and light are one design behind a store, and High
+Contrast is a variant over each.

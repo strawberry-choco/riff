@@ -18,8 +18,6 @@ use crate::theme::tokens;
 
 /// How many rows the panel shows — the egui panel's cap.
 const QUEUE_ROWS: usize = 50;
-/// The panel's box, from the token store.
-
 
 /// The panel: header, rows (virtual-free: the cap is 50), empty copy.
 pub fn panel(model: Stored<UiModel>, state: UiState) -> impl IntoElement {

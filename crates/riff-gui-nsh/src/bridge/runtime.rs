@@ -14,7 +14,7 @@ use riff_backend::composition::{AppRuntime, RuntimeLifecycle};
 use crate::bridge::covers::CoverCache;
 use crate::bridge::pump::PumpCache;
 use crate::bridge::state::UiState;
-use crate::model::CoverMap;
+use crate::model::{CoverViews, ListWindow};
 
 /// What a component renders with: the backend's handles, the signals, and
 /// the cover halves. The pump and every handler reach the runtime through
@@ -36,10 +36,13 @@ pub struct UiModel {
     pub(crate) state: UiState,
     /// The covers decision half: what is wanted, in flight, arrived.
     pub(crate) covers: CoverCache,
-    /// The covers View half: the pixels, wrapped as nsh image sources.
-    /// Unbounded until N6 builds and measures the eviction policy (P0
-    /// corrections 10 and 24).
-    pub(crate) covers_map: CoverMap,
+    /// The covers View half: the pixels, bounded (N6's eviction policy,
+    /// P0 corrections 10 and 24).
+    pub(crate) cover_views: CoverViews,
+    /// The list screen's warm row window, filled by the viewability handler
+    /// (sequential reads, P0 correction 22) and reset by the pump when the
+    /// listing's rows move.
+    pub(crate) list_window: ListWindow,
     /// The pump's per-tick comparison cache.
     pub(crate) pump: PumpCache,
 }
@@ -54,7 +57,8 @@ impl UiModel {
             lifecycle,
             state: UiState::new(),
             covers: CoverCache::new(),
-            covers_map: CoverMap::default(),
+            cover_views: CoverViews::default(),
+            list_window: ListWindow::default(),
             pump: PumpCache::new(),
         }
     }

@@ -14,12 +14,11 @@
 
 mod app;
 pub mod bridge;
+pub mod components;
 mod model;
+pub mod screens;
 pub mod shell;
 pub mod theme;
-
-#[cfg(debug_assertions)]
-mod screens;
 
 pub use app::App;
 use nsh_core::prelude::*;

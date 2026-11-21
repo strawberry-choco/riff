@@ -3055,11 +3055,15 @@ pub mod mocks {
         }
     }
 
-    /// Recording [`Covers`] fake: captures request intent, serves nothing.
-    /// Records cache-clear requests too, and can be handed a scripted clear
-    /// outcome, so the in-progress → settled transition is driven without a thread.
+    /// Recording [`Covers`] fake: captures request intent, and answers with
+    /// whatever settled outcomes were queued for it (the N6 list needs a
+    /// mock that can hand back decoded cover bytes, so a headless row can
+    /// show a real arrival through the RGBA path). Records cache-clear
+    /// requests too, and can be handed a scripted clear outcome, so the
+    /// in-progress → settled transition is driven without a thread.
     pub struct RecordingCovers {
         requested: Mutex<Vec<(TrackId, PathBuf, RequestedSize)>>,
+        answers: Mutex<VecDeque<(TrackId, RequestedSize, Option<DecodedCover>)>>,
         clears: AtomicUsize,
         clear_outcomes: Mutex<VecDeque<ClearCacheOutcome>>,
     }
@@ -3068,6 +3072,7 @@ pub mod mocks {
         pub fn new() -> Self {
             Self {
                 requested: Mutex::new(Vec::new()),
+                answers: Mutex::new(VecDeque::new()),
                 clears: AtomicUsize::new(0),
                 clear_outcomes: Mutex::new(VecDeque::new()),
             }
@@ -3084,6 +3089,20 @@ pub mod mocks {
         /// Queue one settled outcome for the next `poll_cache_clear`.
         pub fn serve_clear(&self, outcome: ClearCacheOutcome) {
             self.clear_outcomes.lock().unwrap().push_back(outcome);
+        }
+
+        /// Queue one settled cover answer for the next `poll`: pixels for a
+        /// hit, `None` for the artless verdict.
+        pub fn serve_cover(
+            &self,
+            track_id: TrackId,
+            size: RequestedSize,
+            cover: Option<DecodedCover>,
+        ) {
+            self.answers
+                .lock()
+                .unwrap()
+                .push_back((track_id, size, cover));
         }
     }
 
@@ -3108,7 +3127,8 @@ pub mod mocks {
         }
 
         fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
-            Vec::new()
+            let mut answers = self.answers.lock().unwrap();
+            answers.drain(..).collect()
         }
 
         fn clear_cache(&self) {

@@ -100,6 +100,20 @@ pub const COLUMN_MIN_W: f32 = 200.0;
 pub const LAST_COLUMN_MIN_W: f32 = 320.0;
 /// Width of the collapsible inspector (the former selection panel).
 pub const INSPECTOR_WIDTH: f32 = 300.0;
+/// Height of a track-listing row, and the row estimate the virtual list
+/// lays unmeasured rows out with (the plan's N6 line).
+pub const ROW_H: f32 = 44.0;
+/// The leading cover tile in a track-listing row: the egui store's
+/// `ROW_H - 8` square, carried over.
+pub const ROW_COVER: f32 = 32.0;
+/// Width of the favorite cell at a track row's leading edge, before the
+/// cover tile (the egui row's heart cell).
+pub const FAVORITE_COL_W: f32 = 24.0;
+/// Height of the inspector's art block (the egui store's `ART_H`).
+pub const INSPECTOR_ART_H: f32 = 200.0;
+/// The music glyph inside a placeholder well: the egui tile's glyph is
+/// drawn at half the tile, carried over.
+pub const PLACEHOLDER_GLYPH: f32 = 16.0;
 /// `--riff-playerbar-h` — 88 px bottom player bar.
 pub const PLAYERBAR_H: f32 = 88.0;
 

@@ -12,6 +12,7 @@
 
 use nsh_core::element::{Signal, signal};
 use riff_backend::app::events::NoticePayload;
+use riff_backend::domain::TrackId;
 
 use crate::model::{NavView, PlaybackView, SettingsSnapshot, SidebarView};
 use crate::theme::Palette;
@@ -44,6 +45,20 @@ pub struct UiState {
     /// record of what they wrote. The pump never touches it — a selection
     /// write mutates no store, so the pump's sidebar rebuild cannot see it.
     pub nav: Signal<NavView>,
+    /// The selected track, the Library session's `selected_track` as the
+    /// row-press handlers last wrote it — the same mirror the nav signal
+    /// is for the view fields (a selection write mutates no store, the
+    /// render bindings lock no session). The list's row bands and the
+    /// inspector read it; the pump never touches it.
+    pub selection: Signal<Option<TrackId>>,
+    /// The All Tracks listing's total, as the pump's cached `track_count`
+    /// read last answered. The virtual list sizes itself with it.
+    pub list_total: Signal<usize>,
+    /// Bumped when the pump resets the list's warm row window — a
+    /// committed Library mutation moved the rows behind the bindings. A
+    /// row binding reads it beside the window so refreshed rows repaint
+    /// (P0 correction 21: reading a signal is what re-runs a binding).
+    pub list_revision: Signal<u64>,
     /// The scalar settings as the hydrated sessions carry them.
     pub settings: Signal<SettingsSnapshot>,
     /// The design system's runtime store (ADR 0004's N2 amendment). The
@@ -70,6 +85,9 @@ impl UiState {
             playlist_revision: signal(0),
             sidebar: signal(SidebarView::default()),
             nav: signal(NavView::default()),
+            selection: signal(None),
+            list_total: signal(0),
+            list_revision: signal(0),
             settings: signal(SettingsSnapshot::default()),
             palette: signal(Palette::dark()),
             notices: signal(Vec::new()),

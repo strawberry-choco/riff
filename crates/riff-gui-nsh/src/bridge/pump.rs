@@ -1,7 +1,8 @@
 //! The pump: one 16 ms poller on the engine thread. At runtime the
 //! sidebar's selection handlers join it as writers of the
-//! [`UiState`](crate::bridge::state::UiState) signals (N5's nav signal);
-//! in debug builds the fixture's variant switcher and the readout's toggles
+//! [`UiState`](crate::bridge::state::UiState) signals (N5's nav signal, N6's
+//! selection), and the list row-press handler joins for the selection; in
+//! debug builds the fixture's variant switcher and the readout's toggles
 //! also write, from the same thread. The invariant the plan states is
 //! "worker threads never touch a signal", and no write anywhere leaves the
 //! engine thread.
@@ -36,7 +37,9 @@ use riff_backend::composition::AppRuntime;
 
 use crate::bridge::covers::{CoverArrival, CoverCache};
 use crate::bridge::runtime::UiModel;
-use crate::model::{CoverMap, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView, reads};
+use crate::model::{
+    CoverViews, ListWindow, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView, reads,
+};
 
 /// How far ahead of the current track the projection's Up Next window is
 /// kept. The spike used the same window; N9's Now Playing screen may widen
@@ -56,6 +59,8 @@ struct TickOutcome {
     settings: Option<SettingsSnapshot>,
     notices: Option<Vec<NoticePayload>>,
     covers_arrived: bool,
+    list_total: Option<usize>,
+    list_revision: Option<u64>,
 }
 
 /// The pump's per-tick comparison state: what the last tick saw, so a tick
@@ -69,6 +74,8 @@ pub(crate) struct PumpCache {
     library_generation: u64,
     notice_log: VecDeque<NoticePayload>,
     primed: bool,
+    list_total: usize,
+    list_revision: u64,
 }
 
 impl PumpCache {
@@ -86,6 +93,8 @@ impl PumpCache {
             // settled library never sends the LibraryChanged event the
             // event-gated path waits for.
             primed: true,
+            list_total: 0,
+            list_revision: 0,
         }
     }
 }
@@ -183,8 +192,15 @@ pub fn install(model: Stored<UiModel>) {
     // the borrow (P0 correction 20).
     let sigs = model.with(|m| m.state);
     set_interval(TICK, move || {
-        let outcome =
-            model.with(|m| tick(&mut m.rt, &mut m.pump, &mut m.covers, &mut m.covers_map));
+        let outcome = model.with(|m| {
+            tick(
+                &mut m.rt,
+                &mut m.pump,
+                &mut m.covers,
+                &mut m.cover_views,
+                &mut m.list_window,
+            )
+        });
         // Every write below is outside the borrow: `set` notifies bindings
         // that may read the same store, and re-borrowing the `RefCell` here
         // would panic (the spike's first pump did exactly that).
@@ -206,6 +222,12 @@ pub fn install(model: Stored<UiModel>) {
         if let Some(notices) = outcome.notices {
             sigs.notices.set(notices);
         }
+        if let Some(total) = outcome.list_total {
+            sigs.list_total.set(total);
+        }
+        if let Some(revision) = outcome.list_revision {
+            sigs.list_revision.set(revision);
+        }
         if outcome.covers_arrived {
             // `update` always notifies, which is right here: the count only
             // moves when covers landed (P0 correction 9).
@@ -220,7 +242,8 @@ fn tick(
     rt: &mut AppRuntime,
     cache: &mut PumpCache,
     covers: &mut CoverCache,
-    covers_map: &mut CoverMap,
+    cover_views: &mut CoverViews,
+    list_window: &mut ListWindow,
 ) -> TickOutcome {
     let mut outcome = TickOutcome {
         playback: None,
@@ -230,6 +253,8 @@ fn tick(
         settings: None,
         notices: None,
         covers_arrived: false,
+        list_total: None,
+        list_revision: None,
     };
     let mut sidebar_dirty = cache.primed;
 
@@ -269,12 +294,15 @@ fn tick(
     }
 
     // 3. The Library session's scalars: the sidebar's folder-root count when
-    //    the sidebar is due, and the settings comparison (compare first, so
-    //    a nothing-moved tick rebuilds nothing).
+    //    the sidebar is due, the listing's sort for the track list's reads,
+    //    and the settings comparison (compare first, so a nothing-moved tick
+    //    rebuilds nothing).
     let folder_roots;
+    let track_sort;
     {
         let library = rt.library.lock_or_recover();
         folder_roots = library.library_paths.paths().len();
+        track_sort = library.track_sort;
         let moved = cache.last_settings.as_ref().is_none_or(|last| {
             !last.matches_sessions(cheap.replaygain_enabled, cheap.replaygain_mode, &library)
         });
@@ -379,14 +407,42 @@ fn tick(
 
     // 7. Covers: drain the service through the ported decision half; every
     //    arrival (artless verdicts included, as terminal non-answers) leaves
-    //    the in-flight set, and the ones with pixels enter the View map.
+    //    the in-flight set, and the ones with pixels enter the View map,
+    //    bounded — what the insert pushed out is forgotten by the decision
+    //    half, so an evicted row's next ask re-requests.
     for arrival in covers.settle(rt.covers.as_ref()) {
         let CoverArrival { key, cover } = arrival;
-        covers_map.insert(key, crate::bridge::covers::arrival_image(cover));
+        let bytes = cover.rgba.len();
+        let evicted = cover_views.insert(key, crate::bridge::covers::arrival_image(cover), bytes);
+        covers.forget(evicted);
         outcome.covers_arrived = true;
     }
 
-    // 8. The settings round-trip: the pump is this frontend's frame end.
+    // 8. The track list's signals: the All Tracks listing's total (a cached
+    //    projection read — a settled tick costs no store read), and the warm
+    //    row window's freshness. A committed Library mutation moved the rows
+    //    behind every binding, so the window resets and the list revision
+    //    bumps; a sort change drops the rows the same way, and its reset is
+    //    announced with the same bump (nothing writes track_sort until N7,
+    //    but the contract holds from here). The row bindings read the
+    //    revision, so they repaint from the refilled window. The query is
+    //    the flat list's empty needle; the search retarget is N7's.
+    let total = reads::track_count(&mut rt.session_views, "", track_sort);
+    if total != cache.list_total {
+        cache.list_total = total;
+        outcome.list_total = Some(total);
+    }
+    let sort_dropped = list_window.set_sort(track_sort);
+    let list_moved = outcome.library_revision.is_some();
+    if sort_dropped || list_moved {
+        if list_moved {
+            list_window.reset();
+        }
+        cache.list_revision += 1;
+        outcome.list_revision = Some(cache.list_revision);
+    }
+
+    // 9. The settings round-trip: the pump is this frontend's frame end.
     //    Both session locks, acquired in `hydrate`'s order (playback, then
     //    library — never the reverse), held only for the diff, which reads
     //    scalar fields and clones no queue.

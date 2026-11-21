@@ -451,3 +451,572 @@ fn the_shell_restores_the_persisted_frame_at_launch() {
         "the restored frame is not maximized"
     );
 }
+
+// --- The N6 list and inspector probes ---------------------------------------
+
+use riff_backend::app::traits::{DecodedCover, RequestedSize};
+use riff_backend::domain::Track;
+use riff_gui_nsh::components::track_row::{TrackRowView, row_of};
+use riff_gui_nsh::screens::library::list::{PREFETCH_LOOKAHEAD, PREFETCH_LOOKBACK};
+
+/// How many rows the list probe's store carries: enough that scrolling
+/// recycles every visible cell several times over, small enough that a
+/// cover answer can be queued for every row.
+const PROBE_ROWS: usize = 200;
+
+/// One probe track: the id encodes its row index, so the covers mock's
+/// request log can be read as row numbers.
+fn probe_row(i: usize) -> Track {
+    crate::test_utils::create_test_track_with_metadata(
+        &format!("/music/probe/{i:03}.wav"),
+        &format!("/music/probe/{i:03}.wav"),
+        "Probe Artist",
+        &format!("Probe {i:03}"),
+        "Probe Album",
+    )
+}
+
+/// The covers mock with handles the test can reach after the runtime moved
+/// it: the request log and the answer queue share via `Arc`s.
+#[derive(Clone)]
+struct SharedCovers(std::sync::Arc<crate::mocks::RecordingCovers>);
+
+impl riff_backend::app::cover_service::Covers for SharedCovers {
+    fn request(&self, track_id: TrackId, path: std::path::PathBuf, size: RequestedSize) {
+        self.0.request(track_id, path, size);
+    }
+
+    fn request_folder(&self, folder: &std::path::Path, size: RequestedSize) {
+        self.0.request_folder(folder, size);
+    }
+
+    fn poll(&self) -> Vec<(TrackId, RequestedSize, Option<DecodedCover>)> {
+        self.0.poll()
+    }
+
+    fn clear_cache(&self) {
+        self.0.clear_cache();
+    }
+
+    fn poll_cache_clear(&self) -> Option<riff_backend::app::cover_service::ClearCacheOutcome> {
+        self.0.poll_cache_clear()
+    }
+}
+
+/// The list probe: the mock runtime under the real shell, with a
+/// [`PROBE_ROWS`]-row store and a covers mock that answers every request
+/// with a queued thumbnail. The extra readouts (selection, covers-request
+/// count) let a test read facts the engine thread holds.
+#[component]
+pub(crate) fn ListProbeApp() -> impl IntoElement {
+    let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+    let tracks: Vec<Track> = (0..PROBE_ROWS).map(probe_row).collect();
+    let library_ids: Vec<TrackId> = tracks.iter().map(|t| t.id.clone()).collect();
+    let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+    spawn_command_applier(cmd_rx, Arc::clone(&playback), library_ids.clone());
+
+    let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+    let (_change_tx, change_rx) = unbounded::<StoreChanged>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_to_backend_changes(change_rx);
+    let (_notice_tx, notice_rx) = unbounded::<String>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_playback_notices(notice_rx);
+
+    let covers_mock = std::sync::Arc::new(crate::mocks::RecordingCovers::new());
+
+    let settings_store = crate::mocks::MockSettingsStore::default();
+    let preferences = Preferences::hydrate(
+        &playback,
+        &Arc::new(Mutex::new(
+            riff_backend::app::state::LibrarySession::default(),
+        )),
+        &settings_store,
+        &ChannelTransport::new(unbounded().0),
+        &Arc::new(Mutex::new(None)),
+    );
+
+    let library_map: std::collections::HashMap<TrackId, Track> =
+        tracks.iter().map(|t| (t.id.clone(), t.clone())).collect();
+    let views = SessionViews::new(
+        Box::new(crate::mocks::MockLibraryQueryStore {
+            library: library_map,
+            flat: tracks,
+            library_counts: riff_persistence::store::LibraryCounts {
+                tracks: PROBE_ROWS,
+                artists: 1,
+                albums: 1,
+                genres: 1,
+            },
+            ..crate::mocks::MockLibraryQueryStore::default()
+        }),
+        Box::new(crate::mocks::MockPlaylistStore::default()),
+    );
+
+    let runtime = AppRuntime {
+        playback,
+        library: Arc::new(Mutex::new(
+            riff_backend::app::state::LibrarySession::default(),
+        )),
+        backend_events,
+        ui_transport: Box::new(ChannelTransport::new(cmd_tx)),
+        tray_transport: ChannelTransport::new(unbounded().0),
+        preferences,
+        scans: Box::new(crate::mocks::MockScans::default()),
+        watcher_manager: Arc::new(Mutex::new(None)),
+        quit_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settings: Box::new(settings_store),
+        playlists: Box::new(crate::mocks::MockPlaylistStore::default()),
+        library_mutations: Box::new(crate::mocks::MockLibraryMutationStore::new()),
+        session_views: views,
+        tag_edits: Box::new(crate::mocks::FakeTagEdits::new()),
+        passes: Box::new(crate::mocks::RecordingPasses::default()),
+        covers: Box::new(SharedCovers(covers_mock.clone())),
+        thumbnail_cache: Arc::new(StubThumbnailCache),
+    };
+    let requests_handle = covers_mock.clone();
+
+    let model = stored(UiModel::new(runtime, None));
+    install(model);
+    let state = model.with(|m| m.signals());
+    let requested_line = signal(String::new());
+    let requested_out = requested_line;
+    let requests_read = requests_handle.clone();
+    let serve_handle = requests_handle.clone();
+    let prefetch_model = model;
+    let prefetch_state = state;
+
+    view()
+        .flex_1()
+        .flex_col()
+        .child(riff_gui_nsh::shell::install(model))
+        .child(
+            // The viewability report is the live handler's own trigger; the
+            // probe's button drives the same window fn with a scripted pair,
+            // so the headless test can assert the read discipline.
+            button()
+                .test_id("prefetch")
+                .on_press(move || {
+                    riff_gui_nsh::screens::library::list::prefetch(
+                        prefetch_model,
+                        &prefetch_state,
+                        (0, 15),
+                    );
+                })
+                .child(text("prefetch")),
+        )
+        .child(
+            button()
+                .test_id("serve")
+                .on_press(move || {
+                    for (id, _, size) in serve_handle.requested() {
+                        serve_handle.serve_cover(
+                            id,
+                            size,
+                            Some(DecodedCover {
+                                rgba: [0x40u8, 0x80, 0xC0, 0xFF].repeat(56 * 56),
+                                width: 56,
+                                height: 56,
+                            }),
+                        );
+                    }
+                })
+                .child(text("serve")),
+        )
+        .child(
+            button()
+                .test_id("read-requests")
+                .on_press(move || {
+                    let lines = requests_read
+                        .requested()
+                        .iter()
+                        .filter_map(|(id, _, _)| {
+                            id.0.rsplit('/')
+                                .next()?
+                                .trim_end_matches(".wav")
+                                .parse::<usize>()
+                                .ok()
+                        })
+                        .collect::<Vec<_>>();
+                    requested_line.set(
+                        lines
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                })
+                .child(text("read requests")),
+        )
+        .child(text(move || requested_out.get()).test_id("requests-count"))
+}
+
+/// The missing-row probe: the row component over a synthetic display model
+/// the store cannot serve — the flat All Tracks listing carries only
+/// scanned-and-present rows, so the marker's proof is synthetic by
+/// construction (recorded in the N6 trail).
+#[component]
+pub(crate) fn MissingRowProbeApp() -> impl IntoElement {
+    let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+    let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
+    spawn_command_applier(cmd_rx, Arc::clone(&playback), Vec::new());
+
+    let backend_events = Arc::new(Mutex::new(BackendEvents::default()));
+    let (_change_tx, change_rx) = unbounded::<StoreChanged>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_to_backend_changes(change_rx);
+    let (_notice_tx, notice_rx) = unbounded::<String>();
+    backend_events
+        .lock_or_recover()
+        .subscribe_playback_notices(notice_rx);
+
+    let views = SessionViews::new(
+        Box::new(crate::mocks::MockLibraryQueryStore::default()),
+        Box::new(crate::mocks::MockPlaylistStore::default()),
+    );
+    let runtime = AppRuntime {
+        playback,
+        library: Arc::new(Mutex::new(
+            riff_backend::app::state::LibrarySession::default(),
+        )),
+        backend_events,
+        ui_transport: Box::new(ChannelTransport::new(cmd_tx)),
+        tray_transport: ChannelTransport::new(unbounded().0),
+        preferences: Preferences::default(),
+        scans: Box::new(crate::mocks::MockScans::default()),
+        watcher_manager: Arc::new(Mutex::new(None)),
+        quit_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settings: Box::new(crate::mocks::MockSettingsStore::default()),
+        playlists: Box::new(crate::mocks::MockPlaylistStore::default()),
+        library_mutations: Box::new(crate::mocks::MockLibraryMutationStore::new()),
+        session_views: views,
+        tag_edits: Box::new(crate::mocks::FakeTagEdits::new()),
+        passes: Box::new(crate::mocks::RecordingPasses::default()),
+        covers: Box::new(crate::mocks::RecordingCovers::new()),
+        thumbnail_cache: Arc::new(StubThumbnailCache),
+    };
+    let model = stored(UiModel::new(runtime, None));
+    let state = model.with(|m| m.signals());
+    let list_focus = signal(None::<usize>);
+    let facts = || TrackRowView {
+        index: 0,
+        id: TrackId("/music/gone.wav".to_owned()),
+        title: "Ghost Track".to_owned(),
+        artist: "Ghost Artist".to_owned(),
+        album: "Ghost Album".to_owned(),
+        duration: Some(Duration::from_secs(61)),
+        favorite: true,
+        missing: true,
+    };
+    view()
+        .flex_1()
+        .flex_col()
+        .p(px(8.0))
+        .child(row_of(model, state, facts, list_focus))
+}
+
+// --- The N6 tests -----------------------------------------------------------
+
+fn list_desktop() -> EngineConfig {
+    let mut config = EngineConfig::new(Root::of::<ListProbeApp>());
+    config.environment.os = nsh_core::platform::Os::Windows;
+    // The N6 row's columns need a desktop stage: the default headless
+    // viewport is the phone (correction 13), which leaves no width beside
+    // the sidebar and the inspector.
+    config.viewport = size(px(1280.0), px(800.0));
+    config
+}
+
+fn missing_desktop() -> EngineConfig {
+    let mut config = EngineConfig::new(Root::of::<MissingRowProbeApp>());
+    config.environment.os = nsh_core::platform::Os::Windows;
+    config.viewport = size(px(1280.0), px(800.0));
+    config
+}
+
+#[test]
+fn the_stage_renders_the_virtual_track_list() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000")
+        .expect("the first row's pump-primed content");
+
+    // The window is virtualized: some rows, never the whole store.
+    let visible = app.screen().count("id:track-row").unwrap();
+    assert!(
+        visible > 0 && visible < PROBE_ROWS,
+        "virtualized, got {visible}"
+    );
+
+    // The first row's content comes from the mock store.
+    let title = app.screen().texts().join("\n");
+    assert!(title.contains("Probe 000"), "the first row's title renders");
+    assert!(title.contains("Probe Album"), "the album column renders");
+}
+
+#[test]
+fn a_row_press_selects_and_the_inspector_follows() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+    app.wait_for("text:Nothing selected")
+        .expect("the empty inspector");
+
+    app.press("id:track-row >> nth=0").unwrap();
+    app.wait_for("text:Probe 000").unwrap();
+    app.wait_for_gone("text:Nothing selected", Duration::from_secs(2))
+        .unwrap();
+
+    app.press("id:track-row >> nth=1").unwrap();
+    app.wait_for("text:Probe 001").unwrap();
+
+    // The band follows the selection: the pressed row paints it, the other
+    // does not.
+    let first = app.screen().view_style("id:track-row >> nth=0").unwrap();
+    let second = app.screen().view_style("id:track-row >> nth=1").unwrap();
+    assert!(
+        second.is_some_and(|style| style.background_color.is_some()),
+        "the selected row's band paints"
+    );
+    assert!(
+        first.is_none_or(|style| style.background_color.is_none()),
+        "the deselected row's band drops"
+    );
+}
+
+#[test]
+fn the_selection_survives_recycling() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+
+    app.press("id:track-row >> nth=0").unwrap();
+    app.wait_for("text:Probe 000").unwrap();
+
+    // Away: far enough that every cell the selection was bound to is
+    // recycled into other rows.
+    for _ in 0..8 {
+        app.scroll("id:track-list", px(1000.0)).unwrap();
+    }
+    app.wait_for("text:Probe 160").expect("scrolled deep");
+
+    // Back: the same rows, re-bound by fresh cells.
+    for _ in 0..8 {
+        app.scroll("id:track-list", px(-1000.0)).unwrap();
+    }
+    app.wait_for("text:Probe 000").unwrap();
+    let first = app.screen().view_style("id:track-row >> nth=0").unwrap();
+    assert!(
+        first.is_some_and(|style| style.background_color.is_some()),
+        "the selection survived the recycle"
+    );
+    app.wait_for("text:Probe 000").unwrap();
+}
+
+#[test]
+fn the_prefetch_window_requests_ascending_in_a_bounded_window() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+
+    // Drive the window the way the viewability handler does, with the
+    // probe's scripted pair, then read the request log's row order.
+    app.press("id:prefetch").unwrap();
+    app.press("id:read-requests").unwrap();
+    app.wait_for("text:/^0,/")
+        .expect("the window asked for the viewable rows first");
+
+    let text = app.screen().texts().join("\n");
+    let line = text
+        .lines()
+        .find(|line| line.contains(','))
+        .expect("the request-order readout");
+    let indices: Vec<usize> = line
+        .split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
+    assert!(!indices.is_empty(), "the window requested covers");
+    let sorted = indices
+        .iter()
+        .try_fold(0usize, |last, &next| (last <= next).then_some(next))
+        .is_some();
+    assert!(sorted, "requests ascend: {indices:?}");
+
+    // The window is the bound: one report's widened range, never the store.
+    let bound = PREFETCH_LOOKAHEAD + PREFETCH_LOOKBACK + 80;
+    assert!(
+        indices.len() <= bound,
+        "the window stayed bounded: {} <= {bound}",
+        indices.len()
+    );
+    // Ahead of the viewport: the lookahead's reach, not just the visible 28.
+    assert!(
+        indices.len() > 28,
+        "the window prefetched ahead: {} requests",
+        indices.len()
+    );
+}
+
+#[test]
+fn cover_arrivals_swap_the_placeholder_for_the_image() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+
+    // The rows open on the placeholder (nothing asked yet).
+    let placeholders = app.screen().count("id:cover-placeholder").unwrap();
+    assert!(placeholders > 0, "the tiles open on the placeholder");
+
+    // Ask (the viewability handler's window), serve the answers, and the
+    // pump's drain files them: the tiles' branch flips to the arrivals.
+    // Headless proves the STRUCTURE of the RGBA path — not painted pixels
+    // (correction 13: the pixels are the windowed screenshot's proof).
+    app.press("id:prefetch").unwrap();
+    app.press("id:serve").unwrap();
+    app.wait_for_gone("id:cover-placeholder", Duration::from_secs(4))
+        .expect("every tile shows its arrival");
+}
+
+#[test]
+fn the_playing_marker_paints_on_the_current_row() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+    app.wait_for("label:Play").unwrap();
+
+    // The applier's PlayRandom loads the store's first row: row 0 becomes
+    // the current track and its row paints the marker.
+    app.press("id:transport-play").unwrap();
+    app.wait_for("label:Pause").unwrap();
+    app.wait_for("id:row-playing")
+        .expect("the current row carries the marker");
+}
+
+#[test]
+fn the_missing_marker_renders_on_a_synthetic_row() {
+    let mut app = Headless::start(missing_desktop()).unwrap();
+    app.wait_for("id:row-missing").expect("the marker paints");
+    let texts = app.screen().texts().join("\n");
+    assert!(texts.contains("(missing)"), "the marker's word renders");
+    assert!(
+        texts.contains("Ghost Track"),
+        "the row's other columns render"
+    );
+}
+
+#[test]
+fn the_traversal_reaches_the_list_and_enter_selects() {
+    let mut app = Headless::start(list_desktop()).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("text:Probe 000").expect("rows primed");
+    app.wait_for("text:Nothing selected")
+        .expect("the inspector opens empty");
+
+    // Through the chrome ring (7) and the sidebar's ten rows, into the
+    // list; the step reveals the focused row and Enter selects it —
+    // asserted by the selection's own facts, not by row 0's text (which
+    // the mount already shows): the inspector's empty state goes, and the
+    // focused row's band paints.
+    for _ in 0..(7 + 10) {
+        app.press_key("down").unwrap();
+    }
+    app.press_key("enter").unwrap();
+    app.wait_for_gone("text:Nothing selected", Duration::from_secs(2))
+        .expect("Enter selected the focused row");
+    let first = app.screen().view_style("id:track-row >> nth=0").unwrap();
+    assert!(
+        first.is_some_and(|style| style.background_color.is_some()),
+        "the focused row's band paints"
+    );
+}
+
+// --- The N6 perf drive (ignored by default) ---------------------------------
+
+/// The P0 scroll-budget drive, replayed against the nsh frontend's list:
+/// headless over the REAL 50k fixture store (`RIFF_N3_STORE`, the .scratch
+/// fixture — never the live store), jump deep, then 20 scroll steps of
+/// 2000 pt timed. The P0 spike's direct per-row pattern measured ~3086
+/// ms/step on this machine; the prefetch window is what must hold the
+/// budget now. Run: `cargo test -p riff-tests n6_scroll_drive -- --ignored
+/// --nocapture`.
+/// The drive probe: the REAL runtime over the fixture store (the app's own
+/// store path resolution), under the real shell — the production path
+/// without the debug readout in front of it.
+#[component]
+pub(crate) fn DriveApp() -> impl IntoElement {
+    riff_gui_nsh::theme::fonts::register_inter_fonts();
+    let store_path = riff_gui_nsh::store_path();
+    let (rt, lifecycle) = riff_backend::composition::AppRuntime::spawn(&store_path)
+        .expect("the fixture store spawns");
+    let model = stored(UiModel::new(rt, Some(lifecycle)));
+    riff_gui_nsh::bridge::install(model);
+    riff_gui_nsh::shell::install(model)
+}
+
+#[test]
+#[ignore = "needs the synthetic 50k fixture store at RIFF_N3_STORE"]
+fn n6_scroll_drive_over_the_fixture_store() {
+    if std::env::var_os("RIFF_N3_STORE").is_none() {
+        panic!("set RIFF_N3_STORE to the synthetic fixture store");
+    }
+    let mut config = EngineConfig::new(Root::of::<DriveApp>());
+    config.environment.os = nsh_core::platform::Os::Windows;
+    config.viewport = size(px(1280.0), px(800.0));
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("id:track-list").unwrap();
+    app.wait_for("label:All Tracks")
+        .expect("the library primed");
+
+    // Jump deep, settle, then time the steps.
+    app.press_key("mod+alt+j").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let steps = 20;
+    let t0 = std::time::Instant::now();
+    for _ in 0..steps {
+        app.scroll("id:track-list", px(2000.0)).unwrap();
+    }
+    let total = t0.elapsed();
+    println!(
+        "N6 DRIVE: {steps} steps of 2000pt over 50k rows: total {} ms, per-step {:.0} ms (P0 upper bound ~3086 ms/step)",
+        total.as_millis(),
+        total.as_secs_f64() * 1000.0 / f64::from(steps),
+    );
+}
+
+/// The read-cost probe behind the drive number: pure `track_row` timings at
+/// depth, no UI — what part of a scroll step is the seam's reads.
+#[test]
+#[ignore = "needs the synthetic 50k fixture store at RIFF_N3_STORE"]
+fn n6_read_cost_probe() {
+    use riff_backend::app::state::TrackSort;
+    if std::env::var_os("RIFF_N3_STORE").is_none() {
+        panic!("set RIFF_N3_STORE to the synthetic fixture store");
+    }
+    let store_path = riff_gui_nsh::store_path();
+    let (mut rt, _lifecycle) =
+        riff_backend::composition::AppRuntime::spawn(&store_path).expect("fixture store");
+    let reads_at = |rt: &mut riff_backend::composition::AppRuntime,
+                    start: usize,
+                    count: usize|
+     -> std::time::Duration {
+        let t0 = std::time::Instant::now();
+        for i in 0..count {
+            let _ = rt
+                .session_views
+                .track_row("", TrackSort::NumberAsc, start + i);
+        }
+        t0.elapsed()
+    };
+    let _ = rt.session_views.track_count("", TrackSort::NumberAsc);
+    let cold = reads_at(&mut rt, 40000, 50);
+    let warm = reads_at(&mut rt, 40000, 50);
+    let next_window = reads_at(&mut rt, 40050, 50);
+    let walk = reads_at(&mut rt, 40100, 100);
+    println!(
+        "N6 READS: depth-40000 cold(50) {cold:?} warm(50) {warm:?} next-window(50) {next_window:?} walk(100) {walk:?}"
+    );
+}

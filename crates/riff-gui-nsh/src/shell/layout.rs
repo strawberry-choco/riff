@@ -32,7 +32,8 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
     watch_window_geometry(model);
 
     let search = element_ref();
-    let (focus, nav_focus) = keyboard(model, search);
+    let list = element_ref();
+    let (focus, nav_focus, list_focus) = keyboard(model, search, list);
 
     view()
         .flex_1()
@@ -41,49 +42,70 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         .bg(move || palette.get().background)
         .text_color(move || palette.get().ink)
         .child(title_bar::bar(state, &search, focus))
-        .child(middle(model, state, nav_focus))
+        .child(middle(model, state, nav_focus, list_focus, list))
         .child(player_bar::bar(model, state, focus))
 }
 
-/// The middle region: the sidebar panel beside the empty stage. `flex_1` is
-/// load-bearing: without it the region sizes to its children and the stage
-/// collapses to nothing (P0 correction 21).
+/// The middle region: the sidebar panel beside the stage. The stage renders
+/// the All Tracks listing (list beside inspector) while the nav state names
+/// it — the drill-downs land at N7 — and an empty surface otherwise.
+/// `flex_1` is load-bearing: without it the region sizes to its children
+/// and the stage collapses to nothing (P0 correction 21).
 fn middle(
     model: Stored<UiModel>,
     state: UiState,
     nav_focus: Signal<Option<usize>>,
+    list_focus: Signal<Option<usize>>,
+    list: ElementRef,
 ) -> impl IntoElement {
     let palette = state.palette;
+    let nav = state.nav;
     view()
         .flex_1()
         .flex_row()
         .child(sidebar::panel(model, state, nav_focus))
         .child(
-            view()
-                .flex_1()
-                .test_id("stage")
-                .bg(move || palette.get().surface_row),
+            when(
+                move || crate::screens::library::list::is_all_tracks(&nav.get()),
+                move || {
+                    crate::screens::library::list::stage(model, state, list, list_focus)
+                        .into_element()
+                },
+            )
+            .otherwise(move || {
+                view()
+                    .flex_1()
+                    .test_id("stage")
+                    .bg(move || palette.get().surface_row)
+            }),
         )
 }
 
 /// The global shortcuts: Space toggles playback exactly like the egui
 /// frame's `apply_keyboard` (pause while playing, resume otherwise — a
 /// stopped session stays stopped, the play button is the one that starts
-/// one) unless a sidebar row holds the traversal focus, where Space and
-/// Enter activate the focused row like the egui frame's keyboard did on its
+/// one) unless a traversal-focused row holds it, where Space and Enter
+/// activate the focused row like the egui frame's keyboard did on its
 /// focused widget; Ctrl+K focuses the search field; Escape surrenders it
-/// and clears both focus segments; the arrows step the traversal — the
-/// chrome ring and the sidebar rows as one sequence. Nothing here writes a
-/// bridge signal: the transport dispatch reads the session through the
-/// model, and the row activation writes the nav signal the selection
-/// handlers own.
-fn keyboard(
-    model: Stored<UiModel>,
-    search: ElementRef,
-) -> (Signal<Option<usize>>, Signal<Option<usize>>) {
+/// and clears every focus segment; the arrows step the traversal — the
+/// chrome ring, the sidebar rows and the track list's rows as one sequence
+/// (the egui rows took no arrow traversal; the list segment is the nsh
+/// frame's own, recorded in the N6 trail). Nothing here writes a bridge
+/// signal except the traversal's own handles: the transport dispatch reads
+/// the session through the model, and the activations write the signals
+/// their handlers own.
+#[allow(clippy::type_complexity)]
+type FocusSegments = (
+    Signal<Option<usize>>,
+    Signal<Option<usize>>,
+    Signal<Option<usize>>,
+);
+
+fn keyboard(model: Stored<UiModel>, search: ElementRef, list: ElementRef) -> FocusSegments {
     let state = model.with(|m| m.signals());
     let focus = signal(None::<usize>);
     let nav_focus = signal(None::<usize>);
+    let list_focus = signal(None::<usize>);
 
     // The sidebar's rows, as the traversal counts them: the fold and the
     // playlists move the count, so every step reads it fresh.
@@ -97,55 +119,99 @@ fn keyboard(
         .len()
     };
 
+    // The list's rows: the listing's total, the same signal the virtual
+    // list sizes itself with.
+    let list_count = move || state.list_total.get();
+
+    let reveal = list;
     let step_traversal = move |delta: i32| {
-        let at = match (focus.get(), nav_focus.get()) {
-            (Some(slot), _) => Some(super::Slot::Chrome(slot)),
-            (None, Some(row)) => Some(super::Slot::Sidebar(row)),
-            (None, None) => None,
+        let at = match (focus.get(), nav_focus.get(), list_focus.get()) {
+            (Some(slot), _, _) => Some(super::Slot::Chrome(slot)),
+            (None, Some(row), _) => Some(super::Slot::Sidebar(row)),
+            (None, None, Some(row)) => Some(super::Slot::List(row)),
+            (None, None, None) => None,
         };
-        match super::step(at, delta, row_count()) {
+        match super::step(at, delta, row_count(), list_count()) {
             super::Slot::Chrome(slot) => {
                 focus.set(Some(slot));
                 nav_focus.set(None);
+                list_focus.set(None);
             }
             super::Slot::Sidebar(row) => {
                 focus.set(None);
                 nav_focus.set(Some(row));
+                list_focus.set(None);
+            }
+            super::Slot::List(row) => {
+                focus.set(None);
+                nav_focus.set(None);
+                list_focus.set(Some(row));
+                reveal.scroll_to_index(
+                    u32::try_from(row).unwrap_or(u32::MAX),
+                    percentage(0.5),
+                    px(0.0),
+                    false,
+                );
             }
         }
     };
 
-    on_key("space", move |_| match nav_focus.get() {
-        Some(row) => sidebar::activate(model, row),
-        None => model.with(|m| {
-            let session = m.rt.playback.lock_or_recover();
-            if session.playback_state == riff_backend::app::state::PlaybackState::Playing {
-                m.rt.ui_transport.pause();
-            } else {
-                m.rt.ui_transport.resume();
-            }
-        }),
+    on_key("space", move |_| {
+        match (nav_focus.get(), list_focus.get()) {
+            (Some(row), _) => sidebar::activate(model, row),
+            (None, Some(_)) => select_focused(model, list_focus),
+            (None, None) => model.with(|m| {
+                let session = m.rt.playback.lock_or_recover();
+                if session.playback_state == riff_backend::app::state::PlaybackState::Playing {
+                    m.rt.ui_transport.pause();
+                } else {
+                    m.rt.ui_transport.resume();
+                }
+            }),
+        }
     });
     on_key("enter", move |_| {
-        if let Some(row) = nav_focus.get() {
-            sidebar::activate(model, row);
+        match (nav_focus.get(), list_focus.get()) {
+            (Some(row), _) => sidebar::activate(model, row),
+            (None, Some(_)) => select_focused(model, list_focus),
+            (None, None) => {}
         }
     });
     on_key("mod+k", move |_| {
         focus.set(None);
         nav_focus.set(None);
+        list_focus.set(None);
         search.focus();
     });
     on_key("escape", move |_| {
         search.blur();
         focus.set(None);
         nav_focus.set(None);
+        list_focus.set(None);
     });
     on_key("left", move |_| step_traversal(-1));
     on_key("right", move |_| step_traversal(1));
     on_key("up", move |_| step_traversal(-1));
     on_key("down", move |_| step_traversal(1));
-    (focus, nav_focus)
+    // The perf drive's jump (N6 evidence): the production UI has no deep
+    // jump affordance, so the drive script presses this debug key to land
+    // the list on a deep row before timing its scroll steps.
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+j", move |_| {
+        list.scroll_to_index(40000, percentage(0.5), px(0.0), false);
+    });
+    (focus, nav_focus, list_focus)
+}
+
+/// Enter or Space on a traversal-focused list row: the row's press write
+/// (the egui click's same selection), read at the focused index.
+fn select_focused(model: Stored<UiModel>, list_focus: Signal<Option<usize>>) {
+    if let Some(index) = list_focus.get() {
+        let track = model.with(|m| crate::screens::library::list::track_at(m, index));
+        if let Some(track) = track {
+            crate::components::track_row::select_track(model, track.id.clone());
+        }
+    }
 }
 
 /// Launch: give the window the frame the store carries. A full position

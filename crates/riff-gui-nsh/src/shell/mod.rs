@@ -17,12 +17,13 @@ use nsh_core::prelude::*;
 use crate::theme::Palette;
 use crate::theme::tokens;
 
-/// The arrow focus ring: the shell's interactive elements in paint order.
-/// The search field, the player bar's transport cluster and its toggles —
-/// not the seek and volume sliders (their own arrow keys nudge their value
-/// once really focused, and a ring slot there would move twice per press),
-/// not the window controls (the platform's own buttons), and not the
-/// sidebar rows (inert until N5 wires their selection).
+/// The arrow focus ring's chrome slots, in paint order. The search field,
+/// the player bar's transport cluster and its toggles — not the seek and
+/// volume sliders (their own arrow keys nudge their value once really
+/// focused, and a ring slot there would move twice per press) and not the
+/// window controls (the platform's own buttons). The sidebar's rows are the
+/// ring's other segment ([`Slot::Sidebar`]); the key map walks both as one
+/// sequence.
 pub(crate) mod focus {
     pub(crate) const SEARCH: usize = 0;
     pub(crate) const PREVIOUS: usize = 1;
@@ -34,37 +35,67 @@ pub(crate) mod focus {
     pub(crate) const COUNT: usize = 7;
 }
 
-/// Steps the ring by `delta`, wrapping through every slot; a cleared ring
-/// enters at the search field whichever way it steps.
-pub(crate) fn step(from: Option<usize>, delta: i32) -> usize {
-    let Some(at) = from else {
-        return focus::SEARCH;
+/// One arrow-traversal position: a [`focus`] chrome slot, or a sidebar row
+/// past the chrome slots (the row's index in the sidebar's display order,
+/// which runs LIBRARY, SMART LISTS, PLAYLISTS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slot {
+    Chrome(usize),
+    Sidebar(usize),
+}
+
+/// Steps the traversal by `delta`, wrapping through the chrome slots and
+/// the `sidebar_rows` sidebar rows as one sequence; a cleared traversal
+/// enters at the search field whichever way it steps. The sidebar's row
+/// count is the caller's read (it moves with the fold and the playlists),
+/// so a wrap out of a shrunken sidebar lands back in the chrome.
+pub(crate) fn step(at: Option<Slot>, delta: i32, sidebar_rows: usize) -> Slot {
+    let chrome = i32::try_from(focus::COUNT).expect("the ring's slot count fits an i32");
+    let rows = i32::try_from(sidebar_rows).unwrap_or(i32::MAX - chrome);
+    let flat = match at {
+        None => return Slot::Chrome(focus::SEARCH),
+        Some(Slot::Chrome(at)) => i32::try_from(at).expect("a ring slot fits an i32"),
+        Some(Slot::Sidebar(at)) => chrome + i32::try_from(at).expect("a row index fits an i32"),
     };
-    let count = i32::try_from(focus::COUNT).expect("the ring's slot count fits an i32");
-    let at = i32::try_from(at).expect("a ring slot fits an i32");
-    usize::try_from((at + delta).rem_euclid(count)).expect("rem_euclid is non-negative")
+    let next = flat.saturating_add(delta).rem_euclid(chrome + rows);
+    if next < chrome {
+        Slot::Chrome(usize::try_from(next).expect("rem_euclid is non-negative"))
+    } else {
+        Slot::Sidebar(
+            usize::try_from(next - chrome).expect("the remainder is past the chrome slots"),
+        )
+    }
 }
 
 /// The ring's one treatment: a hairline border the palette's focus ring
-/// paints while the arrow focus names `slot`, invisible otherwise — so the
-/// border's box is reserved at every moment and focus never shifts layout.
+/// paints while `focused` holds, invisible otherwise — so the border's box
+/// is reserved at every moment and focus never shifts layout.
+pub(crate) fn ring_when<E: nsh_core::element::Interactive + nsh_core::element::Styled>(
+    element: E,
+    focused: impl Fn() -> bool + Copy + 'static,
+    palette: Signal<Palette>,
+) -> E {
+    element
+        .project_focused(focused)
+        .border(px(tokens::BORDER_HAIRLINE))
+        .rounded(px(tokens::RADIUS_SM))
+        .border_color(move || {
+            if focused() {
+                palette.get().focus_ring
+            } else {
+                transparent_black()
+            }
+        })
+}
+
+/// The chrome ring's paint: focused while the arrow focus names `slot`.
 pub(crate) fn ring<E: nsh_core::element::Interactive + nsh_core::element::Styled>(
     element: E,
     slot: usize,
     focus: Signal<Option<usize>>,
     palette: Signal<Palette>,
 ) -> E {
-    element
-        .project_focused(move || focus.get() == Some(slot))
-        .border(px(1.0))
-        .rounded(px(tokens::RADIUS_SM))
-        .border_color(move || {
-            if focus.get() == Some(slot) {
-                palette.get().focus_ring
-            } else {
-                transparent_black()
-            }
-        })
+    ring_when(element, move || focus.get() == Some(slot), palette)
 }
 
 #[cfg(test)]
@@ -73,8 +104,43 @@ mod tests {
 
     #[test]
     fn the_ring_wraps_through_every_slot_in_both_directions() {
-        assert_eq!(step(None, 1), focus::SEARCH);
-        assert_eq!(step(Some(focus::REPEAT), 1), focus::SEARCH);
-        assert_eq!(step(Some(focus::SEARCH), -1), focus::REPEAT);
+        assert_eq!(step(None, 1, 0), Slot::Chrome(focus::SEARCH));
+        assert_eq!(
+            step(Some(Slot::Chrome(focus::REPEAT)), 1, 0),
+            Slot::Chrome(focus::SEARCH)
+        );
+        assert_eq!(
+            step(Some(Slot::Chrome(focus::SEARCH)), -1, 0),
+            Slot::Chrome(focus::REPEAT)
+        );
+    }
+
+    #[test]
+    fn the_traversal_walks_chrome_into_the_sidebar_and_back() {
+        let rows = 3;
+        assert_eq!(
+            step(Some(Slot::Chrome(focus::REPEAT)), 1, rows),
+            Slot::Sidebar(0)
+        );
+        assert_eq!(
+            step(Some(Slot::Sidebar(2)), 1, rows),
+            Slot::Chrome(focus::SEARCH)
+        );
+        assert_eq!(
+            step(Some(Slot::Chrome(focus::SEARCH)), -1, rows),
+            Slot::Sidebar(2)
+        );
+        assert_eq!(
+            step(Some(Slot::Sidebar(0)), -1, rows),
+            Slot::Chrome(focus::REPEAT)
+        );
+    }
+
+    #[test]
+    fn a_folded_sidebar_leaves_the_chrome_ring_intact() {
+        assert_eq!(
+            step(Some(Slot::Chrome(focus::REPEAT)), 1, 0),
+            Slot::Chrome(focus::SEARCH)
+        );
     }
 }

@@ -15,6 +15,7 @@
 //! search field's real input focus (mod+k) has no headless text surface.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crossbeam_channel::unbounded;
 use nsh_base::button;
@@ -29,7 +30,7 @@ use riff_backend::app::store::StoreChanged;
 use riff_backend::app::transport::ChannelTransport;
 use riff_backend::app::views::SessionViews;
 use riff_backend::composition::AppRuntime;
-use riff_backend::domain::PlaybackCommand;
+use riff_backend::domain::{PlaybackCommand, PlaylistId, SmartPlaylistKind, TrackId};
 use riff_gui_nsh::bridge::{UiModel, install};
 
 use riff_backend::app::MutexExt;
@@ -111,6 +112,7 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
     let library = Arc::new(Mutex::new(
         riff_backend::app::state::LibrarySession::default(),
     ));
+    let library_read = Arc::clone(&library);
     let preferences = Preferences::hydrate(
         &playback,
         &library,
@@ -118,6 +120,19 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
         &ChannelTransport::new(unbounded().0),
         &Arc::new(Mutex::new(None)),
     );
+
+    // The sidebar's seed: every section kind carries a non-default answer —
+    // the library totals, one built-in smart list's total, and one user
+    // playlist's entry count — so a row that shows a default is visible.
+    let playlist_store = MockPlaylistStore::with_playlists(vec![(
+        PlaylistId("mix".to_owned()),
+        "Mix".to_owned(),
+        vec![
+            TrackId("/music/probe/one.wav".to_owned()),
+            TrackId("/music/probe/two.wav".to_owned()),
+            TrackId("/music/probe/three.wav".to_owned()),
+        ],
+    )]);
 
     let views = SessionViews::new(
         Box::new(MockLibraryQueryStore {
@@ -130,9 +145,13 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
                 albums: 1,
                 genres: 1,
             },
+            smart_list_counts: vec![
+                (SmartPlaylistKind::Favorites, 4),
+                (SmartPlaylistKind::RecentlyAdded, 7),
+            ],
             ..MockLibraryQueryStore::default()
         }),
-        Box::new(MockPlaylistStore::default()),
+        Box::new(playlist_store.clone()),
     );
 
     let runtime = AppRuntime {
@@ -146,7 +165,7 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
         watcher_manager: Arc::new(Mutex::new(None)),
         quit_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settings: Box::new(settings_store),
-        playlists: Box::new(MockPlaylistStore::default()),
+        playlists: Box::new(playlist_store),
         library_mutations: Box::new(MockLibraryMutationStore::new()),
         session_views: views,
         tag_edits: Box::new(FakeTagEdits::new()),
@@ -162,6 +181,9 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
     let row_line = row;
     let commits = signal(0_usize);
     let commits_line = commits;
+    let session = signal(String::new());
+    let session_line = session;
+    let nav = state.nav;
 
     view()
         .flex_1()
@@ -171,12 +193,27 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
             text(move || {
                 let view = state.sidebar.get();
                 format!(
-                    "sidebar {} {} {} {} {}",
-                    view.tracks, view.artists, view.albums, view.genres, view.smart_lists
+                    "sidebar {} {} {} {} {} smart {} playlists {}",
+                    view.tracks,
+                    view.artists,
+                    view.albums,
+                    view.genres,
+                    view.folder_roots,
+                    view.smart_lists
+                        .iter()
+                        .find(|(k, _)| *k == SmartPlaylistKind::Favorites)
+                        .map_or(0, |(_, n)| *n),
+                    view.playlists
+                        .iter()
+                        .map(|row| format!("{}({})", row.name, row.tracks))
+                        .collect::<Vec<_>>()
+                        .join(","),
                 )
             })
             .test_id("sidebar-view"),
         )
+        .child(text(move || format!("nav {:?}", nav.get())).test_id("nav-view"))
+        .child(text(move || session_line.get()).test_id("session-view"))
         .child(
             button()
                 .test_id("read-store")
@@ -199,6 +236,18 @@ fn probe(preset: Option<WindowGeometry>) -> impl IntoElement {
                     }));
                 })
                 .child(text("read store")),
+        )
+        .child(
+            button()
+                .test_id("read-session")
+                .on_press(move || {
+                    let library = library_read.lock_or_recover();
+                    session.set(format!(
+                        "session {:?} {:?} {:?}",
+                        library.view_mode, library.browse_mode, library.library_section
+                    ));
+                })
+                .child(text("read session")),
         )
         .child(text(move || row_line.get()).test_id("store-geometry"))
         .child(text(move || format!("commits {}", commits_line.get())).test_id("commit-count"))
@@ -268,8 +317,119 @@ fn the_sidebar_primes_on_a_settled_library() {
     // No LibraryChanged event ever fires in this probe: the counts the
     // readout settles on are the first tick's priming read off the mock's
     // seeded LibraryCounts, not an event's payload. The default view would
-    // read all zeros and this would time out.
-    app.wait_for("text:sidebar 2 1 1 1 0").unwrap();
+    // read all zeros and this would time out. Every section kind carries a
+    // seeded answer — the library totals, the built-in smart list's total,
+    // the user playlist's entry count.
+    app.wait_for("text:sidebar 2 1 1 1 0 smart 4 playlists Mix(3)")
+        .unwrap();
+    app.wait_for("label:Mix (3)").unwrap();
+    app.wait_for("label:All Tracks").unwrap();
+    app.wait_for("label:Favorites").unwrap();
+}
+
+/// The selection: the artists row's press lands the egui
+/// `land_on_library` field set on the session, and the row's band paints
+/// the egui selected fill while the other rows stay bare. Both facts
+/// survive the pump's ticks — a selection write mutates no store, so the
+/// write travels through the nav signal alone.
+#[test]
+fn a_selection_write_lands_the_land_on_library_field_set() {
+    let mut app = Headless::start(desktop()).unwrap();
+    app.wait_for("id:sidebar-view").unwrap();
+
+    app.press("id:nav-artists").unwrap();
+    app.wait_for("text:/library_section: Artists/")
+        .expect("the nav signal carries the selection");
+
+    app.press("id:read-session").unwrap();
+    app.wait_for("text:session Library Library Artists")
+        .expect("the session holds the land_on_library field set");
+
+    let artists = app.screen().view_style("id:nav-artists").unwrap();
+    let genres = app.screen().view_style("id:nav-genres").unwrap();
+    assert!(
+        artists.is_some_and(|style| style.background_color.is_some()),
+        "the active row's band paints"
+    );
+    assert!(
+        genres.is_none_or(|style| style.background_color.is_none()),
+        "an inactive row paints no band"
+    );
+
+    // A second selection moves the band with it.
+    app.press("id:nav-genres").unwrap();
+    app.wait_for("text:/library_section: Genres/").unwrap();
+    let artists = app.screen().view_style("id:nav-artists").unwrap();
+    let genres = app.screen().view_style("id:nav-genres").unwrap();
+    assert!(
+        artists.is_none_or(|style| style.background_color.is_none()),
+        "the old row's band drops"
+    );
+    assert!(
+        genres.is_some_and(|style| style.background_color.is_some()),
+        "the new row's band paints"
+    );
+}
+
+/// The traversal: the arrows walk the chrome ring into the sidebar's rows
+/// and Enter activates the focused row, exactly the row's own press. The
+/// active section is visible after traversal — the band followed the
+/// activation.
+#[test]
+fn arrows_reach_every_section_and_enter_activates() {
+    let mut app = Headless::start(desktop()).unwrap();
+    app.wait_for("id:sidebar-view").unwrap();
+
+    // From nothing: search, play, next, mute, shuffle, repeat, then the
+    // sidebar's first row — All Tracks — then Artists.
+    for _ in 0..7 {
+        app.press_key("down").unwrap();
+    }
+    app.press_key("down").unwrap();
+    app.press_key("down").unwrap();
+    app.press_key("enter").unwrap();
+    app.wait_for("text:/library_section: Artists/")
+        .expect("Enter activated the focused row");
+    app.press("id:read-session").unwrap();
+    app.wait_for("text:session Library Library Artists")
+        .unwrap();
+
+    // Space activates a focused row the same way — and must not toggle
+    // playback while a row holds the traversal focus.
+    app.press_key("down").unwrap();
+    app.press_key("down").unwrap();
+    app.press_key("space").unwrap();
+    app.wait_for("text:/library_section: Genres/").unwrap();
+
+    // Stepping back up leaves the rows and the chrome keeps its slots.
+    app.press_key("up").unwrap();
+    app.press_key("up").unwrap();
+    app.press_key("up").unwrap();
+    app.press_key("enter").unwrap();
+    app.wait_for("text:/library_section: AllTracks/").unwrap();
+}
+
+/// The fold: the collapse chevron's press flips the persisted flag through
+/// the session and the pump's settings diff lands it in the snapshot the
+/// rows read, so the smart list rows fold away — and an opened smart list
+/// closes with the section.
+#[test]
+fn the_fold_chevron_collapses_the_smart_lists() {
+    let mut app = Headless::start(desktop()).unwrap();
+    app.wait_for("id:sidebar-view").unwrap();
+
+    app.wait_for("label:Favorites").unwrap();
+    app.press("id:nav-favorites").unwrap();
+    app.wait_for("text:/smart_list: Some.Favorites./").unwrap();
+
+    app.press("id:smart-lists-collapse").unwrap();
+    app.wait_for_gone("label:Favorites", Duration::from_secs(2))
+        .unwrap();
+    app.wait_for("text:/smart_list: None/")
+        .expect("the fold closed the opened list");
+    app.press("id:read-session").unwrap();
+    app.wait_for("text:session Library Library AllTracks")
+        .unwrap();
 }
 
 #[test]

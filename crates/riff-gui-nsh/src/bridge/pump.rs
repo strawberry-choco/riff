@@ -1,5 +1,6 @@
-//! The pump: one 16 ms poller on the engine thread. At runtime it is the
-//! only writer of the [`UiState`](crate::bridge::state::UiState) signals;
+//! The pump: one 16 ms poller on the engine thread. At runtime the
+//! sidebar's selection handlers join it as writers of the
+//! [`UiState`](crate::bridge::state::UiState) signals (N5's nav signal);
 //! in debug builds the fixture's variant switcher and the readout's toggles
 //! also write, from the same thread. The invariant the plan states is
 //! "worker threads never touch a signal", and no write anywhere leaves the
@@ -35,7 +36,7 @@ use riff_backend::composition::AppRuntime;
 
 use crate::bridge::covers::{CoverArrival, CoverCache};
 use crate::bridge::runtime::UiModel;
-use crate::model::{CoverMap, PlaybackView, SettingsSnapshot, SidebarView, reads};
+use crate::model::{CoverMap, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView, reads};
 
 /// How far ahead of the current track the projection's Up Next window is
 /// kept. The spike used the same window; N9's Now Playing screen may widen
@@ -332,36 +333,48 @@ fn tick(
     }
     cache.cheap = Some(cheap);
 
-    // 5. Sidebar: built once on the first tick (a settled library never
-    //    sends the LibraryChanged event the later ticks wait for), then
-    //    refreshed when the Library generation moves. The signal's own
-    //    equality absorbs a same-value rewrite.
-    if sidebar_dirty {
-        let counts = rt.session_views.sidebar_counts(folder_roots);
-        let view = SidebarView {
-            tracks: counts.tracks,
-            artists: counts.artists,
-            albums: counts.albums,
-            genres: counts.genres,
-            folder_roots,
-            smart_lists: counts.smart_lists.len(),
-            last_scan: reads::last_scan(&mut rt.session_views),
-        };
-        outcome.sidebar = Some(view);
-    }
-
-    // 6. Playlists: the playlist generation has no inbox event, so the pump
+    // 5. Playlists: the playlist generation has no inbox event, so the pump
     //    observes the projection's cache — a refetch (generation moved)
-    //    hands out a fresh `Arc`, and pointer identity is the change.
+    //    hands out a fresh `Arc`, and pointer identity is the change. A
+    //    moved list is also a sidebar change: the PLAYLISTS rows are the
+    //    list's rows (N5), so it feeds the sidebar's dirty flag.
     let playlists = reads::playlists(&mut rt.session_views);
     let playlists_moved = cache
         .last_playlists
         .as_ref()
         .is_none_or(|last| !Arc::ptr_eq(last, &playlists));
     if playlists_moved {
-        cache.last_playlists = Some(playlists);
+        cache.last_playlists = Some(Arc::clone(&playlists));
         cache.playlist_revision += 1;
         outcome.playlist_revision = Some(cache.playlist_revision);
+        sidebar_dirty = true;
+    }
+
+    // 6. Sidebar: built once on the first tick (a settled library never
+    //    sends the LibraryChanged event the later ticks wait for), then
+    //    refreshed when the Library generation moves or the playlists
+    //    refetched. The signal's own equality absorbs a same-value rewrite.
+    if sidebar_dirty {
+        let counts = rt.session_views.sidebar_counts(folder_roots);
+        let rows = playlists
+            .iter()
+            .map(|playlist| PlaylistRow {
+                id: playlist.id.clone(),
+                name: playlist.name.clone(),
+                tracks: playlist.tracks.len(),
+            })
+            .collect();
+        let view = SidebarView {
+            tracks: counts.tracks,
+            artists: counts.artists,
+            albums: counts.albums,
+            genres: counts.genres,
+            folder_roots,
+            smart_lists: Arc::clone(&counts.smart_lists),
+            playlists: rows,
+            last_scan: reads::last_scan(&mut rt.session_views),
+        };
+        outcome.sidebar = Some(view);
     }
 
     // 7. Covers: drain the service through the ported decision half; every

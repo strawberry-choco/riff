@@ -5,8 +5,8 @@
 //! N2 fixture, on the same toggle pattern.
 //!
 //! The readout renders from the `UiState` handles only; the controls
-//! dispatch through the model's transport and never write a signal (the
-//! pump is the only writer). Keys: mod+alt+r toggles the readout, space
+//! dispatch through the model's transport and never write a signal (no
+//! worker thread ever does). Keys: mod+alt+r toggles the readout, space
 //! toggles play/pause, mod+alt+p plays a random session, mod+alt+n skips,
 //! mod+alt+o stops (the queue stays parked), mod+alt+s seeks to 1 s.
 

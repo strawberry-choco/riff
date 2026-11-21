@@ -1,18 +1,18 @@
 //! The view vocabulary: the shapes the bridge populates from the backend and
 //! the screens render from (plan "Bridge surface"). Every type here is what
 //! one signal carries — [`PlaybackView`] the plan's literal, the rest only as
-//! wide as today's reads can fill them. N5 widens [`SidebarView`] to the
-//! section model, N13 widens [`SettingsSnapshot`] to the settings pages; the
-//! deferred fields are listed on each type.
+//! wide as today's reads can fill them. N13 widens [`SettingsSnapshot`] to
+//! the settings pages; the deferred fields are listed on each type.
 
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use riff_backend::app::state::{
-    LibrarySession, PlaybackState, RepeatMode, ReplayGainMode, ScanPrefs, UiFlags,
+    BrowseMode, LibrarySection, LibrarySession, PlaybackState, RepeatMode, ReplayGainMode,
+    ScanPrefs, UiFlags, ViewMode,
 };
 use riff_backend::app::views::{PlaylistView, SessionViews};
-use riff_backend::domain::Track;
+use riff_backend::domain::{PlaylistId, SmartPlaylistKind, Track};
 
 /// One playback snapshot, exactly the plan's lines 200-213.
 ///
@@ -78,10 +78,9 @@ impl Default for PlaybackView {
     }
 }
 
-/// The sidebar's counts and freshness — the facts `SessionViews` serves
-/// today. Deferred to N5: the section model (per-section row identities),
-/// the per-playlist and per-smart-list entry counts the sidebar lists carry,
-/// and the scan-status message slot.
+/// The sidebar's counts, row lists and freshness — the facts `SessionViews`
+/// serves. [`NavView`] carries where the app stands (the selection writes);
+/// this view carries only what the store answers.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SidebarView {
     pub tracks: usize,
@@ -89,9 +88,63 @@ pub struct SidebarView {
     pub albums: usize,
     pub genres: usize,
     pub folder_roots: usize,
-    pub smart_lists: usize,
+    /// Each built-in smart list's total, in `SmartPlaylistKind::ALL` order —
+    /// `SessionViews::sidebar_counts`'s own shape.
+    pub smart_lists: Arc<[(SmartPlaylistKind, usize)]>,
+    /// The user playlists' rows, in creation order.
+    pub playlists: Arc<[PlaylistRow]>,
     /// When the last full scan finished; `None` = never.
     pub last_scan: Option<SystemTime>,
+}
+
+/// One PLAYLISTS row: the identity a selection write opens the list with,
+/// the name it paints, and its entry count — the egui sidebar's
+/// `"Name (count)"` label facts. The full entry list stays in the
+/// projection; a nav row needs none of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistRow {
+    pub id: PlaylistId,
+    pub name: String,
+    /// Entry count, dangling references included — the egui row's
+    /// `playlist.tracks.len()`.
+    pub tracks: usize,
+}
+
+/// Where the app's navigation stands: the Library session's view fields as
+/// the shell's selection handlers last wrote them, plus the two open-list
+/// slots the egui frame kept as frontend state (`parts::smart_playlist_view`
+/// and `parts::playlist_view`). The handlers write both sides together —
+/// the session through its guard, this view through the signal — so the
+/// sidebar's active-row highlight survives a pump tick without any session
+/// lock in a render binding (the pump never writes this signal; a selection
+/// write mutates no store, so its sidebar rebuild would not fire).
+///
+/// The custom smart lists' identity joins the slot with N10's rows; today
+/// the six built-ins are the whole SMART LISTS surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavView {
+    pub view_mode: ViewMode,
+    pub browse_mode: BrowseMode,
+    pub library_section: LibrarySection,
+    /// The built-in smart list opened over the Library view.
+    pub smart_list: Option<SmartPlaylistKind>,
+    /// The playlist opened over the Library view.
+    pub playlist: Option<PlaylistId>,
+}
+
+impl Default for NavView {
+    /// The values `LibrarySession::default()` carries — the view fields
+    /// themselves have no `Default` (`ViewMode` is the backend's), so the
+    /// fresh session's own defaults are spelled here once.
+    fn default() -> Self {
+        Self {
+            view_mode: ViewMode::Library,
+            browse_mode: BrowseMode::default(),
+            library_section: LibrarySection::default(),
+            smart_list: None,
+            playlist: None,
+        }
+    }
 }
 
 /// The scalar settings as the two sessions carry them after hydration —

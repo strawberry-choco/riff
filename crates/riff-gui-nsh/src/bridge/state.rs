@@ -1,9 +1,10 @@
 //! The [`UiState`]: the signals the bridge owns.
 //!
 //! Every signal here is written on the engine thread and nowhere else — at
-//! runtime through the pump, and in debug builds through the fixture's
-//! variant switcher and the readout's toggles. The worker threads hand
-//! results over by channel and never write (the plan's "Worker threads
+//! runtime through the pump (and [`crate::shell::sidebar`]'s selection
+//! handlers, which own the nav signal), and in debug builds through the
+//! fixture's variant switcher and the readout's toggles. The worker threads
+//! hand results over by channel and never write (the plan's "Worker threads
 //! never touch a signal"). nsh signals are `!Send`
 //! (P0 correction 9), so this bundle lives and dies with the engine thread:
 //! [`UiState`] is `Copy` because every field is a `Signal` handle, and the
@@ -12,7 +13,7 @@
 use nsh_core::element::{Signal, signal};
 use riff_backend::app::events::NoticePayload;
 
-use crate::model::{PlaybackView, SettingsSnapshot, SidebarView};
+use crate::model::{NavView, PlaybackView, SettingsSnapshot, SidebarView};
 use crate::theme::Palette;
 
 /// The number of typed notices the signal's history keeps. The notices
@@ -39,6 +40,10 @@ pub struct UiState {
     pub playlist_revision: Signal<u64>,
     /// The sidebar's counts and last-scan freshness.
     pub sidebar: Signal<SidebarView>,
+    /// Where the app's navigation stands: the selection handlers' own
+    /// record of what they wrote. The pump never touches it — a selection
+    /// write mutates no store, so the pump's sidebar rebuild cannot see it.
+    pub nav: Signal<NavView>,
     /// The scalar settings as the hydrated sessions carry them.
     pub settings: Signal<SettingsSnapshot>,
     /// The design system's runtime store (ADR 0004's N2 amendment). The
@@ -64,6 +69,7 @@ impl UiState {
             library_revision: signal(0),
             playlist_revision: signal(0),
             sidebar: signal(SidebarView::default()),
+            nav: signal(NavView::default()),
             settings: signal(SettingsSnapshot::default()),
             palette: signal(Palette::dark()),
             notices: signal(Vec::new()),

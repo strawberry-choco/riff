@@ -32,7 +32,7 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
     watch_window_geometry(model);
 
     let search = element_ref();
-    let focus = keyboard(model, search);
+    let (focus, nav_focus) = keyboard(model, search);
 
     view()
         .flex_1()
@@ -41,19 +41,23 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         .bg(move || palette.get().background)
         .text_color(move || palette.get().ink)
         .child(title_bar::bar(state, &search, focus))
-        .child(middle(state))
+        .child(middle(model, state, nav_focus))
         .child(player_bar::bar(model, state, focus))
 }
 
 /// The middle region: the sidebar panel beside the empty stage. `flex_1` is
 /// load-bearing: without it the region sizes to its children and the stage
 /// collapses to nothing (P0 correction 21).
-fn middle(state: UiState) -> impl IntoElement {
+fn middle(
+    model: Stored<UiModel>,
+    state: UiState,
+    nav_focus: Signal<Option<usize>>,
+) -> impl IntoElement {
     let palette = state.palette;
     view()
         .flex_1()
         .flex_row()
-        .child(sidebar::panel(state))
+        .child(sidebar::panel(model, state, nav_focus))
         .child(
             view()
                 .flex_1()
@@ -65,42 +69,83 @@ fn middle(state: UiState) -> impl IntoElement {
 /// The global shortcuts: Space toggles playback exactly like the egui
 /// frame's `apply_keyboard` (pause while playing, resume otherwise — a
 /// stopped session stays stopped, the play button is the one that starts
-/// one), Ctrl+K focuses the search field, Escape surrenders it and clears
-/// the ring, and the arrows step the ring. Nothing here writes a signal:
-/// the transport dispatch reads the session through the model.
-fn keyboard(model: Stored<UiModel>, search: ElementRef) -> Signal<Option<usize>> {
+/// one) unless a sidebar row holds the traversal focus, where Space and
+/// Enter activate the focused row like the egui frame's keyboard did on its
+/// focused widget; Ctrl+K focuses the search field; Escape surrenders it
+/// and clears both focus segments; the arrows step the traversal — the
+/// chrome ring and the sidebar rows as one sequence. Nothing here writes a
+/// bridge signal: the transport dispatch reads the session through the
+/// model, and the row activation writes the nav signal the selection
+/// handlers own.
+fn keyboard(
+    model: Stored<UiModel>,
+    search: ElementRef,
+) -> (Signal<Option<usize>>, Signal<Option<usize>>) {
+    let state = model.with(|m| m.signals());
     let focus = signal(None::<usize>);
-    on_key("space", move |_| {
-        model.with(|m| {
+    let nav_focus = signal(None::<usize>);
+
+    // The sidebar's rows, as the traversal counts them: the fold and the
+    // playlists move the count, so every step reads it fresh.
+    let row_count = move || {
+        let flags = state.settings.get().flags;
+        sidebar::nav_rows(
+            &state.sidebar.get(),
+            flags.smart_lists_collapsed,
+            flags.advanced_mode,
+        )
+        .len()
+    };
+
+    let step_traversal = move |delta: i32| {
+        let at = match (focus.get(), nav_focus.get()) {
+            (Some(slot), _) => Some(super::Slot::Chrome(slot)),
+            (None, Some(row)) => Some(super::Slot::Sidebar(row)),
+            (None, None) => None,
+        };
+        match super::step(at, delta, row_count()) {
+            super::Slot::Chrome(slot) => {
+                focus.set(Some(slot));
+                nav_focus.set(None);
+            }
+            super::Slot::Sidebar(row) => {
+                focus.set(None);
+                nav_focus.set(Some(row));
+            }
+        }
+    };
+
+    on_key("space", move |_| match nav_focus.get() {
+        Some(row) => sidebar::activate(model, row),
+        None => model.with(|m| {
             let session = m.rt.playback.lock_or_recover();
             if session.playback_state == riff_backend::app::state::PlaybackState::Playing {
                 m.rt.ui_transport.pause();
             } else {
                 m.rt.ui_transport.resume();
             }
-        });
+        }),
+    });
+    on_key("enter", move |_| {
+        if let Some(row) = nav_focus.get() {
+            sidebar::activate(model, row);
+        }
     });
     on_key("mod+k", move |_| {
         focus.set(None);
+        nav_focus.set(None);
         search.focus();
     });
     on_key("escape", move |_| {
         search.blur();
         focus.set(None);
+        nav_focus.set(None);
     });
-    on_key("left", move |_| {
-        focus.update(|at| *at = Some(super::step(*at, -1)));
-    });
-    on_key("right", move |_| {
-        focus.update(|at| *at = Some(super::step(*at, 1)));
-    });
-    on_key("up", move |_| {
-        focus.update(|at| *at = Some(super::step(*at, -1)));
-    });
-    on_key("down", move |_| {
-        focus.update(|at| *at = Some(super::step(*at, 1)));
-    });
-    focus
+    on_key("left", move |_| step_traversal(-1));
+    on_key("right", move |_| step_traversal(1));
+    on_key("up", move |_| step_traversal(-1));
+    on_key("down", move |_| step_traversal(1));
+    (focus, nav_focus)
 }
 
 /// Launch: give the window the frame the store carries. A full position

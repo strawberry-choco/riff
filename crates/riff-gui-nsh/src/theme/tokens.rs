@@ -103,6 +103,12 @@ pub const INSPECTOR_WIDTH: f32 = 300.0;
 /// `--riff-playerbar-h` — 88 px bottom player bar.
 pub const PLAYERBAR_H: f32 = 88.0;
 
+/// The 1 px hairline border: the width every separator, panel edge and
+/// focus ring paints at. The egui shell spoke this width as a bare `1.0`
+/// at each call site; it is a token here so the shell's hairlines move
+/// together.
+pub const BORDER_HAIRLINE: f32 = 1.0;
+
 // --- Elevation (`--riff-shadow-*`) ---------------------------------------------
 //
 // The source speaks elevation in Tailwind box-shadows — a soft,

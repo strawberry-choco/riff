@@ -1,0 +1,10 @@
+   Compiling riff-tests v0.2.0 (C:\projects\riff\tests)
+    Finished `test` profile [optimized + debuginfo] target(s) in 33.28s
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 1 test
+N6 DRIVE: 20 steps of 2000pt over 50k rows: total 51220 ms, per-step 2561 ms (P0 upper bound ~3086 ms/step)
+test nsh_shell_tests::n6_scroll_drive_over_the_fixture_store ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 892 filtered out; finished in 52.91s
+

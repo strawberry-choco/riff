@@ -1,0 +1,9 @@
+== parent gate run N6: 2026-11-21T06:18:44Z
+fmt OK
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.92s
+test result: ok. 22 passed; 0 failed; 2 ignored; 0 measured; 870 filtered out; finished in 31.26s
+   Generated C:\projects\riff\target\doc\riff_backend\index.html and 10 other files
+== parent gate run N6 fix head: 2026-11-21T06:33:52Z
+fmt OK
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.90s
+test result: ok. 22 passed; 0 failed; 2 ignored; 0 measured; 870 filtered out; finished in 31.31s

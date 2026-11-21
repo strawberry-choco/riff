@@ -1,0 +1,21 @@
+   Compiling riff-tests v0.2.0 (C:\projects\riff\tests)
+warning: variable does not need to be mutable
+   --> tests\nsh_shell_tests.rs:990:9
+    |
+990 |     let mut reads_at = |rt: &mut riff_backend::composition::AppRuntime,
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `riff-tests` (test "integration") generated 1 warning (run `cargo fix --test "integration" -p riff-tests` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 17.41s
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 1 test
+N6 READS: depth-40000 cold(50) 10.8416ms warm(50) 3.1µs next-window(50) 10.455ms walk(100) 21.5667ms
+test nsh_shell_tests::n6_read_cost_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 893 filtered out; finished in 0.11s
+

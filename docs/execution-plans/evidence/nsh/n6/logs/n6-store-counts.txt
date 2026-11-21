@@ -1,0 +1,6 @@
+tracks: 50000
+artists(album artists): 100
+albums: 500
+genres: 10
+settings tables: ['app_settings']; restore ERR no such table: settings
+fixture restored: window_* NULL, maximized 0, smart_lists_collapsed 0 (row (None, None, None, None, 0, 0))

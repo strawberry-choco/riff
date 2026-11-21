@@ -1,0 +1,33 @@
+   Compiling riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+   Compiling riff-tests v0.2.0 (C:\projects\riff\tests)
+    Finished `test` profile [optimized + debuginfo] target(s) in 22.16s
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 24 tests
+test nsh_shell_tests::n6_read_cost_probe ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_shell_tests::n6_scroll_drive_over_the_fixture_store ... ignored, needs the synthetic 50k fixture store at RIFF_N3_STORE
+test nsh_bridge_tests::notices_reach_the_signal ... ok
+test nsh_bridge_tests::a_play_command_changes_the_playback_view_within_one_pump_tick ... ok
+test nsh_shell_tests::the_missing_marker_renders_on_a_synthetic_row ... ok
+test nsh_bridge_tests::a_volume_write_round_trips_to_the_store_through_commit_if_changed ... ok
+test nsh_shell_tests::space_toggles_playback_over_the_shell ... ok
+test nsh_bridge_tests::library_and_playlist_revisions_move_with_their_generations ... ok
+test nsh_shell_tests::cover_arrivals_swap_the_placeholder_for_the_image ... ok
+test nsh_shell_tests::a_row_press_selects_and_the_inspector_follows ... ok
+test nsh_shell_tests::the_shell_restores_the_persisted_frame_at_launch ... ok
+test nsh_shell_tests::the_playing_marker_paints_on_the_current_row ... ok
+test nsh_shell_tests::the_sidebar_primes_on_a_settled_library ... ok
+test nsh_shell_tests::the_stage_renders_the_virtual_track_list ... ok
+test nsh_shell_tests::a_selection_write_lands_the_land_on_library_field_set ... ok
+test nsh_shell_tests::the_fold_chevron_collapses_the_smart_lists ... ok
+test nsh_bridge_tests::a_queue_change_from_the_engine_lands_in_the_signal ... ok
+test nsh_shell_tests::the_frame_commit_is_the_shell_report_alone ... ok
+test nsh_shell_tests::the_prefetch_window_requests_ascending_in_a_bounded_window ... ok
+test nsh_bridge_tests::pause_resume_seek_round_trip_through_the_pump ... ok
+test nsh_shell_tests::the_shell_persists_its_window_frame_through_the_settings_commit ... ok
+test nsh_shell_tests::arrows_reach_every_section_and_enter_activates ... ok
+test nsh_shell_tests::the_traversal_reaches_the_list_and_enter_selects ... ok
+test nsh_shell_tests::the_selection_survives_recycling ... ok
+
+test result: ok. 22 passed; 0 failed; 2 ignored; 0 measured; 870 filtered out; finished in 31.99s
+

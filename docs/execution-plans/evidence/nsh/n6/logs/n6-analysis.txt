@@ -1,0 +1,22 @@
+# N6 CPU / RSS analysis (Windows 11 22631, x64, 12 logical cores, debug build, sampling alone)
+# sampler: n6/tools/sample.ps1 (Get-Process counters, 250 ms), percent of ONE core
+
+idle with the list live (covers settled): n=74 cpu median 0.00 max 5.93 (4/74 samples >1%) | WS median 73.15 max 73.36 min 71.88 MB
+at rest after the ~1100-row album walk (covers held): n=56 cpu median 0.00 max 11.61 (7/56 samples >1%) | WS median 191.02 max 191.05 min 191.02 MB
+wheel-driven scroll up/down during sampling: n=74 cpu median 11.70 max 72.24 (47/74 samples >1%) | WS median 215.32 max 238.96 min 191.02 MB
+
+Read-cost probe (n6-read-cost.log, pure SessionViews reads at depth 40000, no UI):
+  cold 50-row window 10.84 ms (one page fetch); warm window 3.1 us/call;
+  next window fetch 10.46 ms; 100-row walk spanning two new windows 21.57 ms.
+  P0 comparison: scattered track_row ~10.6 ms/call; sequential ~120 us/call.
+
+Headless drive (n6-headless-drive.log): 20 steps of 2000 pt over 50k rows after a
+  jump to 40000: total 51220 ms, 2561 ms/step, against the P0 upper bound of ~3086
+  ms/step measured with the same protocol on the direct per-row pattern. The read
+  probe shows reads are no longer the per-step driver: the step wall time is the
+  headless engine's own layout+render machinery.
+
+Cover walk: 30 rounds x 12 wheel notches (~1100 rows, ~215 albums) after the jump;
+  the View half held its 200-entry cap (evictions reported to the decision half,
+  the inspector's card re-requested and re-rendered after eviction - n6-covers.png);
+  RSS 73.15 MB idle -> 191.02 MB with the walk's covers held in nsh's image cache.

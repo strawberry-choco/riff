@@ -1,0 +1,1274 @@
+   Compiling riff-gui-nsh v0.2.0 (C:\projects\riff\crates\riff-gui-nsh)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.74s
+     Running unittests src\lib.rs (target\debug\deps\riff_backend-918b26270448e8dd.exe)
+
+running 12 tests
+test app::events::issue01_playback_notices::playback_notice_surfaces_as_typed_notice_with_playback_source_and_error_severity ... ok
+test app::events::issue04_store_events::store_generation_value_moves_on_bump ... ok
+test app::events::issue04_events::library_change_events_are_coalesced ... ok
+test app::events::issue04_store_events::store_generation_handles_are_independent ... ok
+test app::state::tests::scan_prefs_from_the_row_carries_all_three_columns ... ok
+test app::state::tests::the_scan_defaults_agree_at_every_site ... ok
+test app::state::tests::scan_prefs_default_resolves_the_canonical_extensions ... ok
+test app::pass_service::tests::the_stop_lever_ends_an_idle_worker ... ok
+test native_dependency_sweep::tests::no_symbol_names_a_symphonia_type ... ok
+test app::pass_service::tests::cancel_stops_a_running_pass_which_keeps_its_committed_batches ... ok
+test app::pass_service::tests::progress_counts_up_while_the_pass_runs ... ok
+test app::pass_service::tests::a_submitted_pass_runs_and_its_outcome_is_polled ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_gui-43aa406d1cfd672e.exe)
+
+running 12 tests
+test ui::app::browser_pane::tests::number_modes_are_the_identity_and_its_exact_reverse ... ok
+test ui::app::tag_editor::tests::a_peak_is_parsed_but_not_db_clamped ... ok
+test ui::app::tag_editor::tests::a_non_finite_gain_is_rejected_rather_than_clamped ... ok
+test ui::app::tag_editor::tests::a_gain_is_clamped_into_the_51_db_range ... ok
+test ui::notifications::tests::a_changed_message_or_source_shows_again ... ok
+test ui::app::browser_pane::tests::title_modes_are_case_insensitive_and_stable_on_ties ... ok
+test ui::app::tag_editor::tests::a_track_save_writes_all_four_replaygain_buffers ... ok
+test ui::app::tag_editor::tests::an_album_save_writes_only_the_dirty_replaygain_buffers ... ok
+test ui::app::browser_pane::tests::a_sort_flip_keeps_every_order_entry_pointing_at_the_same_row ... ok
+test ui::notifications::tests::a_repeat_of_the_last_notice_is_swallowed ... ok
+test ui::selection::tests::all_names_every_variant_exactly_once ... ok
+test ui::selection::tests::every_tag_fields_index_is_its_position_in_all ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\riff-a0a28ac7889fed1b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\column_dispatch_tests.rs (target\debug\deps\column_dispatch_tests-0987d21a608e9caa.exe)
+
+running 4 tests
+test a_root_and_a_drill_differ_only_in_the_data_they_state ... ok
+test the_guard_reads_the_identity_and_the_action_and_nothing_else ... ok
+test a_selecting_action_notes_the_columns_own_slot_and_nothing_else_does ... ok
+test the_six_entity_columns_state_these_identities ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-4e05c3c21411bf4b.exe)
+
+running 10 tests
+test a_cleared_view_makes_every_arrival_a_miss_again ... ok
+test a_cover_that_arrived_at_hero_size_is_a_miss_for_a_thumbnail_request ... ok
+test forty_asks_while_one_is_outstanding_are_still_one_request ... ok
+test a_first_ask_sends_the_identity_the_box_and_the_path_and_marks_that_key ... ok
+test an_artless_answer_records_no_arrival_so_the_row_can_ask_again ... ok
+test a_folder_row_asks_for_its_own_directory_once_and_paints_it_once_it_has_arrived ... ok
+test an_answer_that_arrives_drops_the_marker_and_its_pixels_come_back_to_the_view ... ok
+test an_arrival_the_view_dropped_is_a_miss_again ... ok
+test dropping_every_marker_lets_a_row_ask_again_immediately ... ok
+test the_in_flight_set_stays_within_its_cap ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\frame_tests.rs (target\debug\deps\frame_tests-628dcea4e9765903.exe)
+
+running 44 tests
+test a_cancelled_pass_settles_without_a_notification ... ok
+test a_drops_refusal_composes_onto_the_scan_line_like_any_library_notice ... ok
+test a_playlist_row_delete_and_a_cancelled_prompt_are_two_different_things ... ok
+test a_completed_scan_reports_the_roots_readiness ... ok
+test a_disabled_automatic_pass_never_follows_a_scan ... ok
+test a_failed_pass_announces_an_error_notification ... ok
+test a_completed_scan_announces_one_notification ... ok
+test a_maximize_toggle_decides_against_the_flag_the_report_carries ... ok
+test a_frame_without_a_drop_decides_nothing_about_drops ... ok
+test a_playback_error_announces_a_notification ... ok
+test a_cover_that_arrived_is_handed_to_the_view_half_not_uploaded_here ... ok
+test a_non_empty_drop_becomes_a_register_decision_carrying_the_candidates ... ok
+test a_running_pass_polls_its_progress_and_a_settled_pass_its_outcome ... ok
+test a_settled_thumbnail_cache_clear_is_decided_by_the_frame ... ok
+test a_sidebar_navigation_clears_the_opened_list_and_the_search ... ok
+test a_reduce_motion_flip_reinstalls_the_style_but_does_not_evict_covers ... ok
+test a_scan_update_cannot_erase_a_playback_error ... ok
+test delete_raises_the_confirmation_naming_the_list_and_writes_nothing ... ok
+test ctrl_k_raises_a_one_shot_focus_request_the_titlebar_consumes ... ok
+test a_sidebar_navigation_closes_the_stage_editor_and_discards_the_draft ... ok
+test an_enabled_automatic_pass_follows_every_completed_scan ... ok
+test duplicating_a_custom_list_asks_the_store_once_and_opens_the_copy ... ok
+test folding_the_smart_lists_section_closes_the_list_it_opened ... ok
+test folding_the_smart_lists_section_closes_an_open_custom_list_and_keeps_the_playlist ... ok
+test frame_output_carries_decisions_and_no_egui_handles ... ok
+test opening_a_built_in_smart_list_closes_an_open_custom_list ... ok
+test opening_a_custom_smart_list_opens_it_over_the_library_and_closes_the_playlist ... ok
+test rename_opens_the_prompt_prefilled_with_the_painted_name ... ok
+test scan_progress_never_announces ... ok
+test the_close_rule_is_assertable_off_macos ... ok
+test the_compose_runs_after_the_drains_not_before_them ... ok
+test the_create_prompt_commits_through_the_store_and_opens_the_new_playlist ... ok
+test the_custom_x_hides_when_the_preference_is_off ... ok
+test the_event_inbox_drains_before_anything_paints ... ok
+test the_new_smart_playlist_route_opens_the_editor_on_the_stage ... ok
+test the_os_title_and_tray_tooltip_push_once_per_identity_change ... ok
+test the_palette_is_offered_once_at_init_and_not_again_on_a_quiet_frame ... ok
+test the_panel_slots_are_ordered_titlebar_then_bar_then_stage ... ok
+test the_preference_off_leaves_the_notification_list_empty ... ok
+test the_rename_prompt_commits_through_the_smart_playlist_rename_call ... ok
+test the_row_edit_route_opens_the_stage_editor ... ok
+test the_search_query_rides_back_in_the_report ... ok
+test the_titlebar_slot_lands_before_the_sidebar_reads_the_view ... ok
+test the_write_back_commits_preferences_and_only_the_ui_owned_fields ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\menu_transform_tests.rs (target\debug\deps\menu_transform_tests-ffcbab2eff22482a.exe)
+
+running 4 tests
+test every_business_sort_mode_displayed_today_round_trips_through_the_display_key ... ok
+test every_display_sort_member_maps_to_a_business_member ... ok
+test playlist_identity_keys_round_trip_across_the_display_boundary ... ok
+test track_identity_keys_round_trip_across_the_display_boundary ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_box_tests.rs (target\debug\deps\rule_box_tests-7030938859d7a7ea.exe)
+
+running 13 tests
+test a_box_can_be_nested_in_a_box_and_each_offers_its_own_combine ... ok
+test a_self_drop_and_an_out_of_range_gesture_change_nothing ... ok
+test a_saved_tree_loads_into_the_draft_and_spells_back_identically ... ok
+test a_tree_deeper_than_the_cap_loads_and_spells_back_untouched ... ok
+test the_editor_imposes_no_limit_on_the_number_of_rules ... ok
+test a_nested_boxes_sibling_list_reorders_on_its_own ... ok
+test removing_a_box_removes_everything_inside_it ... ok
+test an_empty_box_converts_as_empty_and_is_not_dropped ... ok
+test removing_a_rule_leaves_its_siblings_positions_intact ... ok
+test rules_and_boxes_interleave_in_one_sibling_order ... ok
+test moving_a_child_renumbers_the_one_interleaved_sibling_order ... ok
+test a_half_filled_row_makes_the_conversion_refuse_rather_than_drop ... ok
+test the_seven_level_cap_gates_the_offer_and_nothing_else ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_date_tests.rs (target\debug\deps\rule_date_tests-634f76b49adcdef1.exe)
+
+running 12 tests
+test a_day_window_ignores_the_fixed_date_buffers_and_vice_versa ... ok
+test a_day_window_is_a_whole_number_of_days ... ok
+test a_fixed_date_stores_the_typed_day_and_time_zone_less ... ok
+test a_history_date_still_answers_is_missing_with_no_control_at_all ... ok
+test a_half_typed_fixed_date_spells_no_value ... ok
+test a_stored_day_window_reopens_as_the_same_rule ... ok
+test a_stored_fixed_date_reopens_as_the_same_rule ... ok
+test a_stored_fixed_date_shows_padded_buffers_of_the_exact_stored_shape ... ok
+test the_day_window_lands_in_the_drafts_rule_as_a_whole_day_count ... ok
+test an_impossible_fixed_date_spells_no_value ... ok
+test a_partly_typed_date_reports_the_rows_own_gap_not_an_error ... ok
+test an_empty_day_window_wants_a_value_rather_than_spelling_one ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_row_tests.rs (target\debug\deps\rule_row_tests-38c12e9eccaf058c.exe)
+
+running 33 tests
+test a_blank_row_names_the_field_as_the_missing_half ... ok
+test a_picker_open_and_close_move_the_rows_memo ... ok
+test an_absence_test_is_a_whole_rule_with_no_value_at_all ... ok
+test a_field_with_no_comparison_names_the_comparison ... ok
+test a_test_that_draws_a_value_names_the_value_when_nothing_is_typed ... ok
+test a_value_stray_on_an_absence_test_is_refused_by_the_row_and_by_the_rule ... ok
+test a_text_field_is_never_offered_an_arithmetic_test_and_a_number_never_a_needle ... ok
+test a_needle_is_the_text_typed_but_whitespace_alone_is_no_answer ... ok
+test a_duration_too_precise_or_too_huge_to_be_whole_milliseconds_is_refused ... ok
+test a_year_and_a_play_count_are_whole_numbers_and_nothing_else ... ok
+test an_empty_duration_box_reads_as_zero_and_three_empty_ones_as_no_value ... ok
+test a_stored_rule_round_trips_through_the_draft_unchanged ... ok
+test an_empty_date_row_has_a_missing_value_half ... ok
+test applying_the_same_intent_twice_changes_nothing ... ok
+test choosing_a_comparison_rebuilds_the_value_when_the_date_idea_switches ... ok
+test choosing_a_field_keeps_a_comparison_the_new_field_also_permits ... ok
+test choosing_a_field_rebuilds_the_value_when_the_widget_idea_changes ... ok
+test choosing_a_field_resets_a_comparison_the_new_field_does_not_permit ... ok
+test choosing_a_field_that_cannot_be_absent_drops_a_negated_absence_test ... ok
+test every_field_offers_exactly_the_comparisons_its_catalog_row_permits ... ok
+test exactly_six_fields_are_pickable_and_they_are_the_four_text_and_two_numeric_ones ... ok
+test field_labels_are_the_catalogs_display_names_with_album_artist_included ... ok
+test gap_and_is_fully_formed_never_disagree_across_the_catalog ... ok
+test is_and_equal_to_are_one_meaning_under_two_ids_and_each_field_shows_its_own ... ok
+test is_not_missing_is_offered_only_where_the_catalog_says_a_value_can_be_absent ... ok
+test is_not_missing_leaves_the_row_as_is_missing_plus_negation ... ok
+test is_not_missing_sits_beside_is_missing_rather_than_at_the_end_of_the_list ... ok
+test not_inverts_any_test_without_touching_the_stored_comparison ... ok
+test not_survives_a_comparison_change_because_it_is_orthogonal ... ok
+test picking_is_missing_explicitly_clears_a_negation_the_list_already_carried ... ok
+test seconds_carry_milliseconds_and_the_split_round_trips_exactly ... ok
+test three_boxes_merge_into_one_whole_millisecond_value ... ok
+test value_widgets_come_from_the_catalog_per_field_and_per_comparison ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\scroll_memory_tests.rs (target\debug\deps\scroll_memory_tests-49ec12ee57b362fa.exe)
+
+running 11 tests
+test a_committed_library_change_stales_every_saved_offset ... ok
+test a_section_root_restores_its_own_slot_and_leaves_another_section_at_the_top ... ok
+test each_slot_keys_eguis_state_by_its_own_identity ... ok
+test re_selecting_the_same_entity_still_resets_the_drill_column ... ok
+test a_sort_flip_forces_one_top_reset_for_its_own_drill_slot ... ok
+test a_content_change_resets_only_the_list_whose_content_moved ... ok
+test one_selection_resets_every_drill_column_that_can_be_on_screen ... ok
+test the_module_decides_which_slots_selection_bookkeeping_belongs_in ... ok
+test an_empty_event_batch_leaves_saved_offsets_current ... ok
+test a_drill_column_resets_once_per_selection_and_then_keeps_eguis_state ... ok
+test a_recorded_section_keeps_the_content_it_was_saved_under ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\smart_playlists_editor_tests.rs (target\debug\deps\smart_playlists_editor_tests-1fc06f7c1e8f0208.exe)
+
+running 26 tests
+test a_committed_save_keeps_the_draft_open_and_clean ... ok
+test a_new_draft_starts_clean_with_one_blank_rule ... ok
+test an_unreadable_row_blocks_the_count_ahead_of_a_half_filled_one ... ok
+test a_loaded_tree_spells_back_the_tree_that_was_stored ... ok
+test a_failed_enumeration_read_keeps_the_draft ... ok
+test a_reloaded_draft_starts_with_no_held_match_line ... ok
+test a_half_filled_row_blocks_the_count_and_names_what_is_missing ... ok
+test an_unreadable_rule_lands_inside_the_box_a_box_only_path_names ... ok
+test an_unreadable_rule_is_not_a_rule_and_spells_no_tree ... ok
+test a_new_draft_survives_the_reconcile_while_the_page_is_open ... ok
+test cancel_discards_the_whole_draft ... ok
+test an_unreadable_rule_blocks_save_is_pointed_at_and_survives_deletion ... ok
+test a_freshly_opened_list_is_clean_and_every_edit_is_derived ... ok
+test committing_the_previous_value_back_spells_the_previous_tree ... ok
+test opening_another_list_replaces_the_draft_wholesale ... ok
+test save_names_the_half_filled_row_and_what_is_missing ... ok
+test save_prepares_the_name_and_the_whole_tree_in_one_plan ... ok
+test save_refuses_a_missing_or_builtin_name ... ok
+test the_committed_tree_of_a_loaded_draft_is_the_stored_tree ... ok
+test the_match_line_says_the_count_or_the_reason_but_never_zero ... ok
+test the_reconcile_adopts_a_renamed_rows_name_only_over_an_untouched_buffer ... ok
+test the_reconcile_drops_the_draft_only_where_it_no_longer_belongs ... ok
+test the_refusal_points_at_the_row_that_is_missing_something ... ok
+test the_stores_refusal_is_carried_verbatim ... ok
+test typing_a_value_changes_no_committed_answer ... ok
+test unreadable_rules_keep_the_stored_gaps_around_the_typed_children ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-f6e4eb9e52154d02.exe)
+
+running 4 tests
+test test_the_color_sweep_flags_derivations_but_not_channel_reads ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+test test_view_code_sets_no_spacing_of_its_own ... ok
+test test_view_code_contains_no_hardcoded_color_literals ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_components-c8296ec239c23d50.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\button_wash_tests.rs (target\debug\deps\button_wash_tests-dcee61159ed46689.exe)
+
+running 2 tests
+test test_the_accent_and_destructive_washes_are_pure_functions_of_their_tween_values ... ok
+test test_only_the_accent_and_destructive_washes_tween ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+
+     Running tests\ghost_icon_button_tests.rs (target\debug\deps\ghost_icon_button_tests-4aaaee1ae41c6128.exe)
+
+running 1 test
+test test_ghost_icon_buttons_show_tooltips_on_hover ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\option_list_tests.rs (target\debug\deps\option_list_tests-04c1fff4fef6d6c3.exe)
+
+running 5 tests
+test test_the_current_choice_is_marked_in_the_a11y_tree ... ok
+test test_options_are_tab_reachable_and_enter_selects_the_focused_option ... ok
+test test_clicking_an_option_reports_its_key_and_a_later_click_moves_the_choice ... ok
+test test_two_selectors_in_one_pane_keep_their_own_identity ... ok
+test test_a_long_list_scrolls_within_the_host_pane_and_long_labels_truncate ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\press_feedback_tests.rs (target\debug\deps\press_feedback_tests-d3266147314f2c2e.exe)
+
+running 3 tests
+test test_a_pressed_text_button_paints_a_state_distinct_from_hover ... ok
+test test_a_press_drops_the_text_button_hover_stroke ... ok
+test test_a_pressed_ghost_icon_button_paints_the_active_fill ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+     Running tests\seek_affordance_tests.rs (target\debug\deps\seek_affordance_tests-c7fb95f396926fba.exe)
+
+running 3 tests
+test test_dragged_track_thickens_on_the_same_span_and_centre ... ok
+test test_seek_thickness_and_thumb_are_ordered_tokens_in_the_seek_store ... ok
+test test_seek_bar_paints_no_thumb_at_rest_and_keeps_the_idle_thickness ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.98s
+
+     Running tests\text_field_tests.rs (target\debug\deps\text_field_tests-affe9577f8a42c19.exe)
+
+running 1 test
+test test_text_field_shares_clear_affordance_and_focus_ring ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-3d0ea8af9482b182.exe)
+
+running 4 tests
+test test_the_color_sweep_flags_derivations_but_not_channel_reads ... ok
+test test_view_code_sets_no_spacing_of_its_own ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+test test_view_code_contains_no_hardcoded_color_literals ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_nsh-42e71c2c7e58ff07.exe)
+
+running 20 tests
+test components::track_row::tests::an_unknown_duration_reads_as_a_dash ... ok
+test model::tests::a_re_arrival_replaces_without_growth ... ok
+test shell::sidebar::tests::nav_rows_carry_every_sections_counts ... ok
+test model::tests::the_list_window_answers_its_covered_range_only ... ok
+test screens::inspector::tests::the_empty_panel_chips_nothing ... ok
+test shell::player_bar::tests::the_clock_reads_minutes_seconds ... ok
+test shell::sidebar::tests::advanced_mode_gates_the_two_relocated_lists ... ok
+test shell::layout::tests::a_partial_geometry_has_no_placement ... ok
+test shell::sidebar::tests::row_ids_slug_their_labels ... ok
+test shell::layout::tests::a_full_geometry_round_trips_through_a_placement ... ok
+test screens::inspector::tests::the_last_played_line_reads_ago_words_and_never ... ok
+test model::tests::the_byte_budget_evicts_oldest_first ... ok
+test shell::sidebar::tests::the_fold_removes_the_smart_rows_only ... ok
+test shell::sidebar::tests::the_stamp_reads_ago_words_and_never ... ok
+test model::tests::the_view_half_evicts_to_its_cap_and_reports_the_drops ... ok
+test shell::tests::a_folded_sidebar_leaves_the_chrome_ring_intact ... ok
+test shell::tests::an_empty_listing_has_no_list_segment ... ok
+test shell::tests::the_ring_wraps_through_every_slot_in_both_directions ... ok
+test shell::tests::the_traversal_walks_chrome_into_the_sidebar_and_back ... ok
+test shell::tests::the_traversal_walks_the_sidebar_into_the_list_and_back ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\riff_nsh-3f258684a351778d.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-39b53d732d544153.exe)
+
+running 10 tests
+test a_cleared_view_makes_every_arrival_a_miss_again ... ok
+test an_artless_answer_records_no_arrival_so_the_row_can_ask_again ... ok
+test a_cover_that_arrived_at_hero_size_is_a_miss_for_a_thumbnail_request ... ok
+test an_answer_that_arrives_drops_the_marker_and_its_pixels_come_back_to_the_view ... ok
+test an_arrival_the_view_dropped_is_a_miss_again ... ok
+test dropping_every_marker_lets_a_row_ask_again_immediately ... ok
+test a_first_ask_sends_the_identity_the_box_and_the_path_and_marks_that_key ... ok
+test a_folder_row_asks_for_its_own_directory_once_and_paints_it_once_it_has_arrived ... ok
+test forty_asks_while_one_is_outstanding_are_still_one_request ... ok
+test the_in_flight_set_stays_within_its_cap ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-4f4d3a00ed2ee67b.exe)
+
+running 4 tests
+test nsh_json_agrees_with_the_bootstrap ... ok
+test the_manifest_keeps_the_nsh_frontend_out_of_egui ... ok
+test the_registry_ships_the_brand_mark ... ok
+test the_root_carries_the_theme_file ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-c8a4358e354c047b.exe)
+
+running 13 tests
+test every_palette_slot_resolves_in_all_four_variants ... ok
+test the_brand_gradient_runs_light_to_deep ... ok
+test high_contrast_is_a_token_set_over_its_base ... ok
+test light_mirrors_dark_and_brand_is_family_invariant ... ok
+test the_four_variants_are_distinct ... ok
+test the_light_exceptions_match_the_egui_store ... ok
+test the_dark_slots_match_the_egui_store ... ok
+test the_token_scale_matches_the_egui_store ... ok
+test every_slot_is_listed ... ok
+test the_shadows_match_the_egui_store ... ok
+test reduce_motion_is_not_a_color ... ok
+test the_variant_flags_resolve ... ok
+test the_icon_set_is_complete ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-7ecee2015e32c91b.exe)
+
+running 7 tests
+test test_the_color_sweep_flags_constructions_and_derivations ... ok
+test test_the_spacing_sweep_flags_numeric_gaps_only ... ok
+test test_the_dimension_sweep_flags_f32_consts_only ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+test test_the_scan_covers_the_non_store_sources ... ok
+test test_view_code_sets_no_spacing_by_number ... ok
+test test_view_code_contains_no_color_constructions ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_theme-0099db518e86b840.exe)
+
+running 8 tests
+test theme::tests::drop_hover_dash_rides_the_brand_per_family ... ok
+test theme::tests::hover_duration_resolves_the_reduce_motion_axis ... ok
+test theme::tests::drop_hover_veil_is_one_coverage_over_the_line_bases ... ok
+test theme::tests::drop_overlay_inset_is_the_product_decision ... ok
+test theme::tests::animation_time_resolves_the_reduce_motion_axis ... ok
+test theme::tests::style_from_publishes_the_tempo_reduce_motion_selects ... ok
+test theme::tests::resolve_is_two_axis_and_the_palette_is_motion_blind ... ok
+test theme::tests::styled_font_in_agrees_with_styled_font ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-32b140f8347b7b83.exe)
+
+running 4 tests
+test test_the_color_sweep_flags_derivations_but_not_channel_reads ... ok
+test test_view_code_contains_no_hardcoded_color_literals ... ok
+test test_view_code_sets_no_spacing_of_its_own ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_infra-6d6417f27f9621e0.exe)
+
+running 10 tests
+test audio::audio_output::port_surface_tests::set_replaygain_through_the_port_reaches_the_callback ... ok
+test audio::audio_output::port_surface_tests::set_volume_through_the_port_reaches_the_callback ... ok
+test audio::audio_output::port_surface_tests::stop_through_the_port_on_an_unstarted_output_is_a_no_op ... ok
+test audio::audio_output::write_policy_tests::the_stall_deadline_is_five_hundred_milliseconds ... ok
+test audio::audio_output::write_policy_tests::a_write_that_fits_the_ring_takes_the_whole_chunk ... ok
+test audio::decoder::registry_tests::every_indexed_format_resolves_a_decoder ... ok
+test audio::decoder::registry_tests::new_builds_the_registry_the_composition_root_used_to_build ... ok
+test audio::audio_output::write_policy_tests::a_write_without_an_initialized_stream_reports_a_failure_not_a_short_write ... ok
+test audio::audio_output::port_surface_tests::start_through_the_port_reports_a_failure_the_way_it_always_has ... ok
+test audio::audio_output::write_policy_tests::a_write_into_a_full_ring_reports_a_stall_after_the_deadline ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests\mod.rs (target\debug\deps\integration-40edadd0ee83f195.exe)
+
+running 267 tests
+test adapter_tests::test_audio_file_scanner_new ... ok
+test adapter_tests::test_decode_thumbnail_fits_supplied_bytes_without_reading_a_file ... ok
+test adapter_tests::test_decode_thumbnail_leaves_a_source_that_already_fits_byte_for_byte ... ok
+test adapter_tests::test_decode_thumbnail_reports_a_container_it_cannot_decode_as_a_cover_load_error ... ok
+test adapter_tests::test_encode_thumbnail_stores_png_only_for_a_cover_that_carries_alpha ... ok
+test adapter_tests::test_debounced_audio_paths_filters_and_dedupes_a_batch ... ok
+test adapter_tests::test_encode_thumbnail_round_trips_a_cover_through_decode_thumbnail ... ok
+test adapter_tests::test_filesystem_watcher_new ... ok
+test adapter_tests::test_debounced_audio_paths_keeps_every_canonical_extension ... ok
+test adapter_tests::test_image_cover_loader_new ... ok
+test adapter_tests::test_load_cover_fits_a_tall_source_inside_the_requested_box ... ok
+test adapter_tests::test_load_cover_decodes_embedded_png_to_rgba ... ok
+test adapter_tests::test_load_cover_fits_a_wide_source_inside_the_requested_box ... ok
+test adapter_tests::test_load_cover_has_nothing_to_decode_for_a_track_without_artwork ... ok
+test adapter_tests::test_load_cover_never_upscales_a_source_smaller_than_the_box ... ok
+test adapter_tests::test_load_cover_reports_a_container_it_cannot_decode_as_a_cover_load_error ... ok
+test adapter_tests::test_load_cover_reports_truncated_artwork_as_a_cover_load_error ... ok
+test adapter_tests::test_lofty_metadata_reader_new ... ok
+test adapter_tests::test_load_cover_reports_an_unreadable_cover_file_as_a_cover_load_error ... ok
+test adapter_tests::test_load_cover_decodes_a_filesystem_cover_file ... ok
+test adapter_tests::test_parse_replaygain_gain_accepts_bare_number ... ok
+test adapter_tests::test_parse_replaygain_gain_rejects_garbage ... ok
+test adapter_tests::test_parse_replaygain_gain_strips_db_suffix ... ok
+test adapter_tests::test_lofty_writer_missing_file_returns_graceful_error ... ok
+test adapter_tests::test_lofty_writer_unsupported_file_returns_graceful_error ... ok
+test adapter_tests::test_symphonia_decoder_new ... ok
+test adapter_tests::test_metadata_reader_uses_lofty_on_a_format_lofty_handles ... ok
+test adapter_tests::test_reader_leaves_replaygain_album_gain_none_when_the_file_carries_no_tag ... ok
+test adapter_tests::test_metadata_reader_falls_back_to_symphonia_on_adts_with_false_sync ... ok
+test adapter_tests::test_reader_parses_replaygain_album_gain_from_seeded_file ... ok
+test adapter_tests::test_lofty_writer_extended_fields_round_trip ... ok
+test adapter_tests::test_lofty_writer_full_edit_lands_on_disk_and_reads_back ... ok
+test adapter_tests::test_reader_parses_replaygain_album_peak_from_seeded_file ... ok
+test adapter_tests::test_scanner_indexes_only_the_enabled_formats ... ok
+test loudness_tests::test_track_loudness_is_copy_and_comparable ... ok
+test adapter_tests::test_writer_repairs_a_malformed_comment_language_and_writes_replaygain ... ok
+test adapter_tests::test_scanner_skips_hidden_entries_by_default_and_includes_them_when_asked ... ok
+test adapter_tests::test_lofty_writer_partial_edit_preserves_untouched_tags_on_disk ... ok
+test loudness_tests::test_analyzer_unreadable_file_returns_a_graceful_error ... ok
+test adapter_tests::test_writer_neither_writes_nor_clobbers_replaygain_tags ... ok
+test loudness_tests::test_analyzer_falls_back_to_unity_gain_for_a_silent_file ... ok
+test loudness_tests::test_analyzer_satisfies_the_port_through_a_trait_object ... ok
+test loudness_tests::test_analyzer_measures_a_quieter_sine_at_the_reference_offset ... ok
+test loudness_tests::test_analyzer_measures_a_full_scale_sines_gain_and_true_peak ... ok
+test loudness_tests::test_analyzer_album_aggregate_is_energy_weighted_with_max_peak ... ok
+test replaygain_tags_tests::test_reader_opus_falls_back_to_rg_convention_gains ... ok
+test replaygain_tags_tests::test_reader_reads_r128_convention_gains_from_opus ... ok
+test replaygain_tags_tests::test_writer_empty_replaygain_write_is_a_no_op ... ok
+test replaygain_tags_tests::test_writer_replaygain_round_trips_through_riffs_reader ... ok
+test replaygain_tags_tests::test_writer_replaygain_write_does_not_clobber_untouched_values ... ok
+test replaygain_tags_tests::test_writer_writes_r128_convention_gains_on_opus ... ok
+test replaygain_tags_tests::test_writer_writes_rg_convention_strings_on_non_opus ... ok
+test playlist_name_uniqueness_tests::a_refusal_is_one_invalid_operation_and_moves_nothing ... ok
+test playlist_name_uniqueness_tests::creating_under_a_name_no_other_row_holds_is_allowed ... ok
+test playlist_name_uniqueness_tests::renaming_onto_a_custom_smart_playlist_name_is_refused ... ok
+test playlist_name_uniqueness_tests::a_row_is_exempt_from_its_own_name ... ok
+test playlist_name_uniqueness_tests::renaming_onto_a_name_another_playlist_holds_is_refused ... ok
+test playlist_name_uniqueness_tests::creating_onto_a_name_a_playlist_already_holds_is_refused ... ok
+test playlist_name_uniqueness_tests::the_comparison_trims_before_it_folds ... ok
+test playlist_name_uniqueness_tests::creating_onto_a_custom_smart_playlist_name_is_refused ... ok
+test rule_tree_generator_tests::test_a_generated_tree_that_cannot_be_computed_reports_a_reason_not_an_empty_window ... ok
+test playlist_name_uniqueness_tests::a_non_latin_name_folds_both_ways_where_sql_lower_cannot ... ok
+test smart_playlist_tables_tests::test_migration_020_accepts_every_id_the_rule_catalog_legalises ... ok
+test smart_playlist_tables_tests::test_migration_020_adds_no_explicit_index ... ok
+test playlist_name_uniqueness_tests::the_case_of_a_held_name_is_invisible_to_the_rule ... ok
+test smart_playlist_tables_tests::test_deleting_a_parent_box_cascades_through_the_self_referential_link ... ok
+test smart_playlist_tables_tests::test_deleting_a_playlist_cascades_boxes_descendant_boxes_and_every_rule ... ok
+test smart_playlist_tables_tests::test_migration_020_creates_exactly_the_three_rule_tables ... ok
+test smart_playlist_tables_tests::test_migration_020_is_recorded_beside_the_shipped_history ... ok
+test smart_playlist_tables_tests::test_migration_020_enforces_the_cascade_only_foreign_keys ... ok
+test smart_playlist_tables_tests::test_migration_020_refuses_ids_and_flags_outside_its_check_lists ... ok
+test smart_playlist_writes_tests::a_half_filled_rule_is_refused_naming_the_field_it_is_about ... ok
+test smart_playlist_tables_tests::test_migration_020_leaves_the_value_column_plain_text ... ok
+test smart_playlist_writes_tests::a_fresh_store_enumerates_no_custom_lists ... ok
+test smart_playlist_tables_tests::test_play_count_and_favorite_have_no_missing_value_spelling ... ok
+test smart_playlist_writes_tests::a_delete_leaves_the_rest_enumerated_untouched ... ok
+test smart_playlist_tables_tests::test_migration_020_upgrades_an_existing_store_without_touching_its_data ... ok
+test smart_playlist_tables_tests::test_reopening_a_store_written_by_this_build_reapplies_nothing ... ok
+test smart_playlist_writes_tests::a_new_list_under_a_name_a_sidebar_row_holds_is_refused_at_the_save ... ok
+test smart_playlist_writes_tests::a_rename_of_a_deleted_list_commits_a_no_op_and_bumps_nothing ... ok
+test smart_playlist_writes_tests::a_rename_refuses_a_name_any_sidebar_row_holds_and_accepts_a_free_one ... ok
+test smart_playlist_writes_tests::a_playlist_name_cannot_forge_a_smart_playlist_id ... ok
+test smart_playlist_writes_tests::a_re_save_and_a_rename_move_neither_a_list_nor_its_place ... ok
+test smart_playlist_writes_tests::a_rule_in_a_nested_box_reports_the_box_it_hangs_in ... ok
+test smart_playlist_writes_tests::a_refused_write_bumps_nothing_and_emits_nothing ... ok
+test smart_playlist_writes_tests::a_refusal_surfaces_as_the_one_error_variant_double_prefixed ... ok
+test smart_playlist_writes_tests::a_save_onto_a_name_another_sidebar_row_holds_writes_neither_the_name_nor_the_tree ... ok
+test rule_tree_generator_tests::test_the_box_level_fold_is_pinned_by_the_engine_depth_it_spends ... ok
+test smart_playlist_writes_tests::a_save_refused_by_its_tree_writes_no_name_either ... ok
+test smart_playlist_writes_tests::a_saved_tree_survives_reopen ... ok
+test smart_playlist_writes_tests::a_saved_tree_reads_back_exactly_as_authored ... ok
+test smart_playlist_writes_tests::a_second_save_persists_the_name_and_replaces_the_tree_wholesale ... ok
+test smart_playlist_writes_tests::a_tree_with_no_rule_is_refused_and_nothing_is_stored ... ok
+test smart_playlist_writes_tests::a_value_this_build_cannot_re_read_for_its_field_is_unreadable_not_guessed ... ok
+test smart_playlist_writes_tests::deleting_a_custom_list_touches_no_playlist ... ok
+test smart_playlist_writes_tests::any_box_with_no_children_is_refused_the_root_box_included ... ok
+test smart_playlist_writes_tests::an_unreadable_rule_reads_back_beside_the_tree_and_the_rest_of_it_is_intact ... ok
+test smart_playlist_writes_tests::deleting_a_list_removes_every_box_every_descendant_box_and_every_rule ... ok
+test smart_playlist_writes_tests::duplicating_a_list_that_does_not_exist_writes_and_bumps_nothing ... ok
+test smart_playlist_writes_tests::duplicating_copies_the_tree_under_copy_of_x_with_fresh_ids_and_no_shared_rule ... ok
+test smart_playlist_writes_tests::is_not_missing_is_stored_as_is_missing_with_the_negation_set ... ok
+test smart_playlist_writes_tests::every_custom_list_write_bumps_the_playlist_generation_once_and_no_library_move ... ok
+test smart_playlist_writes_tests::null_is_stored_only_for_is_missing ... ok
+test smart_playlist_writes_tests::re_saving_or_renaming_a_list_under_its_own_name_never_refuses_it_against_itself ... ok
+test smart_playlist_writes_tests::saving_a_draft_that_still_holds_the_unreadable_rule_is_refused_naming_it ... ok
+test smart_playlist_writes_tests::saving_against_a_list_that_was_deleted_under_the_draft_is_refused ... ok
+test smart_playlist_writes_tests::the_enumeration_holds_every_saved_list_in_creation_order ... ok
+test smart_playlist_writes_tests::the_first_save_inserts_the_playlist_row_and_nothing_else_creates_one ... ok
+test store_tests::a_failed_mutation_reports_its_own_operation_context ... ok
+test store_tests::clear_library_and_remove_library_path_commit_and_bump_once_each ... ok
+test store_tests::committing_a_favorite_toggle_bumps_library_generation_and_emits_once ... ok
+test store_tests::emit_beside_bump::committed_playlist_mutation_emits_one_notify_and_bumps ... ok
+test store_tests::emit_beside_bump::committed_library_mutation_emits_one_notify_and_bumps ... ok
+test store_tests::emit_beside_bump::failing_playlist_mutation_emits_nothing_and_does_not_bump ... ok
+test store_tests::favorite_flag_survives_store_reopen ... ok
+test store_tests::favorites_query_orders_by_path_regardless_of_marking_order ... ok
+test store_tests::favorites_smart_list_returns_exactly_the_favorited_tracks ... ok
+test store_tests::library_mutations_are_durable_and_bump_the_library_generation ... ok
+test store_tests::playlist_mutations_are_durable_and_bump_the_playlist_generation ... ok
+test store_tests::remove_library_path_agrees_with_the_folder_reads_for_a_mixed_separator_root ... ok
+test store_tests::remove_library_path_matches_like_metacharacters_literally ... ok
+test store_tests::remove_library_path_never_swallows_a_prefix_sibling_root ... ok
+test store_tests::remove_library_path_removes_the_subtree_under_a_bare_root ... ok
+test store_tests::remove_library_path_removes_the_subtree_under_a_trailing_separator_root ... ok
+test store_tests::removing_and_clearing_the_library_drop_their_favorites ... ok
+test store_tests::rescanning_and_tag_refreshing_a_favorited_track_preserve_the_flag ... ok
+test store_tests::set_track_favorite_round_trips_through_get_track ... ok
+test store_tests::smart_picker_reads::a_literal_unknown_artist_tag_is_offerable_while_an_absent_one_is_not ... ok
+test store_tests::settings_setters_commit_without_bumping_either_generation ... ok
+test store_tests::smart_picker_reads::the_column_table_resolves_exactly_the_catalogs_pickable_fields ... ok
+test store_tests::smart_picker_reads::an_absent_artist_tag_never_offers_the_display_fallback_the_artists_listing_shows ... ok
+test adapter_tests::test_filesystem_watcher_forwards_debounced_audio_batches ... ok
+test store_tests::smart_picker_reads::a_library_larger_than_the_bound_answers_exactly_the_bound ... ok
+test store_tests::smart_picker_reads::an_id_with_no_pickable_text_column_is_refused_rather_than_answered_empty ... ok
+test store_tests::smart_picker_reads::artist_album_artist_and_album_pickers_offer_the_distinct_stored_tags ... ok
+test store_tests::smart_picker_reads::genre_picker_offers_the_distinct_genre_entries_without_empty_or_absent_tags ... ok
+test store_tests::smart_picker_reads::sample_rate_and_channel_pickers_offer_the_distinct_measured_values ... ok
+test store_tests::stamping_the_metadata_version_commits_without_bumping_either_generation ... ok
+test store_tests::test_a_tree_whose_rules_match_nothing_answers_empty_and_not_everything ... ok
+test store_tests::test_a_zone_less_boundary_is_read_against_the_machines_own_local_midnight ... ok
+test store_tests::test_album_hit_tracks_in_genre_filter_by_both_genre_and_query ... ok
+test store_tests::test_album_hit_tracks_list_only_the_matching_tracks_in_canonical_order ... ok
+test store_tests::test_album_is_name_hit_distinguishes_name_hits_from_track_hits ... ok
+test store_tests::test_album_tracks_in_genre_returns_matching_tracks_in_canonical_order ... ok
+test store_tests::test_album_tracks_orders_missing_numbers_first_then_path ... ok
+test store_tests::test_albums_window_flat_order_slices_and_counts_in_both_directions ... ok
+test store_tests::test_all_artists_lists_names_az_with_canonical_album_keys ... ok
+test store_tests::test_an_unreadable_tree_is_refused_with_a_reason_and_never_as_an_empty_page ... ok
+test store_tests::test_all_track_ids_are_canonically_path_ordered ... ok
+test store_tests::test_artist_albums_in_genre_returns_matching_albums_with_matching_track_ids ... ok
+test store_tests::test_artist_albums_in_genre_unknown_scopes_yield_empty ... ok
+test store_tests::test_artist_albums_in_genre_window_and_count_are_scoped_and_ordered ... ok
+test store_tests::test_artist_albums_orders_newest_first_missing_year_last_title_tiebreak ... ok
+test store_tests::test_artist_albums_in_genre_window_slices_offset ... ok
+test store_tests::test_artist_is_name_hit_distinguishes_name_hits_from_album_and_track_hits ... ok
+test store_tests::test_artists_in_genre_returns_only_matching_artists_and_album_keys ... ok
+test store_tests::test_artists_in_genre_window_and_count_are_scoped_and_ordered ... ok
+test store_tests::test_artists_window_slices_name_order_both_directions_and_counts ... ok
+test store_tests::test_box_mixing_an_unknown_and_a_false_arm_still_includes_the_track ... ok
+test store_tests::test_browsing_queries_match_independent_reference_orderings ... ok
+test store_tests::test_browsing_works_straight_from_a_freshly_reopened_store ... ok
+test store_tests::test_clear_library_is_atomic_on_failure ... ok
+test smart_playlist_writes_tests::each_value_is_stored_in_the_one_spelling_the_storage_rules_name ... ok
+test store_tests::test_clear_library_survives_reopen ... ok
+test store_tests::test_clear_library_wipes_collection_and_preserves_curation ... ok
+test store_tests::test_flat_list_orders_land_in_sql_per_track_list_order ... ok
+test store_tests::test_flat_list_windows_are_path_ordered_and_bounded ... ok
+test store_tests::test_folder_has_search_match_scopes_to_subtree ... ok
+test store_tests::test_folder_prefix_queries_escape_like_wildcards ... ok
+test store_tests::test_foreign_keys_reject_orphan_tracks ... ok
+test store_tests::test_folder_track_count_scopes_to_the_component_wise_subtree ... ok
+test store_tests::test_genre_counts_aggregate_per_track_genres_and_skip_missing ... ok
+test store_tests::test_folder_queries_match_independent_reference_logic ... ok
+test store_tests::test_genre_is_one_whole_segment_and_a_tab_padded_segment_is_pinned ... ok
+test store_tests::test_get_track_roundtrips_all_fields ... ok
+test store_tests::test_genre_is_with_a_semicolon_asks_for_a_segment_sequence ... ok
+test store_tests::test_genres_window_counts_and_orders_both_directions ... ok
+test store_tests::test_hit_albums_in_genre_list_albums_that_hold_the_genre_and_hit ... ok
+test store_tests::test_genre_semicolon_split_yields_independent_entries ... ok
+test store_tests::test_every_field_and_comparison_the_catalog_permits_matches_the_reference ... ok
+test store_tests::test_hit_albums_in_genre_windows_are_bounded_with_correct_totals ... ok
+test store_tests::test_hit_albums_list_name_hits_and_track_hits_in_canonical_order ... ok
+test store_tests::test_hit_artists_in_genre_list_artists_with_a_genre_scoped_hit_album ... ok
+test store_tests::test_hit_albums_matching_is_literal_and_case_insensitive_including_non_latin ... ok
+test store_tests::test_hit_albums_windows_are_bounded_with_correct_totals ... ok
+test store_tests::test_hit_artists_list_name_hits_and_album_hits_with_only_hit_album_keys ... ok
+test store_tests::test_hit_artists_windows_are_bounded_with_correct_totals ... ok
+test store_tests::test_hit_genre_counts_aggregate_hit_tracks_across_split_segments ... ok
+test store_tests::test_last_full_scan_round_trips_and_records_as_a_library_mutation ... ok
+test store_tests::test_interrupted_scan_keeps_committed_batches ... ok
+test store_tests::test_library_counts_answers_track_artist_album_and_genre_totals ... ok
+test store_tests::test_lossless_is_a_case_insensitive_suffix_match_on_the_stored_path ... ok
+test store_tests::test_metadata_version_lags_a_freshly_migrated_store_and_stamps_durably ... ok
+test store_tests::a_page_read_never_mixes_generations_with_a_concurrent_writer ... ok
+test store_tests::test_playlist_adapter_noop_mutations_do_not_bump_generation ... ok
+test store_tests::test_playlist_adapter_failed_mutations_do_not_bump_generation ... ok
+test store_tests::test_playlist_adapter_bumps_generation_on_committed_mutations ... ok
+test store_tests::test_non_latin_tags_do_not_fold_case_and_that_is_pinned ... ok
+test store_tests::test_recently_played_orders_newest_first_excludes_never_played_and_bounds ... ok
+test store_tests::test_negated_rules_include_tracks_whose_value_is_absent ... ok
+test store_tests::test_record_track_played_persists_immediately_across_reopen ... ok
+test store_tests::test_remove_library_path_is_atomic_and_keeps_playlists_dangling ... ok
+test store_tests::test_rescan_refreshes_replaygain_pair_after_external_retag ... ok
+test rule_tree_generator_tests::test_every_generated_rule_tree_answers_the_reference_track_for_track ... ok
+test store_tests::test_scan_batch_populates_collection_including_compilations ... ok
+test store_tests::test_rescan_is_idempotent_and_preserves_history ... ok
+test store_tests::test_smart_list_counts_match_the_smart_list_membership ... ok
+test store_tests::test_search_parity_with_legacy_semantics ... ok
+test store_tests::test_sibling_prefix_trap_is_not_matched ... ok
+test store_tests::test_seven_levels_of_boxes_answer_the_reference_and_the_store_never_counts_them ... ok
+test store_tests::test_smart_playlists_match_independent_reference_logic ... ok
+test store_tests::test_smart_playlists_reflect_committed_mutations_immediately ... ok
+test store_tests::test_store_busy_timeout_is_about_five_seconds ... ok
+test store_tests::test_store_connection_setup_pragmas ... ok
+test store_tests::test_store_checksum_tamper_is_fatal ... ok
+test store_tests::test_store_distinct_names_that_slug_alike_still_get_unique_ids ... ok
+test store_tests::test_store_created_playlist_survives_immediate_restart ... ok
+test store_tests::test_store_double_apply_is_idempotent ... ok
+test store_tests::test_store_fresh_start_creates_its_own_parent_directories ... ok
+test store_tests::test_store_fresh_playlists_are_empty ... ok
+test store_tests::test_store_fresh_start_creates_file_and_applies_initial_migration_once ... ok
+test store_tests::test_store_entry_add_remove_semantics_and_dangling_survival ... ok
+test store_tests::test_store_fresh_start_never_creates_the_browser_layout_column ... ok
+test store_tests::test_store_corrupt_db_reopens_as_fresh_store_with_siblings_renamed_aside ... ok
+test store_tests::test_store_library_migration_004_applies_and_reopens_idempotently ... ok
+test store_tests::test_store_last_full_scan_summary_roundtrip_across_reopen ... ok
+test store_tests::test_store_library_paths_and_watch_states_roundtrip_across_reopen ... ok
+test store_tests::test_store_recovery_failure_is_a_fatal_startup_error ... ok
+test store_tests::test_store_library_scan_settings_roundtrip_across_reopen ... ok
+test store_tests::test_store_migration_011_backfills_lowercased_entity_search_keys ... ok
+test store_tests::test_store_migration_010_drops_the_missing_artwork_strategy_column ... ok
+test store_tests::test_store_playlist_entries_report_library_validity_via_left_join ... ok
+test store_tests::test_store_records_each_migrations_own_derived_checksum ... ok
+test store_tests::test_store_migration_012_drops_the_browser_layout_column ... ok
+test store_tests::test_store_migration_019_adds_the_reduce_motion_column ... ok
+test store_tests::test_store_migration_021_adds_the_system_notifications_column ... ok
+test store_tests::test_store_rename_and_delete_commit_instantly_without_touching_unrelated_data ... ok
+test store_tests::test_store_reopen_reuses_migrated_store_without_reapplying ... ok
+test store_tests::test_store_reorder_unknown_playlist_is_a_noop_and_other_playlists_are_untouched ... ok
+test store_tests::test_store_reorder_playlist_entries_persists_the_new_order_across_restart ... ok
+test thumbnail_path_tests::cache_path_builds_the_documented_entry_name ... ok
+test thumbnail_path_tests::cache_path_gives_each_canonical_box_its_own_entry ... ok
+test thumbnail_path_tests::cache_path_is_the_same_name_for_the_same_source_fingerprint_and_box ... ok
+test thumbnail_path_tests::cache_path_moves_when_the_source_mtime_or_length_changes ... ok
+test thumbnail_path_tests::cache_path_spreads_sources_across_the_fanout_directories ... ok
+test thumbnail_path_tests::fnv1a128_matches_the_reference_vectors ... ok
+test thumbnail_path_tests::fnv1a128_separates_paths_that_differ_by_one_byte ... ok
+test thumbnail_store_tests::a_partial_write_left_by_a_crash_is_swept_by_the_next_store ... ok
+test thumbnail_store_tests::a_stored_thumbnail_reads_back_the_same_bytes_and_dimensions ... ok
+test store_tests::test_store_migration_022_adds_the_window_geometry_columns ... ok
+test thumbnail_store_tests::a_thumbnail_is_not_found_once_the_source_is_gone ... ok
+test store_tests::test_store_scalar_settings_roundtrip_across_reopen ... ok
+test thumbnail_store_tests::a_thumbnail_stored_at_one_box_is_not_found_at_another ... ok
+test store_tests::test_store_scan_writes_rust_lowercased_entity_search_keys ... ok
+test thumbnail_store_tests::clearing_an_absent_root_is_not_an_error ... ok
+test thumbnail_store_tests::a_write_that_cannot_land_reports_the_failure_and_leaves_no_entry ... ok
+test thumbnail_store_tests::an_entry_smaller_than_its_box_reports_its_own_pixels_not_the_box ... ok
+test thumbnail_store_tests::clearing_removes_every_entry_and_the_cache_works_again ... ok
+test store_tests::test_subdirs_with_audio_lists_only_direct_child_dirs ... ok
+test store_tests::test_tag_refresh_moving_between_albums_cleans_orphans ... ok
+test store_tests::test_tracks_in_folder_orders_number_then_filename_missing_first ... ok
+test store_tests::test_tag_refresh_preserves_history_and_updates_album_derivation ... ok
+test store_tests::test_the_needle_is_anded_inside_the_read_and_paging_never_repeats_or_skips ... ok
+test store_tests::title_order_ends_on_the_path_when_two_titles_collide_under_nocase ... ok
+test rule_tree_generator_tests::test_generated_trees_page_one_ordered_answer_under_every_sort_and_needle ... ok
+test thumbnail_store_tests::a_thumbnail_is_not_found_once_the_source_has_been_replaced ... ok
+test store_tests::test_a_tree_wider_than_the_engine_can_bind_is_refused_with_its_own_size ... ok
+
+test result: ok. 267 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.58s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_library-58730b43072dc702.exe)
+
+running 28 tests
+test app::replaygain::tests::a_single_member_aggregates_to_its_own_track_gain ... ok
+test app::replaygain_pass::tests::a_file_write_failure_is_reported_and_leaves_the_store_untouched ... ok
+test app::replaygain_pass::tests::a_library_wide_pass_skips_an_album_with_nothing_to_aggregate ... ok
+test app::replaygain::tests::zero_duration_members_contribute_nothing ... ok
+test app::replaygain_pass::tests::a_measurement_failure_is_reported_and_writes_nothing_for_that_track ... ok
+test app::replaygain::tests::aggregate_is_the_energy_weighted_mean_weighted_by_duration ... ok
+test app::replaygain_pass::tests::a_library_wide_pass_recomputes_the_album_aggregate_on_all_its_tracks ... ok
+test app::replaygain::tests::album_peak_is_the_max_over_members ... ok
+test app::replaygain_pass::tests::a_library_wide_pass_with_neither_checkbox_enabled_does_nothing ... ok
+test app::replaygain_pass::tests::a_non_finite_stored_gain_is_absent_from_the_album_aggregate ... ok
+test app::replaygain_pass::tests::a_library_wide_pass_leaves_untouched_albums_alone ... ok
+test app::replaygain::tests::no_members_aggregate_to_none ... ok
+test app::replaygain_pass::tests::a_store_commit_failure_is_reported ... ok
+test app::replaygain_pass::tests::a_track_command_measures_and_writes_exactly_that_track ... ok
+test app::replaygain_pass::tests::a_track_command_on_an_unknown_track_reports_the_failure ... ok
+test app::replaygain_pass::tests::an_album_aggregate_command_whose_every_measurement_fails_writes_nothing ... ok
+test app::replaygain_pass::tests::an_album_aggregate_command_writes_the_album_pair_to_every_member ... ok
+test app::replaygain_pass::tests::an_album_pairs_write_commits_a_member_only_after_its_file_write_lands ... ok
+test app::replaygain_pass::tests::an_album_tracks_command_fills_track_values_for_every_member ... ok
+test app::replaygain_pass::tests::an_interrupted_pass_keeps_its_committed_batches ... ok
+test app::replaygain_pass::tests::cancelling_mid_album_pair_write_stops_after_the_member_in_flight ... ok
+test app::replaygain_pass::tests::cancelling_mid_recompute_write_stops_after_the_member_in_flight ... ok
+test app::replaygain_pass::tests::commits_are_batched_in_tens ... ok
+test app::replaygain_pass::tests::library_wide_skips_measured_tracks_and_force_remeasures_them ... ok
+test app::replaygain_pass::tests::measurement_wins_over_manual_edits ... ok
+test app::replaygain_pass::tests::progress_counts_measurement_completions ... ok
+test app::scan_service::tests::scan_service_cancel_clears_active ... ok
+test app::scan_service::tests::scan_service_requests_scan ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_persistence-f0300255a5e83ba0.exe)
+
+running 1 test
+test track::tests::fresh_scan_fixes_the_user_dependent_fields_and_round_trips_its_facts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\audio_extensions_tests.rs (target\debug\deps\audio_extensions_tests-e77343cbd5d6302d.exe)
+
+running 3 tests
+test scalar_settings_default_resolves_the_canonical_extensions ... ok
+test scan_options_default_resolves_the_canonical_extensions ... ok
+test the_canonical_list_is_seven_lowercase_extensions ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\generation_cache_tests.rs (target\debug\deps\generation_cache_tests-6b778f95e476cae4.exe)
+
+running 2 tests
+test cache_lifecycle_across_a_generation_bump ... ok
+test slot_hands_out_a_fresh_default_when_the_epoch_or_key_moved ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_catalog_tests.rs (target\debug\deps\rule_catalog_tests-035343c5de4fc354.exe)
+
+running 6 tests
+test a_field_id_this_build_does_not_know_is_not_a_matchable_field ... ok
+test the_sixteen_matchable_fields_are_enumerated_once_under_their_stored_ids ... ok
+test is_and_equal_to_are_one_equality_stored_under_two_ids ... ok
+test the_nine_stored_comparisons_are_enumerated_once_under_their_stored_ids ... ok
+test an_unknown_comparison_id_is_not_spelled_as_a_known_one ... ok
+test is_not_missing_has_no_stored_spelling_because_negation_already_inverts ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_field_catalog_tests.rs (target\debug\deps\rule_field_catalog_tests-978abaada3074ca1.exe)
+
+running 15 tests
+test a_comparison_that_takes_no_value_draws_no_widget ... ok
+test a_rule_can_test_losslessness_of_a_path_without_reading_a_file ... ok
+test the_library_picker_is_an_affordance_beside_an_input_never_instead_of_one ... ok
+test absence_is_the_empty_value_on_text_and_a_missing_column_elsewhere ... ok
+test every_matchable_field_has_exactly_one_catalog_row ... ok
+test is_missing_is_offered_only_where_a_value_can_actually_be_absent ... ok
+test each_field_shows_at_most_one_word_for_equality ... ok
+test per_field_operator_legality_is_a_catalog_question_with_no_database ... ok
+test the_two_lists_are_literals_that_neither_contain_nor_derive_from_each_other ... ok
+test the_catalogs_permitted_comparisons_are_exactly_the_nine_stored_ids ... ok
+test display_names_are_words_the_rest_of_riff_already_uses ... ok
+test every_scanned_format_is_classified_by_the_two_literal_lists ... ok
+test the_two_text_only_comparisons_are_hidden_on_numeric_and_date_fields ... ok
+test the_value_widget_follows_the_field_and_the_comparison ... ok
+test the_widgets_are_named_as_ideas_never_as_controls ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rule_tree_tests.rs (target\debug\deps\rule_tree_tests-ffe8380655a55a4a.exe)
+
+running 7 tests
+test a_box_holds_rules_and_boxes_in_one_shared_sibling_order ... ok
+test a_rule_is_formed_exactly_as_the_catalog_declares ... ok
+test a_rule_names_one_field_one_comparison_and_one_value ... ok
+test a_value_answers_the_kind_its_field_holds ... ok
+test trees_compare_by_shape_because_nothing_in_one_carries_an_id ... ok
+test is_not_missing_is_spelled_as_a_negated_is_missing_and_nothing_else ... ok
+test the_two_combine_words_are_the_stored_ids_the_boxes_column_enforces ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\riff_playback-f1b67122885cf3fc.exe)
+
+running 38 tests
+test app::gapless::tests::elapsed_from_samples_inverse ... ok
+test app::gapless::tests::samples_from_duration_matches_manual ... ok
+test app::projection::tests::projection_cache_freshness ... ok
+test app::gapless::tests::pre_buffer_cap_clamped ... ok
+test app::transport::tests::clamp_seek_nan ... ok
+test app::gapless::tests::frames_duration_roundtrip ... ok
+test app::projection::tests::projection_invalidates_on_generation_bump ... ok
+test app::transport::tests::add_many_sends_exactly_one_add_many_and_never_a_play ... ok
+test app::transport::tests::clamp_seek_in_range ... ok
+test app::projection::tests::projection_invalidates_on_queue_shape_change ... ok
+test app::transport::tests::clamp_seek_negative ... ok
+test app::gapless::tests::zero_rate_clamped ... ok
+test app::transport::tests::clamp_seek_past_end ... ok
+test app::gapless::tests::is_gapless_eligible_basic ... ok
+test app::transport::tests::clamp_seek_unknown_total ... ok
+test app::transport::tests::play_many_sends_exactly_play_then_add_many ... ok
+test app::transport::tests::play_random_sends_exactly_one_play_random ... ok
+test app::transport::tests::set_volume_sets_the_field_clamps_and_sends_the_effective_volume ... ok
+test app::transport::tests::toggle_mute_flips_the_flag_and_sends_the_effective_volume ... ok
+test app::transport::tests::toggle_repeat_flips_the_session_and_sends_nothing ... ok
+test app::transport::tests::toggle_shuffle_flips_the_session_and_sends_nothing ... ok
+test domain::continuation::tests::an_empty_library_has_no_pick ... ok
+test domain::continuation::tests::every_pick_is_a_member_of_the_library ... ok
+test domain::queue::tests::advance_empty_queue_returns_none ... ok
+test domain::queue::tests::advance_multiple_tracks ... ok
+test domain::queue::tests::advance_repeat_all_loops ... ok
+test domain::queue::tests::advance_single_track_repeat_all_loops ... ok
+test domain::queue::tests::advance_single_track_repeat_none_returns_none ... ok
+test infra::audio_engine::tests::a_loaded_queue_is_not_filled ... ok
+test infra::audio_engine::tests::a_play_next_command_queues_behind_the_current_track ... ok
+test infra::audio_engine::tests::a_queue_mutation_while_something_plays_starts_nothing ... ok
+test infra::audio_engine::tests::a_random_session_discards_the_parked_queue_and_re_dispatches_the_pick ... ok
+test infra::audio_engine::tests::add_to_queue_appends_behind_the_queue_without_starting_it ... ok
+test infra::audio_engine::tests::an_empty_library_leaves_the_queue_empty_and_nothing_current ... ok
+test infra::audio_engine::tests::an_empty_library_starts_nothing_and_leaves_the_parked_queue ... ok
+test infra::audio_engine::tests::an_empty_queue_is_filled_from_the_library_with_the_wanted_track_current ... ok
+test infra::audio_engine::tests::an_idle_queue_mutation_starts_the_first_track_exactly_once ... ok
+test infra::audio_engine::tests::an_unreadable_library_starts_nothing_and_leaves_the_parked_queue ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 894 tests
+test app_tests::audio_engine_tests::engine_play_random_with_an_empty_library_changes_nothing ... ok
+test app_tests::audio_engine_tests::engine_play_random_starts_a_fresh_random_session ... ok
+test app_tests::audio_engine_tests::engine_skips_walk_the_queue_and_announce_the_target ... ok
+test app_tests::browse_row_seam_tests::a_failed_count_read_never_leaves_a_total_disagreeing_with_its_rows ... ok
+test app_tests::browse_row_seam_tests::test_albums_answers_row_at_i_and_retargets_on_direction ... ok
+test app_tests::browse_row_seam_tests::test_artists_degrades_on_store_error ... ok
+test app_tests::browse_row_seam_tests::test_a_browse_boundary_resolves_to_the_right_row_at_every_edge ... ok
+test app_tests::browse_row_seam_tests::test_artists_direction_change_retargets_and_orders_in_sql ... ok
+test app_tests::browse_row_seam_tests::test_artists_keeps_stale_rows_after_a_failed_refetch ... ok
+test app_tests::browse_row_seam_tests::test_genre_drill_rows_retarget_on_genre_change ... ok
+test app_tests::browse_row_seam_tests::test_artists_answers_row_at_i_and_the_count ... ok
+test app_tests::browse_row_seam_tests::test_genres_answers_row_at_i_and_retargets_on_direction ... ok
+test app_tests::browse_row_seam_tests::test_artists_generation_bump_refetches_with_a_fresh_total ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_ignores_a_directory_named_like_a_candidate ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_reads_a_candidate_in_whatever_case_the_file_uses ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_orders_the_rest_of_the_candidate_list ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_reports_no_art_when_the_directory_cannot_be_read ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_picks_the_earliest_candidate_however_files_arrive ... ok
+test app_tests::cover_resolver_tests::test_filesystem_fallback_reports_no_art_for_a_directory_without_candidates ... ok
+test app_tests::cover_resolver_tests::test_folder_cover_is_the_directorys_own_cover_file ... ok
+test app_tests::audio_engine_tests::engine_next_past_queue_end_stops ... ok
+test app_tests::cover_resolver_tests::test_folder_cover_list_is_narrower_than_the_tracks ... ok
+test app_tests::cover_service_tests::test_a_failed_cache_write_still_delivers_the_cover ... ok
+test app_tests::cover_service_tests::test_a_resolved_thumbnail_survives_the_service_that_made_it ... ok
+test app_tests::audio_engine_tests::engine_play_into_empty_queue_fills_from_store ... ok
+test app_tests::audio_engine_tests::engine_plays_track_and_emits_updates ... ok
+test app_tests::audio_engine_tests::a_failed_stream_start_leaves_no_stream_running ... ok
+test app_tests::audio_engine_tests::the_engine_offers_the_same_samples_and_announces_the_same_updates ... ok
+test app_tests::audio_engine_tests::engine_pause_resume_seek_volume_contract ... ok
+test app_tests::cover_service_tests::test_cover_request_resolves_and_poll_yields_image ... ok
+test app_tests::cover_service_tests::test_cover_worker_skips_embedded_art_while_read_embedded_is_off ... ok
+test app_tests::cover_service_tests::test_folder_cover_request_never_reads_audio_tags ... ok
+test app_tests::audio_engine_tests::a_failed_resume_start_offers_no_samples_and_reopens_nothing ... ok
+test app_tests::cover_service_tests::test_same_track_at_a_different_size_is_a_separate_job ... ok
+test app_tests::cover_service_tests::test_replacing_the_source_forces_a_rebuild ... ok
+test app_tests::cover_service_tests::test_same_folder_at_a_different_size_is_a_separate_job ... ok
+test app_tests::cover_service_tests::test_turning_off_embedded_artwork_does_not_serve_the_cached_embedded_rung ... ok
+test app_tests::cover_thumbnail_cache_tests::test_an_artless_track_persists_nothing ... ok
+test app_tests::cover_service_tests::test_cover_poll_drains_all_completed_results_then_stays_empty ... ok
+test app_tests::cover_service_tests::test_cover_artless_track_negative_cached_until_eviction ... ok
+test app_tests::cover_service_tests::test_cover_duplicate_requests_while_unresolved_yield_one_resolve ... ok
+test app_tests::cover_service_tests::test_artless_track_is_skipped_at_every_requested_size ... ok
+test app_tests::custom_list_projection_tests::test_a_draft_trees_count_is_a_zero_row_page_read_for_that_exact_tree ... ok
+test app_tests::custom_list_projection_tests::test_a_failed_count_read_keeps_the_total_beside_the_rows_still_rendering ... ok
+test app_tests::cover_service_tests::test_artless_folder_is_negative_cached_by_its_own_directory ... ok
+test app_tests::custom_list_projection_tests::test_a_failed_draft_count_carries_the_reason_and_the_last_good_count ... ok
+test app_tests::custom_list_projection_tests::test_a_failed_tree_load_serves_the_last_good_rows_with_the_reason ... ok
+test app_tests::custom_list_projection_tests::test_a_failed_window_read_serves_the_last_good_row_beside_the_reason ... ok
+test app_tests::custom_list_projection_tests::test_a_gone_list_answers_a_cached_absence_with_a_reason ... ok
+test app_tests::custom_list_projection_tests::test_a_library_bump_refetches_rows_without_re_reading_the_tree ... ok
+test app_tests::custom_list_projection_tests::test_a_new_window_costs_exactly_one_read_and_a_reopen_costs_none ... ok
+test app_tests::custom_list_projection_tests::test_a_playlist_bump_invalidates_the_custom_listing_but_never_the_flat_library_listing ... ok
+test app_tests::custom_list_projection_tests::test_a_playlist_bump_refetches_the_window_and_rereads_the_tree ... ok
+test app_tests::custom_list_projection_tests::test_an_unreadable_draft_tree_answers_the_listings_same_reason_with_no_query ... ok
+test app_tests::custom_list_projection_tests::test_opening_a_custom_list_issues_the_paged_read_with_the_shared_sort_and_needle ... ok
+test app_tests::custom_list_projection_tests::test_an_unreadable_rule_matches_nothing_with_a_reason_and_no_query_at_all ... ok
+test app_tests::custom_list_projection_tests::test_the_held_count_is_keyed_on_the_trees_shape ... ok
+test app_tests::generation_cache_tests::test_epoch_move_drops_the_entry_and_slot_reinitializes ... ok
+test app_tests::custom_list_projection_tests::test_the_hold_is_stamped_on_the_library_generation_and_only_that_generation ... ok
+test app_tests::custom_list_projection_tests::test_two_different_trees_with_the_same_rule_count_are_different_keys ... ok
+test app_tests::generation_cache_tests::test_failed_load_keeps_the_stale_value_readable_for_the_retry ... ok
+test app_tests::generation_cache_tests::test_fresh_load_stamps_the_observed_epoch ... ok
+test app_tests::generation_cache_tests::test_invalidate_drops_whatever_is_cached ... ok
+test app_tests::generation_cache_tests::test_key_change_at_the_same_epoch_resets_the_slot ... ok
+test app_tests::cover_service_tests::test_cover_negative_cache_evicts_oldest_and_allows_retry ... ok
+test app_tests::library_path_tests::a_retried_warning_that_fails_again_carries_the_fresh_diagnostic ... ok
+test app_tests::library_path_tests::a_watch_start_that_fails_degrades_to_a_warning_and_still_persists ... ok
+test app_tests::library_path_tests::hydration_seeds_the_fact_set_from_loaded_settings ... ok
+test app_tests::library_path_tests::clearing_collection_data_resets_readiness_and_keeps_the_settings ... ok
+test app_tests::library_path_tests::readiness_is_reported_through_the_slot_and_persists_nothing ... ok
+test app_tests::library_path_tests::registering_does_not_start_a_scan_or_a_watcher ... ok
+test app_tests::library_path_tests::registering_a_known_root_changes_nothing_and_saves_nothing ... ok
+test app_tests::library_path_tests::registering_a_root_records_its_path_and_readiness_and_persists_once ... ok
+test app_tests::library_path_tests::restoring_a_disabled_library_path_starts_nothing ... ok
+test app_tests::library_path_tests::restoring_a_warning_retries_the_watch_instead_of_restoring_the_diagnostic ... ok
+test app_tests::library_path_tests::restoring_an_enabled_library_path_starts_its_watcher ... ok
+test app_tests::library_path_tests::retiring_writes_the_paths_row_before_the_watch_states_row ... ok
+test app_tests::library_path_tests::retiring_a_root_without_a_watcher_still_drops_its_persisted_watch_state ... ok
+test app_tests::library_path_tests::retiring_a_root_removes_every_fact_and_stops_following_it ... ok
+test app_tests::library_path_tests::watching_one_root_persists_the_whole_map_in_one_save ... ok
+test app_tests::library_path_tests::watching_every_root_is_one_batch_and_one_save ... ok
+test app_tests::cover_thumbnail_cache_tests::test_clearing_a_cache_that_was_never_written_reports_success ... ok
+test app_tests::cover_thumbnail_cache_tests::test_a_folder_cover_shares_the_ladder_with_the_tracks_inside_it ... ok
+test app_tests::paged_listing_real_store_tests::a_browse_row_resolves_to_its_own_entity_at_every_window_boundary ... ok
+test app_tests::library_path_tests::a_retired_root_leaves_no_watch_state_row_in_the_reopened_store ... ok
+test app_tests::playback_coordinator_tests::test_playback_coordinator_advance_past_last_stops_without_play ... ok
+test app_tests::playback_coordinator_tests::test_playback_coordinator_commits_history_before_advancing ... ok
+test app_tests::playback_coordinator_tests::test_playback_coordinator_error_sets_stopped_and_emits_typed_notice ... ok
+test app_tests::playback_coordinator_tests::test_playback_coordinator_repeat_one_replays_current_without_advancing ... ok
+test app_tests::playback_coordinator_tests::test_playback_coordinator_track_changed_updates_current_index_by_id ... ok
+test app_tests::cover_thumbnail_cache_tests::test_a_resolved_cover_is_not_decoded_again_after_a_restart ... ok
+test app_tests::cover_thumbnail_cache_tests::test_clearing_the_cache_forces_a_re_resolve_and_repopulates ... ok
+test app_tests::paged_listing_real_store_tests::a_mutation_between_frames_moves_the_count_and_the_rows_together ... ok
+test app_tests::paged_listing_real_store_tests::retargeting_a_browse_direction_drops_rows_at_an_unchanged_generation ... ok
+test app_tests::paged_listing_real_store_tests::retargeting_a_query_signature_drops_rows_at_an_unchanged_generation ... ok
+test app_tests::preferences_tests::a_failed_commit_keeps_the_change_pending_for_the_next_frame ... ok
+test app_tests::preferences_tests::a_reduce_motion_change_commits_the_persisted_flag ... ok
+test app_tests::preferences_tests::an_album_mode_change_commits_the_store_code ... ok
+test app_tests::preferences_tests::hydrate_lands_the_stored_replaygain_mode_in_the_playback_session ... ok
+test app_tests::preferences_tests::hydrate_lands_the_stored_scalars_in_both_sessions ... ok
+test app_tests::preferences_tests::one_changed_preference_commits_exactly_once ... ok
+test app_tests::preferences_tests::the_first_commit_after_hydrate_is_a_no_op ... ok
+test app_tests::preferences_tests::the_window_geometry_round_trips_through_the_scalar_row ... ok
+test app_tests::preferences_tests::two_changes_in_one_frame_commit_once_with_the_final_values ... ok
+test app_tests::replaygain_mirror_tests::both_write_paths_mirror_the_same_four_fields ... ok
+test app_tests::cover_thumbnail_cache_tests::test_replacing_the_cover_file_rebuilds_the_rung ... ok
+test app_tests::playlist_projection_tests::an_empty_playlist_list_is_answered_once_and_not_requeried ... ok
+test app_tests::paged_listing_real_store_tests::row_at_i_resolves_to_the_stores_own_row_at_every_window_boundary ... ok
+test app_tests::playlist_projection_tests::test_initial_fetch_serves_seeded_playlists_and_resolved_rows ... ok
+test app_tests::scan_service_tests::test_commit_failure_surfaces_as_failed_outcome ... ok
+test app_tests::cover_thumbnail_cache_tests::test_each_canonical_box_is_its_own_rung_on_disk ... ok
+test app_tests::cover_thumbnail_cache_tests::test_twelve_tracks_of_one_album_share_one_stored_ladder ... ok
+test app_tests::playlist_projection_tests::test_valid_ids_are_the_playable_entries_ids_in_playlist_order ... ok
+test app_tests::playlist_projection_tests::test_unknown_playlist_id_yields_none_without_a_third_method ... ok
+test app_tests::playlist_projection_tests::test_store_mutations_appear_on_the_next_call_with_zero_caller_action ... ok
+test app_tests::tag_edit_service_tests::test_replaygain_edit_writes_its_own_path_and_commits_the_values ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_commit_failure_fails_despite_successful_write ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_poll_returns_none_when_idle_and_delivers_each_outcome_once ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_preserves_play_history_in_committed_track ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_success_reports_saved_and_commits_edited_track ... ok
+test app_tests::scan_service_tests::test_a_lagging_metadata_version_re_reads_known_tracks_exactly_once ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_vanished_track_fails_without_commit ... ok
+test app_tests::tests::staleness_browsing_failed_load_defaults_then_the_retry_recovers ... ok
+test app_tests::tests::staleness_browsing_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tag_edit_service_tests::test_tag_edit_writer_failure_fails_without_store_interaction ... ok
+test app_tests::tests::staleness_counts_failed_load_defaults_then_the_retry_recovers ... ok
+test app_tests::tests::staleness_counts_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tests::staleness_folders_failed_load_defaults_then_the_retry_recovers ... ok
+test app_tests::tests::staleness_folders_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::scan_service_tests::test_a_cancelled_scan_leaves_the_metadata_version_lagging ... ok
+test app_tests::tests::staleness_genres_failed_load_defaults_then_the_retry_recovers ... ok
+test app_tests::tests::staleness_genres_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tests::staleness_playlists_failed_load_keeps_the_stale_list_readable_for_the_retry ... ok
+test app_tests::tests::staleness_playlists_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tests::staleness_smart_playlists_failed_load_defaults_then_the_retry_recovers ... ok
+test app_tests::tests::staleness_smart_playlists_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tests::staleness_tracks_fresh_serves_then_caches_then_refetches_after_a_bump ... ok
+test app_tests::tests::staleness_tracks_failed_load_keeps_the_stale_window_readable_for_the_retry ... ok
+test app_tests::tests::test_a_failed_count_read_keeps_the_last_good_total_beside_the_last_good_rows ... ok
+test app_tests::tests::test_a_failed_row_read_keeps_the_last_good_row ... ok
+test app_tests::tests::test_album_hit_tracks_cached_per_album_and_query ... ok
+test app_tests::tests::test_a_listing_boundary_resolves_to_the_right_row_at_every_edge ... ok
+test app_tests::tests::test_album_hit_tracks_in_genre_cached_and_degrades_on_error ... ok
+test app_tests::tests::test_app_state_advanced_mode_defaults_to_false ... ok
+test app_tests::tests::test_album_name_hit_cached_per_album_and_query ... ok
+test app_tests::tests::test_app_state_high_contrast_defaults_to_false ... ok
+test app_tests::tests::test_app_state_muted_defaults_to_false ... ok
+test app_tests::tests::test_app_state_replaygain_defaults_to_disabled ... ok
+test app_tests::tests::test_artist_name_hit_cached_per_artist_and_query ... ok
+test app_tests::tests::test_browser_path_reset_clears_the_path ... ok
+test app_tests::tests::test_browser_path_select_at_appends_at_each_level ... ok
+test app_tests::tests::test_browser_path_select_at_truncates_deeper_entries ... ok
+test app_tests::tests::test_browsing_levels_fetch_each_once_per_generation ... ok
+test app_tests::tests::test_build_tracks_reads_metadata_and_audio_format ... ok
+test app_tests::tests::test_build_tracks_skips_unreadable_files ... ok
+test app_tests::tests::test_build_tracks_stamps_date_added_and_zero_plays ... ok
+test app_tests::tests::test_effective_volume_zeroed_while_muted_and_restored_on_unmute ... ok
+test app_tests::tests::test_folder_track_count_answers_zero_for_an_unknown_folder ... ok
+test app_tests::tests::test_folder_track_count_reads_through_the_store_once_per_generation ... ok
+test app_tests::tests::test_folder_views_fetch_each_level_once_per_generation ... ok
+test app_tests::tests::test_gapless_elapsed_degenerate_rate_or_channels_no_div_by_zero ... ok
+test app_tests::tests::test_gapless_elapsed_from_samples_exact_math ... ok
+test app_tests::tests::test_cache_is_bounded_fifo ... ok
+test app_tests::tests::test_gapless_elapsed_truncates_partial_frame ... ok
+test app_tests::tests::test_gapless_elapsed_zero_samples_is_zero ... ok
+test app_tests::tests::test_gapless_eligible_false_when_formats_incompatible ... ok
+test app_tests::tests::test_gapless_eligible_false_when_multiple_conditions_fail ... ok
+test app_tests::tests::test_gapless_eligible_false_when_shuffling ... ok
+test app_tests::tests::test_gapless_eligible_false_without_successor ... ok
+test app_tests::tests::test_gapless_eligible_true_only_when_all_conditions_hold ... ok
+test app_tests::tests::test_gapless_handoff_ineligible_when_formats_incompatible ... ok
+test app_tests::tests::test_gapless_handoff_ineligible_when_shuffling ... ok
+test app_tests::tests::test_gapless_handoff_ineligible_without_successor ... ok
+test app_tests::tests::test_gapless_pre_buffer_cap_math ... ok
+test app_tests::tests::test_gapless_pre_buffer_cap_negative_or_nonfinite_is_zero ... ok
+test app_tests::tests::test_genre_counts_view_fetches_once_per_generation_and_serves_the_cache ... ok
+test app_tests::tests::test_genre_filtered_browsing_views_fetch_each_level_once_per_generation ... ok
+test app_tests::tests::test_genre_views_refetch_after_a_generation_bump ... ok
+test app_tests::tests::test_hit_albums_degrades_on_store_error ... ok
+test app_tests::tests::test_hit_albums_answers_row_at_i_and_the_count ... ok
+test app_tests::tests::test_hit_albums_keeps_stale_rows_after_a_failed_refetch ... ok
+test app_tests::tests::test_hit_albums_query_actually_filters_rows ... ok
+test app_tests::tests::test_hit_albums_refetch_after_a_generation_bump ... ok
+test app_tests::tests::test_hit_albums_cache_is_bounded_fifo ... ok
+test app_tests::tests::test_hit_albums_retargets_on_keystroke ... ok
+test app_tests::tests::test_hit_artists_degrades_on_store_error ... ok
+test app_tests::tests::test_hit_artists_answers_row_at_i_and_the_count ... ok
+test app_tests::tests::test_hit_artists_retargets_on_keystroke ... ok
+test app_tests::tests::test_last_scan_answers_none_before_any_scan_completes ... ok
+test app_tests::tests::test_metadata_writer_failure_returns_metadata_write_error ... ok
+test app_tests::tests::test_last_scan_reads_through_the_store_and_refreshes_per_generation ... ok
+test app_tests::tests::test_metadata_writer_success_records_path_and_edit ... ok
+test app_tests::tests::test_mock_settings_store_drives_hydration_and_persistence ... ok
+test app_tests::tests::test_mutex_ext_lock_or_recover ... ok
+test app_tests::tests::test_playback_slots_empty_queue_load_nothing ... ok
+test app_tests::tests::test_playback_slots_follow_the_queue_shuffle_order ... ok
+test app_tests::tests::test_playback_slots_load_current_and_up_next_once_per_inputs ... ok
+test app_tests::tests::test_playback_slots_refetch_when_the_queue_advances ... ok
+test app_tests::tests::test_playback_slots_skip_ids_missing_from_the_store ... ok
+test app_tests::tests::test_recently_played_list_refreshes_on_generation_like_other_smart_lists ... ok
+test app_tests::tests::test_reorder_tracks_adjacent_swap_and_noop ... ok
+test app_tests::tests::test_reorder_tracks_moves_an_entry_down_between_others ... ok
+test app_tests::tests::test_reorder_tracks_moves_an_entry_up ... ok
+test app_tests::tests::test_reorder_tracks_rejects_out_of_bounds_indices ... ok
+test app_tests::tests::test_replaygain_factor_album_mode_applies_the_album_pair ... ok
+test app_tests::tests::test_replaygain_factor_album_mode_falls_back_to_the_track_pair_when_album_gain_is_absent ... ok
+test app_tests::tests::test_replaygain_factor_album_mode_missing_album_gain_is_neutral_like_track_mode ... ok
+test app_tests::tests::test_replaygain_factor_converts_db_to_linear ... ok
+test app_tests::tests::test_replaygain_factor_disabled_is_neutral ... ok
+test app_tests::tests::test_replaygain_factor_missing_gain_is_neutral ... ok
+test app_tests::tests::test_replaygain_factor_non_finite_gain_is_neutral ... ok
+test app_tests::tests::test_replaygain_factor_peak_caps_positive_gain ... ok
+test app_tests::tests::test_replaygain_factor_peak_does_not_raise_attenuation ... ok
+test app_tests::tests::test_replaygain_factor_track_mode_uses_the_track_pair ... ok
+test app_tests::tests::test_replaygain_factor_zero_or_missing_peak_no_divide_by_zero ... ok
+test app_tests::tests::test_replaygain_mode_defaults_to_track ... ok
+test app_tests::tests::test_scoped_hit_reads_pass_the_query_through ... ok
+test app_tests::tests::test_select_at_clears_the_selected_track ... ok
+test app_tests::tests::test_scanner_yields_nothing_for_an_unavailable_path ... ok
+test app_tests::tests::test_scrolling_fetches_only_the_missing_window_when_fresh ... ok
+test app_tests::tests::test_selected_track_caches_until_selection_or_generation_moves ... ok
+test app_tests::tests::test_sidebar_counts_carry_per_playlist_sizes ... ok
+test app_tests::tests::test_sidebar_counts_answers_every_count_the_sidebar_needs ... ok
+test app_tests::tests::test_sidebar_counts_serve_the_cache_while_fresh ... ok
+test app_tests::tests::test_sidebar_counts_refetch_after_a_generation_bump ... ok
+test app_tests::scan_service_tests::test_cancel_mid_scan_keeps_committed_batches_and_never_completes ... ok
+test app_tests::tests::test_smart_list_refetches_after_generation_bump_and_limit_increase ... ok
+test app_tests::tests::test_tag_edit_apply_to_updates_only_some_fields ... ok
+test app_tests::tests::test_tag_edit_default_is_all_none ... ok
+test app_tests::tests::test_the_count_read_refreshes_after_a_mutation_with_the_rows ... ok
+test app_tests::windowed_list_projection_tests::test_a_failed_row_read_leaves_the_last_good_row_readable ... ok
+test app_tests::tests::test_the_seam_answers_row_at_i_and_the_count_as_two_reads ... ok
+test app_tests::windowed_list_projection_tests::test_the_count_is_a_read_of_its_own ... ok
+test app_tests::windowed_list_projection_tests::test_eviction_caps_the_window_count_fifo ... ok
+test app_tests::windowed_list_projection_tests::test_the_projection_aligns_a_row_index_to_its_own_window ... ok
+test domain_tests::tests::a_chosen_current_track_moves_the_index_and_leaves_the_order_alone ... ok
+test domain_tests::tests::a_chosen_current_track_outside_the_queue_moves_nothing ... ok
+test domain_tests::tests::a_single_track_queue_without_repeat_stops_on_next ... ok
+test domain_tests::tests::an_empty_queue_answers_stop_for_every_trigger ... ok
+test domain_tests::tests::manual_next_and_auto_advance_answer_the_same_successor ... ok
+test domain_tests::tests::manual_previous_walks_back_one_track ... ok
+test app_tests::tests::test_track_is_valid_and_valid_tracks_filter_invalid_entries ... ok
+test domain_tests::tests::past_the_end_in_either_direction_answers_stop_and_leaves_the_index ... ok
+test domain_tests::tests::queue_fill_of_a_track_the_store_did_not_return_leaves_nothing_current ... ok
+test domain_tests::tests::queue_fill_takes_the_store_order_verbatim ... ok
+test domain_tests::tests::repeat_all_wraps_past_both_ends ... ok
+test domain_tests::tests::repeat_one_loops_the_current_track_when_a_track_ends ... ok
+test domain_tests::tests::repeat_one_with_shuffle_advances_instead_of_looping ... ok
+test domain_tests::tests::repeat_one_yields_to_a_listeners_skip ... ok
+test domain_tests::tests::shuffle_consumes_the_seeded_order_front_to_back ... ok
+test domain_tests::tests::test_advance_follows_seeded_order_front_to_back ... ok
+test domain_tests::tests::test_advance_walks_queue_in_order_until_end ... ok
+test domain_tests::tests::test_app_state_new ... ok
+test domain_tests::tests::test_append_and_insert_next_ordering ... ok
+test domain_tests::tests::test_append_many_matches_repeated_append ... ok
+test domain_tests::tests::test_append_under_shuffle_defers_regeneration_until_advance ... ok
+test domain_tests::tests::test_clear_resets_queue ... ok
+test domain_tests::tests::test_next_stops_at_end_without_repeat ... ok
+test domain_tests::tests::test_empty_queue_returns_none_everywhere ... ok
+test domain_tests::tests::test_next_wraps_at_end_with_repeat_all ... ok
+test domain_tests::tests::test_playback_position_default ... ok
+test app_tests::scan_service_tests::test_cancelled_scan_never_records_the_last_scan_timestamp ... ok
+test domain_tests::tests::test_playlist_id_new_slugs_name_and_differs_per_name ... ok
+test domain_tests::tests::test_playback_queue_operations ... ok
+test domain_tests::tests::test_playback_state_display ... ok
+test domain_tests::tests::test_playback_state_variants_are_distinct ... ok
+test domain_tests::tests::test_previous_at_index_zero_stays_put ... ok
+test domain_tests::tests::test_queue_new_constructor_defaults ... ok
+test domain_tests::tests::test_queue_new_starts_at_the_first_track ... ok
+test domain_tests::tests::test_remove_after_current_keeps_index ... ok
+test domain_tests::tests::test_remove_before_current_shifts_index ... ok
+test domain_tests::tests::test_remove_current_falls_back_to_previous ... ok
+test domain_tests::tests::test_remove_out_of_bounds_is_noop ... ok
+test domain_tests::tests::test_remove_under_shuffle_rebuilds_on_next_advance ... ok
+test domain_tests::tests::test_repeat_all_wraps_single_track_queue_to_itself ... ok
+test domain_tests::tests::test_repeat_mode_default_is_none ... ok
+test domain_tests::tests::test_repeat_one_does_not_wrap_queue ... ok
+test domain_tests::tests::test_set_shuffle_false_clears_shuffle_state ... ok
+test domain_tests::tests::test_shuffle_excludes_current_from_shuffled_indices ... ok
+test domain_tests::tests::test_shuffle_preserves_multiset ... ok
+test domain_tests::tests::test_shuffle_repeat_all_wraps_with_a_fresh_order ... ok
+test domain_tests::tests::test_single_track_queue_navigation ... ok
+test domain_tests::tests::test_smart_playlist_kind_all_enumerates_every_kind_exactly_once ... ok
+test domain_tests::tests::test_smart_playlist_kind_display_names ... ok
+test domain_tests::tests::test_toggle_repeat_cycles_none_all_one ... ok
+test domain_tests::tests::test_track_display_methods ... ok
+test domain_tests::tests::test_track_id_equality_and_hash ... ok
+test domain_tests::tests::test_track_id_from_path ... ok
+test domain_tests::tests::test_track_metadata_display_album_artist_fallback ... ok
+test domain_tests::tests::test_track_metadata_display_title_fallbacks ... ok
+test domain_tests::tests::test_track_metadata_search_text_is_lowercased ... ok
+test domain_tests::tests::test_upcoming_returns_following_tracks ... ok
+test app_tests::scan_service_tests::test_completed_scan_counts_unreadable_files_as_errors ... ok
+test app_tests::scan_service_tests::test_completed_scan_records_the_last_scan_timestamp ... ok
+test app_tests::scan_service_tests::test_freshness_check_failure_fails_open_and_still_commits ... ok
+test app_tests::scan_service_tests::test_rescan_through_the_service_is_idempotent_and_keeps_play_history ... ok
+test app_tests::scan_service_tests::test_outcome_stream_reports_progress_cadence_then_complete_total ... ok
+test app_tests::paged_listing_real_store_tests::a_scan_committing_concurrently_never_leaves_a_count_and_rows_from_two_moments ... ok
+test app_tests::audio_engine_tests::engine_survives_gapless_handoff_with_single_play ... ok
+test golden_tests::tests::browser_column_dark_matches_golden_baseline ... ok
+test golden_tests::tests::browser_column_hc_matches_golden_baseline ... ok
+test golden_tests::tests::browser_column_light_matches_golden_baseline ... ok
+test golden_tests::tests::composed_shell_harness_pins_settled_time_on_both_theme_slots ... ok
+test golden_tests::tests::browser_column_focused_dark_matches_golden_baseline ... ok
+test golden_tests::tests::composed_shell_minimum_matches_golden_baseline ... ok
+test golden_tests::tests::browser_column_query_empty_dark_matches_golden_baseline ... ok
+test golden_tests::tests::composed_shell_normal_matches_golden_baseline ... ok
+test golden_tests::tests::clear_library_confirm_dark_matches_golden_baseline ... ok
+test golden_tests::tests::dark_play_card_matches_golden_baseline ... ok
+test golden_tests::tests::custom_smart_list_listing_dark_matches_golden_baseline ... ok
+test golden_tests::tests::detail_column_empty_dark_matches_golden_baseline ... ok
+test golden_tests::tests::detail_column_dark_matches_golden_baseline ... ok
+test golden_tests::tests::detail_column_light_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_albums_drilled_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_albums_under_query_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_all_tracks_inspector_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_artists_drilled_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_artists_drilled_light_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_genres_deep_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_genres_drilled_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_inspector_artist_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_inspector_genre_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_inspector_track_dark_matches_golden_baseline ... ok
+test golden_tests::tests::elastic_min_window_dark_matches_golden_baseline ... ok
+test golden_tests::tests::golden_helper_pins_settled_time_on_both_theme_slots ... ok
+test golden_tests::tests::empty_column_dark_matches_golden_baseline ... ok
+test golden_tests::tests::folder_tree_pruned_dark_matches_golden_baseline ... ok
+test golden_tests::tests::hovered_tree_row_paints_the_amber_wash ... ok
+test golden_tests::tests::folder_tree_stage_dark_matches_golden_baseline ... ok
+test golden_tests::tests::icons_atlas_dark_matches_golden_baseline ... ok
+test golden_tests::tests::library_track_list_dark_matches_golden_baseline ... ok
+test golden_tests::tests::now_playing_dark_matches_golden_baseline ... ok
+test golden_tests::tests::now_playing_cover_dark_matches_golden_baseline ... ok
+test golden_tests::tests::option_list_after_click_dark_matches_golden_baseline ... ok
+test golden_tests::tests::now_playing_empty_dark_matches_golden_baseline ... ok
+test golden_tests::tests::placeholder_tile_renders_in_a_headless_snapshot ... ok
+test golden_tests::tests::playerbar_advanced_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_idle_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_light_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_muted_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_now_playing_long_title_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_now_playing_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_paused_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_queue_open_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_repeat_all_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_stopped_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playerbar_repeat_one_dark_matches_golden_baseline ... ok
+test golden_tests::tests::playlist_create_prompt_dark_matches_golden_baseline ... ok
+test golden_tests::tests::queue_panel_empty_state_has_a_real_body ... ok
+test golden_tests::tests::playlist_rename_prompt_dark_matches_golden_baseline ... ok
+test golden_tests::tests::rule_row_after_clicks_dark_matches_golden_baseline ... ok
+test golden_tests::tests::queue_panel_empty_dark_matches_golden_baseline ... ok
+test golden_tests::tests::queue_panel_dark_matches_golden_baseline ... ok
+test golden_tests::tests::selection_panel_art_dark_matches_golden_baseline ... ok
+test golden_tests::tests::selection_panel_dark_matches_golden_baseline ... ok
+test golden_tests::tests::selection_panel_single_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_library_rows_stacked_mid_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_library_two_column_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_appearance_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_library_stacked_min_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_advanced_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_about_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_light_matches_golden_baseline ... ok
+test golden_tests::tests::settings_library_two_column_light_matches_golden_baseline ... ok
+test golden_tests::tests::settings_library_two_column_hc_matches_golden_baseline ... ok
+test golden_tests::tests::settings_missing_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_normal_hc_matches_golden_baseline ... ok
+test golden_tests::tests::settings_not_indexed_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_playback_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_scanning_dark_matches_golden_baseline ... ok
+test golden_tests::tests::settings_stacked_min_hc_matches_golden_baseline ... ok
+test golden_tests::tests::settings_stacked_min_light_matches_golden_baseline ... ok
+test golden_tests::tests::shell_chrome_light_matches_golden_baseline ... ok
+test golden_tests::tests::settings_watch_warning_dark_matches_golden_baseline ... ok
+test golden_tests::tests::shell_chrome_now_playing_dark_matches_golden_baseline ... ok
+test golden_tests::tests::shell_chrome_scanning_dark_matches_golden_baseline ... ok
+test golden_tests::tests::sidebar_dark_matches_golden_baseline ... ok
+test golden_tests::tests::shell_chrome_settings_dark_matches_golden_baseline ... ok
+test golden_tests::tests::sidebar_light_matches_golden_baseline ... ok
+test integration_tests::composition_root_tests::test_a_relaunched_watched_library_path_is_watched_before_any_frame_is_drawn ... ok
+test integration_tests::composition_root_tests::test_composition_root_spawns_real_adapters_and_worker_threads_run ... ok
+error: test failed, to rerun pass `-p riff-tests --test integration`
+
+Caused by:
+  process didn't exit successfully: `C:\projects\riff\target\debug\deps\integration-a18b91224f7ce6f3.exe` (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+note: test exited abnormally; to see the full output pass --no-capture to the harness.

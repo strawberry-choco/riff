@@ -1,0 +1,7 @@
+[2m2026-11-21T04:12:39.039188Z[0m [32m INFO[0m [2mriff_nsh[0m[2m:[0m Store path: C:\projects\riff\docs\execution-plans\evidence\nsh\n5\tools\..\..\..\..\..\..\.scratch\nsh-n3\store\riff.sqlite3
+[2m2026-11-21T04:12:39.216113Z[0m [32m INFO[0m [2mriff_gui_nsh::bridge::runtime[0m[2m:[0m Backend runtime spawned over C:\projects\riff\docs\execution-plans\evidence\nsh\n5\tools\..\..\..\..\..\..\.scratch\nsh-n3\store\riff.sqlite3
+[2m2026-11-21T04:12:39.226606Z[0m [32m INFO[0m [2mriff_gui_nsh::theme::fonts[0m[2m:[0m riff: registered font family "Inter"
+[2m2026-11-21T04:12:39.226636Z[0m [32m INFO[0m [2mriff_gui_nsh::theme::fonts[0m[2m:[0m riff: registered font family "Inter"
+[2m2026-11-21T04:12:39.226642Z[0m [32m INFO[0m [2mriff_gui_nsh::theme::fonts[0m[2m:[0m riff: registered font family "Inter"
+[2m2026-11-21T04:12:39.226647Z[0m [32m INFO[0m [2mriff_gui_nsh::theme::fonts[0m[2m:[0m riff: registered font family "Inter"
+

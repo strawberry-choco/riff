@@ -1,0 +1,12 @@
+ground-truth counts, .scratch/nsh-n3/store/riff.sqlite3 (2026-11-21)
+SELECT COUNT(*) FROM tracks -> 50000
+SELECT COUNT(*) FROM artists -> 100
+SELECT COUNT(*) FROM albums -> 500
+SELECT COUNT(*) FROM library_paths -> 0
+SELECT COUNT(*) FROM playlists -> 0
+distinct genre segments (split on ";", trimmed, non-empty) -> 10
+smart-list ground truth, same store (columns: favorite, date_added_nanos, play_count, last_played_nanos)
+favorites: SELECT COUNT(*) FROM tracks WHERE favorite = 1 -> 0
+recently added: SELECT COUNT(*) FROM tracks WHERE date_added_nanos IS NOT NULL -> 50000
+most played: SELECT COUNT(*) FROM tracks WHERE play_count > 0 -> 276
+recently played: SELECT COUNT(*) FROM tracks WHERE last_played_nanos IS NOT NULL -> 276

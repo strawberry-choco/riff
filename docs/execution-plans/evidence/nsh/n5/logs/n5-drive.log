@@ -1,0 +1,32 @@
+N5 drive, third pass (2026-11-21). The two earlier passes are superseded:
+pass one's keyboard arithmetic assumed the expanded sidebar, and pass two
+launched on the folded flag pass one had persisted (its chevron click later
+unfolded and committed 0, so the store now reads expanded again; the flag
+and the window-geometry columns were restored after the captures).
+
+window after 225 ms pid 33076 / 2432 / 29096 (passes one/two/three)
+shots (third pass, all PrintWindow):
+  n5-counts.png            1200x800  counts on every row, footer stamp
+  n5-selected-artists.png  1200x800  click Artists: band on Artists
+  n5-selected-genres.png   1200x800  click Genres: band moved (the pair)
+  n5-selected-folders.png  1200x800  Folders row active (browse mode)
+  n5-selected-favorites.png 1200x800 smart-list row active
+  n5-kb-artists.png        1200x800  9 downs + Enter: ring+band on Artists
+  n5-kb-favorites-focused.png 1200x800 ring on Favorites before Enter
+  n5-kb-favorites.png      1200x800  Enter: band moved to Favorites
+  n5-kb-wrapped.png        1200x800  one more down: ring wraps to Search
+  n5-kb-space-genres.png   1200x800  Space: band moved to Genres
+  n5-collapsed.png         1200x800  chevron click: section folded
+  n5-footer-1000x700.png   1000x700  footer fully visible, no clip
+idle CPU: n5-idle.csv, 74 samples at 250 ms, sampling ran alone
+  cpu one-core pct: median 0.00, max 11.76, 4/74 samples over 1 pct
+    (the burst sits at the shell mount; the resting ticks are flat)
+  working set mb: median 56.95, max 57.90
+ground truth (python sqlite3 over .scratch/nsh-n3/store/riff.sqlite3,
+  logs/n5-store-counts.txt):
+  tracks 50000, artists 100, albums 500, genres 10 distinct ';'-split
+  segments, library_paths 0, playlists 0
+  every n5-counts.png row reads exactly that; smart-list totals on screen:
+  Recently Added 50000, Recently Played 276, Most Played 276, Favorites 0
+fixture store restored after the captures: smart_lists_collapsed=0,
+  window_x/y/width/height NULL, window_maximized=0

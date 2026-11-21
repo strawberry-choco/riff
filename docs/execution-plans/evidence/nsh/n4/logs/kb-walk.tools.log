@@ -1,0 +1,13 @@
+window=1014x707 title='riff' out=../shots/n4-kb-1-click-playing.png
+shot n4-kb-1-click-playing
+window=1014x707 title='riff' out=../shots/n4-kb-2-space-paused.png
+shot n4-kb-2-space-paused
+window=1014x707 title='riff' out=../shots/n4-kb-3-space-resumed.png
+shot n4-kb-3-space-resumed
+window=1014x707 title='riff' out=../shots/n4-kb-4-ctrlk-typed.png
+shot n4-kb-4-ctrlk-typed
+window=1014x707 title='riff' out=../shots/n4-kb-5-escape-typed.png
+shot n4-kb-5-escape-typed
+window=1014x707 title='riff' out=../shots/n4-kb-6-arrow-ring.png
+shot n4-kb-6-arrow-ring
+done

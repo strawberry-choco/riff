@@ -1,0 +1,18 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.86s
+     Running mod.rs (target\debug\deps\integration-a18b91224f7ce6f3.exe)
+
+running 11 tests
+test nsh_shell_tests::the_shell_restores_the_persisted_frame_at_launch ... ok
+test nsh_shell_tests::the_sidebar_primes_on_a_settled_library ... ok
+test nsh_bridge_tests::notices_reach_the_signal ... ok
+test nsh_bridge_tests::a_play_command_changes_the_playback_view_within_one_pump_tick ... ok
+test nsh_bridge_tests::a_volume_write_round_trips_to_the_store_through_commit_if_changed ... ok
+test nsh_shell_tests::the_frame_commit_is_the_shell_report_alone ... ok
+test nsh_shell_tests::the_shell_persists_its_window_frame_through_the_settings_commit ... ok
+test nsh_shell_tests::space_toggles_playback_over_the_shell ... ok
+test nsh_bridge_tests::library_and_playlist_revisions_move_with_their_generations ... ok
+test nsh_bridge_tests::a_queue_change_from_the_engine_lands_in_the_signal ... ok
+test nsh_bridge_tests::pause_resume_seek_round_trip_through_the_pump ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 870 filtered out; finished in 0.51s
+

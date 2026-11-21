@@ -1,0 +1,16 @@
+window after 230 ms pid 3900
+shot saved: n4-shell.png (1200x800)
+samples=73 cores=12 out=C:\projects\riff\docs\execution-plans\evidence\nsh\n4\tools\..\logs\n4-idle.csv
+shot saved: n4-playing.png (1200x800)
+samples=73 cores=12 out=C:\projects\riff\docs\execution-plans\evidence\nsh\n4\tools\..\logs\n4-playing.csv
+shot saved: n4-paused.png (1200x800)
+shot saved: n4-muted.png (1200x800)
+shot saved: n4-shuffled.png (1200x800)
+shot saved: n4-toggled.png (1200x800)
+shot saved: n4-maximized.png (1936x1096)
+minimized=True
+window after 216 ms pid 17428
+shot saved: n4-restored.png (1000x700)
+restored frame: L=120 T=90 W=1000 H=700
+shot saved: n4-titlebar-corner.png
+alive=True

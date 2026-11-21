@@ -1,0 +1,83 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.74s
+     Running unittests src\lib.rs (target\debug\deps\riff_gui_nsh-785a9c3d3b9c9fe8.exe)
+
+running 6 tests
+test shell::layout::tests::a_full_geometry_round_trips_through_a_placement ... ok
+test shell::layout::tests::a_partial_geometry_has_no_placement ... ok
+test shell::sidebar::tests::row_ids_slug_their_labels ... ok
+test shell::player_bar::tests::the_clock_reads_minutes_seconds ... ok
+test shell::sidebar::tests::the_stamp_reads_ago_words_and_never ... ok
+test shell::tests::the_ring_wraps_through_every_slot_in_both_directions ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\riff_nsh-9bf13df62e5f7af4.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cover_cache_tests.rs (target\debug\deps\cover_cache_tests-09cf6a71e36c2b40.exe)
+
+running 10 tests
+test a_cleared_view_makes_every_arrival_a_miss_again ... ok
+test an_artless_answer_records_no_arrival_so_the_row_can_ask_again ... ok
+test an_answer_that_arrives_drops_the_marker_and_its_pixels_come_back_to_the_view ... ok
+test forty_asks_while_one_is_outstanding_are_still_one_request ... ok
+test a_folder_row_asks_for_its_own_directory_once_and_paints_it_once_it_has_arrived ... ok
+test dropping_every_marker_lets_a_row_ask_again_immediately ... ok
+test a_first_ask_sends_the_identity_the_box_and_the_path_and_marks_that_key ... ok
+test an_arrival_the_view_dropped_is_a_miss_again ... ok
+test a_cover_that_arrived_at_hero_size_is_a_miss_for_a_thumbnail_request ... ok
+test the_in_flight_set_stays_within_its_cap ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\scaffold_tests.rs (target\debug\deps\scaffold_tests-0ff24b2fee74ba92.exe)
+
+running 4 tests
+test nsh_json_agrees_with_the_bootstrap ... ok
+test the_manifest_keeps_the_nsh_frontend_out_of_egui ... ok
+test the_registry_ships_the_brand_mark ... ok
+test the_root_carries_the_theme_file ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\theme_tests.rs (target\debug\deps\theme_tests-4e7e73f5d75783b4.exe)
+
+running 13 tests
+test every_palette_slot_resolves_in_all_four_variants ... ok
+test the_dark_slots_match_the_egui_store ... ok
+test the_token_scale_matches_the_egui_store ... ok
+test light_mirrors_dark_and_brand_is_family_invariant ... ok
+test the_brand_gradient_runs_light_to_deep ... ok
+test the_light_exceptions_match_the_egui_store ... ok
+test the_shadows_match_the_egui_store ... ok
+test high_contrast_is_a_token_set_over_its_base ... ok
+test the_variant_flags_resolve ... ok
+test the_four_variants_are_distinct ... ok
+test reduce_motion_is_not_a_color ... ok
+test every_slot_is_listed ... ok
+test the_icon_set_is_complete ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\token_sweeps.rs (target\debug\deps\token_sweeps-9a5cc801ba79a5be.exe)
+
+running 7 tests
+test test_the_color_sweep_flags_constructions_and_derivations ... ok
+test test_the_spacing_sweep_flags_numeric_gaps_only ... ok
+test test_the_dimension_sweep_flags_f32_consts_only ... ok
+test test_view_code_contains_no_color_constructions ... ok
+test test_view_code_declares_no_dimensions_of_its_own ... ok
+test test_the_scan_covers_the_non_store_sources ... ok
+test test_view_code_sets_no_spacing_by_number ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests riff_gui_nsh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

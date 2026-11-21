@@ -7,12 +7,15 @@
 //! `theme.json`'s `cssVars` maps restyle the `nsh_base` defaults. N3 adds
 //! the `riff-backend` edge: [`bridge`] owns the `AppRuntime` from the
 //! Composition Root and the [`model`] view vocabulary, and the pump in
-//! [`bridge::pump`] is the app's one signal writer. The next unit, N4,
-//! replaces the fixed window size in `src/main.rs` with persisted geometry.
+//! [`bridge::pump`] is the app's one signal writer. N4 adds the [`shell`]:
+//! the titlebar/sidebar/player-bar chrome over the signals and the
+//! transport, the keyboard map, and the window-geometry loop through the
+//! settings store.
 
 mod app;
 pub mod bridge;
 mod model;
+pub mod shell;
 pub mod theme;
 
 #[cfg(debug_assertions)]

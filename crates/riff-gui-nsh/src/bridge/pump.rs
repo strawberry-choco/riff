@@ -80,7 +80,11 @@ impl PumpCache {
             playlist_revision: 0,
             library_generation: 0,
             notice_log: VecDeque::new(),
-            primed: false,
+            // True so the first tick builds the sidebar once; the tick's
+            // own `primed = false` makes every later tick event-gated. A
+            // settled library never sends the LibraryChanged event the
+            // event-gated path waits for.
+            primed: true,
         }
     }
 }
@@ -328,8 +332,10 @@ fn tick(
     }
     cache.cheap = Some(cheap);
 
-    // 5. Sidebar: refreshed when the Library generation moved (or priming).
-    //    The signal's own equality absorbs a same-value rewrite.
+    // 5. Sidebar: built once on the first tick (a settled library never
+    //    sends the LibraryChanged event the later ticks wait for), then
+    //    refreshed when the Library generation moves. The signal's own
+    //    equality absorbs a same-value rewrite.
     if sidebar_dirty {
         let counts = rt.session_views.sidebar_counts(folder_roots);
         let view = SidebarView {

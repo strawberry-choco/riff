@@ -34,11 +34,44 @@ use crate::app::store::{Settings, SettingsStore};
 use crate::app::watcher_manager::WatcherManager;
 use crate::domain::RepeatMode;
 
+/// The window's frame as the frontend reports it, riding the scalar row's
+/// window columns: the normal-mode position and size in screen points, and
+/// whether the window was maximized. `None` fields mean "not known yet" —
+/// a fresh store's row, before the frontend has saved a placement — so
+/// launch falls back to the frontend's own default size.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WindowGeometry {
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub maximized: bool,
+}
+
+impl WindowGeometry {
+    /// The geometry a loaded scalar row carries.
+    #[must_use]
+    pub fn from_scalars(scalars: &ScalarSettings) -> Self {
+        Self {
+            x: scalars.window_x,
+            y: scalars.window_y,
+            width: scalars.window_width,
+            height: scalars.window_height,
+            maximized: scalars.window_maximized,
+        }
+    }
+}
+
 /// The stored side of the scalar Settings round-trip: hydrate once at
 /// launch, diff-commit at frame end.
 #[derive(Default)]
 pub struct Preferences {
     last_committed: ScalarSettings,
+    /// The window geometry the row carries: hydrated from the store at
+    /// launch, updated by the frontend while it runs, and written back by
+    /// every diff-commit — the sessions know nothing of the window, so this
+    /// handle is the one place the row's geometry columns come from.
+    window: WindowGeometry,
 }
 
 impl Preferences {
@@ -120,8 +153,28 @@ impl Preferences {
         // never nested: the playback guard is gone (cloned) before the
         // library guard is taken for the builder call.
         let playback_snapshot = playback.lock_or_recover().clone();
-        let last_committed = scalar_settings(&playback_snapshot, &library.lock_or_recover());
-        Self { last_committed }
+        let window = WindowGeometry::from_scalars(&settings.scalars);
+        let last_committed =
+            scalar_settings(&playback_snapshot, &library.lock_or_recover(), window);
+        Self {
+            last_committed,
+            window,
+        }
+    }
+
+    /// The window geometry the row currently carries: what the frontend
+    /// restores at launch (this is the hydrated row's), or its last-known
+    /// frame while running.
+    #[must_use]
+    pub fn window_geometry(&self) -> WindowGeometry {
+        self.window
+    }
+
+    /// The frontend's last-known window frame. Not saved directly: the next
+    /// frame-end diff-commit sees the row's geometry columns differ and
+    /// lands it, exactly like a session mutation.
+    pub fn set_window_geometry(&mut self, geometry: WindowGeometry) {
+        self.window = geometry;
     }
 
     /// Frame end: build the scalar row from the two sessions via the one
@@ -134,7 +187,7 @@ impl Preferences {
         library: &LibrarySession,
         store: &mut dyn SettingsStore,
     ) {
-        let scalars = scalar_settings(playback, library);
+        let scalars = scalar_settings(playback, library, self.window);
         if scalars == self.last_committed {
             return;
         }
@@ -148,8 +201,14 @@ impl Preferences {
 
 /// The one canonical builder: the current sessions projected onto the
 /// persisted scalar row. Both the hydrate snapshot and every diff-commit go
-/// through it, so the two directions of the round-trip can never drift.
-fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> ScalarSettings {
+/// through it, so the two directions of the round-trip can never drift. The
+/// window geometry is not a session fact — it rides the row through the
+/// handle's own [`Preferences::window`] slot, updated by the frontend.
+fn scalar_settings(
+    playback: &PlaybackSession,
+    library: &LibrarySession,
+    window: WindowGeometry,
+) -> ScalarSettings {
     ScalarSettings {
         volume: Some(playback.current_volume),
         advanced_mode: library.ui_flags.advanced_mode,
@@ -173,6 +232,11 @@ fn scalar_settings(playback: &PlaybackSession, library: &LibrarySession) -> Scal
         system_notifications: library.ui_flags.system_notifications,
         replaygain_pass_track: library.pass_prefs.track_values,
         replaygain_pass_album: library.pass_prefs.album_values,
+        window_x: window.x,
+        window_y: window.y,
+        window_width: window.width,
+        window_height: window.height,
+        window_maximized: window.maximized,
     }
 }
 

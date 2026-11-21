@@ -27,6 +27,7 @@ pub mod domain_tests;
 pub mod golden_tests;
 pub mod integration_tests;
 pub mod nsh_bridge_tests;
+pub mod nsh_shell_tests;
 pub mod readme_screenshots;
 pub mod repo_invariant_tests;
 pub mod ui_tests;
@@ -1198,6 +1199,11 @@ pub mod mocks {
         /// A second copy of every recorded call, for the owned-elsewhere case.
         /// `None` in the owned-and-inspected style.
         pub shared_calls: Option<Arc<Mutex<Vec<SettingsCall>>>>,
+        /// A second copy of the state, updated on every save, for the case an
+        /// owner elsewhere must READ what landed (the shell tests read the
+        /// persisted scalar row back after the pump's diff-commit). `None` in
+        /// the owned-and-inspected style.
+        pub shared_state: Option<Arc<Mutex<Settings>>>,
     }
 
     impl Default for MockSettingsStore {
@@ -1211,6 +1217,7 @@ pub mod mocks {
                 calls: Vec::new(),
                 fail: false,
                 shared_calls: None,
+                shared_state: None,
             }
         }
     }
@@ -1225,6 +1232,16 @@ pub mod mocks {
             }
         }
 
+        /// A mock whose state is also mirrored into `shared`, which the
+        /// caller keeps and reads after the owner holding the mock has
+        /// taken it.
+        pub fn with_shared_state(shared: Arc<Mutex<Settings>>) -> Self {
+            Self {
+                shared_state: Some(shared),
+                ..Self::default()
+            }
+        }
+
         /// Record one mutation, into the owned log and the shared one alike.
         fn record(&mut self, call: SettingsCall) {
             if let Some(shared) = &self.shared_calls {
@@ -1232,6 +1249,11 @@ pub mod mocks {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(call.clone());
+            }
+            if let Some(shared) = &self.shared_state {
+                *shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = self.state.clone();
             }
             self.calls.push(call);
         }

@@ -7545,7 +7545,7 @@ mod preferences_tests {
     use std::sync::{Arc, Mutex};
 
     use riff_backend::app::MutexExt;
-    use riff_backend::app::preferences::Preferences;
+    use riff_backend::app::preferences::{Preferences, WindowGeometry};
     use riff_backend::app::state::{LibrarySession, PlaybackSession, ReplayGainMode};
 
     use crate::mocks::{MockSettingsStore, MockTransport, SettingsCall};
@@ -7745,6 +7745,74 @@ mod preferences_tests {
         store.calls.clear();
         prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
         assert!(store.calls.is_empty());
+    }
+
+    /// The window geometry rides the scalar row the same way a session
+    /// mutation does: hydrate reads the store's columns into the handle,
+    /// the frontend reports its frame through `set_window_geometry`, the
+    /// frame-end diff-commit lands it exactly once, and a hydrate over the
+    /// saved store reads it back. The nsh frontend's restore depends on
+    /// both directions.
+    #[test]
+    fn the_window_geometry_round_trips_through_the_scalar_row() {
+        // A store carrying a saved frame hydrates it into the handle.
+        let mut saved = MockSettingsStore::default();
+        saved.state.scalars.window_x = Some(64.0);
+        saved.state.scalars.window_y = Some(32.0);
+        saved.state.scalars.window_width = Some(1200.0);
+        saved.state.scalars.window_height = Some(800.0);
+        saved.state.scalars.window_maximized = true;
+
+        let playback = Arc::new(Mutex::new(PlaybackSession::default()));
+        let library = Arc::new(Mutex::new(LibrarySession::default()));
+        let prefs = hydrate_from(&saved, &playback, &library);
+        assert_eq!(
+            prefs.window_geometry(),
+            WindowGeometry {
+                x: Some(64.0),
+                y: Some(32.0),
+                width: Some(1200.0),
+                height: Some(800.0),
+                maximized: true,
+            }
+        );
+
+        // A fresh store hydrates to "unknown", the launch-default case.
+        let fresh_prefs = hydrate_from(&MockSettingsStore::default(), &playback, &library);
+        assert_eq!(fresh_prefs.window_geometry(), WindowGeometry::default());
+
+        // The frontend's report lands through the next frame-end commit,
+        // once, and a re-hydrate over the saved store restores it.
+        let mut prefs = fresh_prefs;
+        prefs.set_window_geometry(WindowGeometry {
+            x: Some(10.0),
+            y: Some(20.0),
+            width: Some(1024.0),
+            height: Some(768.0),
+            maximized: false,
+        });
+        let snapshot = playback.lock_or_recover().clone();
+        let mut store = MockSettingsStore::default();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert_eq!(store.calls, vec![SettingsCall::Scalars]);
+        assert_eq!(store.state.scalars.window_x, Some(10.0));
+        assert_eq!(store.state.scalars.window_height, Some(768.0));
+
+        store.calls.clear();
+        prefs.commit_if_changed(&snapshot, &library.lock_or_recover(), &mut store);
+        assert!(store.calls.is_empty(), "the geometry commit is a diff");
+
+        let restored = hydrate_from(&store, &playback, &library);
+        assert_eq!(
+            restored.window_geometry(),
+            WindowGeometry {
+                x: Some(10.0),
+                y: Some(20.0),
+                width: Some(1024.0),
+                height: Some(768.0),
+                maximized: false,
+            }
+        );
     }
 }
 

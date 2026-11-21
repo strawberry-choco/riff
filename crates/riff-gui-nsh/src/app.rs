@@ -1,34 +1,31 @@
-//! The root component. N3 moves the backend runtime in: the app spawns the
-//! Composition Root's `AppRuntime`, the bridge owns it in a `stored` model,
-//! and the pump — installed once here — writes the signals at runtime (the
-//! debug fixture and readout controls also write, on the same thread). The
-//! palette now comes out of the bridge's `UiState` (the same one
-//! `Signal<Palette>` store ADR 0004's amendment names; only its
-//! construction moved from this file into `bridge::state`).
+//! The root component. The bridge owns the backend runtime and the signals
+//! (see `bridge`), and this mounts the N4 app shell over it: the
+//! titlebar/sidebar/player-bar chrome reading the palette and view signals,
+//! the transport intents dispatching through the model, and the window
+//! geometry loop in `shell::layout`. The palette still comes out of the
+//! bridge's `UiState` — the same one `Signal<Palette>` store ADR 0004's
+//! amendment names.
 //!
 //! Debug builds open on the bridge readout (mod+alt+r toggles it, mod+alt+t
-//! opens the N2 fixture); release builds keep the N1 home view.
+//! opens the N2 fixture) and mount the shell only when the readout is
+//! hidden; release builds mount the shell at the root.
 
 use nsh_core::prelude::*;
 
 use crate::bridge::{UiModel, install, runtime::spawn_runtime};
 use crate::theme::Palette;
-use crate::theme::fonts::{INTER_FAMILY, WEIGHT_SEMIBOLD};
 
-use crate::APP_NAME;
-
-/// The app's root: the bridge model on the engine thread, and the palette-
-/// driven content over it.
+/// The app's root: the bridge model on the engine thread, and the shell
+/// over it.
 #[component]
 pub fn App() -> impl IntoElement {
     // The vendored Inter set registers before the first frame, from bytes
     // compiled in (see `theme::fonts` for why not the `asset:/` path).
     crate::theme::fonts::register_inter_fonts();
 
-    // The bridge: spawn the runtime over the synthetic N3 store, move it
-    // into the engine-thread model, and start the pump (the one signal
-    // writer). A store failure is fatal: `spawn_runtime` logs and exits
-    // non-zero.
+    // The bridge: spawn the runtime over the synthetic store, move it into
+    // the engine-thread model, and start the pump (the one signal writer).
+    // A store failure is fatal: `spawn_runtime` logs and exits non-zero.
     let (rt, lifecycle) = spawn_runtime();
     let model = stored(UiModel::new(rt, Some(lifecycle)));
     install(model);
@@ -38,17 +35,20 @@ pub fn App() -> impl IntoElement {
     let state = model.with(|m| m.signals());
     let palette: Signal<Palette> = state.palette;
 
-    // The dev fixture's control surface (N2), plus the N3 readout's. Both
-    // are compiled out in release with their screens.
+    // The dev fixture's control surface (N2), plus the N3 readout's toggles.
+    // Both are compiled out in release with their screens.
     #[cfg(debug_assertions)]
     let show_fixture = crate::screens::dev_tokens::install_switcher(palette);
-    // N3 opens on the readout; mod+alt+t still opens the fixture.
     #[cfg(debug_assertions)]
     show_fixture.set(false);
     #[cfg(debug_assertions)]
     let show_readout = crate::screens::bridge_readout::install();
     #[cfg(debug_assertions)]
     crate::screens::bridge_readout::install_transport_keys(model);
+    // The readout and the shell are mutually exclusive subtrees, so their
+    // window-level key bindings never live at once: the readout carries its
+    // transport keys while it is up, the shell's map (space, mod+k, the
+    // arrows) while it is.
     #[cfg(debug_assertions)]
     let content = when(show_readout, move || {
         crate::screens::bridge_readout::readout(model, state)
@@ -57,10 +57,10 @@ pub fn App() -> impl IntoElement {
         when(show_fixture, move || {
             crate::screens::dev_tokens::fixture(palette)
         })
-        .otherwise(move || home(palette))
+        .otherwise(move || crate::shell::install(model))
     });
     #[cfg(not(debug_assertions))]
-    let content = home(palette);
+    let content = crate::shell::install(model);
 
     view()
         .flex_1()
@@ -68,26 +68,4 @@ pub fn App() -> impl IntoElement {
         .bg(move || palette.get().background)
         .text_color(move || palette.get().ink)
         .child(content)
-}
-
-/// The N1 home view, reading the palette signal instead of the `nsh_base`
-/// theme: the riff name at the hero step (text-3xl at Inter `SemiBold`, the
-/// egui store's `hero_title_font` pairing) over the version line.
-fn home(palette: Signal<Palette>) -> impl IntoElement {
-    // `flex_1` is load-bearing: a view that sizes to its children leaves
-    // the centering no space to centre in (P0 correction 21).
-    view()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_4()
-        .bg(move || palette.get().background)
-        .text_color(move || palette.get().ink)
-        .child(
-            text(APP_NAME)
-                .text_3xl()
-                .font_family(INTER_FAMILY)
-                .font_weight(WEIGHT_SEMIBOLD),
-        )
-        .child(text(concat!("v", env!("CARGO_PKG_VERSION"))).text_sm())
 }

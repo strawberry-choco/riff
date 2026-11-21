@@ -57,7 +57,7 @@ const PROBE_TRACK_DURATION: Duration = Duration::from_secs(120);
 
 /// The two tracks the mock store carries: titles and artists the readout
 /// renders, so the tests can assert on words, not ids.
-fn probe_tracks() -> (Track, Track) {
+pub(crate) fn probe_tracks() -> (Track, Track) {
     let one = create_test_track_with_metadata(
         "/music/probe/one.wav",
         "/music/probe/one.wav",
@@ -78,7 +78,7 @@ fn probe_tracks() -> (Track, Track) {
 /// The mock runtime's playback engine: drain commands and write their
 /// session semantics. Runs parked forever on its own thread, exactly like
 /// `app_tests`' engine harness leaves its own.
-fn spawn_command_applier(
+pub(crate) fn spawn_command_applier(
     cmd_rx: Receiver<PlaybackCommand>,
     state: Arc<Mutex<PlaybackSession>>,
     library_ids: Vec<TrackId>,

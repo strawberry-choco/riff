@@ -130,6 +130,17 @@ pub struct ScalarSettings {
     /// exactly the ones the listener waits out with the window hidden, so the
     /// feature ships on. Inert on Linux, which has no notifier integration.
     pub system_notifications: bool,
+    /// The window's normal-mode frame, in screen points: position and size.
+    /// All four are `None` until the frontend has saved a placement, so a
+    /// store that never met the nsh frontend leaves the launch size to the
+    /// frontend's own default. Full screen is not persisted; a maximized
+    /// window carries the bounds it returns to.
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
+    pub window_width: Option<f32>,
+    pub window_height: Option<f32>,
+    /// Whether the window was maximized when the frame was last saved.
+    pub window_maximized: bool,
 }
 
 impl Default for ScalarSettings {
@@ -157,6 +168,11 @@ impl Default for ScalarSettings {
             replaygain_pass_album: false,
             reduce_motion: false,
             system_notifications: true,
+            window_x: None,
+            window_y: None,
+            window_width: None,
+            window_height: None,
+            window_maximized: false,
         }
     }
 }

@@ -74,13 +74,14 @@ fn table_info(store: &SqliteStore, table: &str) -> Vec<(String, String, bool, i6
 }
 
 /// The fully-populated `schema_migrations` inventory this build must record:
-/// every shipped version, in order and with no gaps. Migration 021 (the
-/// system-notifications preference) shipped after this ticket's `020`; the
-/// inventory here is deliberately derived, not hand-listed, so a later
-/// migration does not have to touch this file's history fixture again —
-/// only the count-style assertions below move with the shipped set.
+/// every shipped version, in order and with no gaps. Migrations 021 (the
+/// system-notifications preference) and 022 (the window geometry columns)
+/// shipped after this ticket's `020`; the inventory here is deliberately
+/// derived, not hand-listed, so a later migration does not have to touch
+/// this file's history fixture again — only the count-style assertions
+/// below move with the shipped set.
 fn expected_versions() -> Vec<i64> {
-    (1..=21).collect()
+    (1..=22).collect()
 }
 
 #[test]
@@ -651,7 +652,7 @@ fn test_reopening_a_store_written_by_this_build_reapplies_nothing() {
     );
     assert_eq!(
         count_of(&reopened, "SELECT COUNT(*) FROM schema_migrations"),
-        21,
+        22,
         "no duplicate bookkeeping row"
     );
     assert_eq!(
@@ -685,7 +686,7 @@ fn roll_back_to_019(store: &mut SqliteStore) {
     );
     assert_eq!(
         versions.last(),
-        Some(&21),
+        Some(&22),
         "the rolled-back store forgets only migration 020's row; every other recorded migration stays"
     );
     assert_eq!(

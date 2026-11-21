@@ -529,6 +529,27 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE app_settings
           ADD COLUMN system_notifications INTEGER NOT NULL DEFAULT 1 CHECK (system_notifications IN (0, 1));",
     },
+    Migration {
+        version: 22,
+        name: "022_window_geometry",
+        // The window's persisted frame (the nsh frontend's launch geometry):
+        // the normal-mode position and size in screen points, all NULL until
+        // a frontend has saved a placement, and the maximized flag — a
+        // maximized window carries the bounds it returns to. Full screen is
+        // not persisted. Same add-a-column precedent as migration 014; NULL
+        // columns with no default keep existing stores on their frontend's
+        // launch default until the frontend saves.
+        sql: "ALTER TABLE app_settings
+          ADD COLUMN window_x REAL;
+        ALTER TABLE app_settings
+          ADD COLUMN window_y REAL;
+        ALTER TABLE app_settings
+          ADD COLUMN window_width REAL;
+        ALTER TABLE app_settings
+          ADD COLUMN window_height REAL;
+        ALTER TABLE app_settings
+          ADD COLUMN window_maximized INTEGER NOT NULL DEFAULT 0 CHECK (window_maximized IN (0, 1));",
+    },
 ];
 
 /// Location of the Application Store database file: `riff.sqlite3` in the
@@ -4064,7 +4085,8 @@ impl SettingsStore for SqliteStore {
                             skip_hidden_files, scan_formats, read_embedded_artwork,
                             smart_lists_collapsed, close_quits_app,
                             replaygain_pass_track, replaygain_pass_album,
-                            replaygain_mode, reduce_motion, system_notifications
+                            replaygain_mode, reduce_motion, system_notifications,
+                            window_x, window_y, window_width, window_height, window_maximized
                      FROM app_settings WHERE id = 1",
                     [],
                     |row| {
@@ -4090,6 +4112,11 @@ impl SettingsStore for SqliteStore {
                             replaygain_mode: row.get(13)?,
                             reduce_motion: row.get::<_, i64>(14)? != 0,
                             system_notifications: row.get::<_, i64>(15)? != 0,
+                            window_x: row.get(16)?,
+                            window_y: row.get(17)?,
+                            window_width: row.get(18)?,
+                            window_height: row.get(19)?,
+                            window_maximized: row.get::<_, i64>(20)? != 0,
                         })
                     },
                 )
@@ -4145,7 +4172,10 @@ impl SettingsStore for SqliteStore {
                          read_embedded_artwork = ?9, smart_lists_collapsed = ?10,
                          close_quits_app = ?11, replaygain_pass_track = ?12,
                          replaygain_pass_album = ?13, replaygain_mode = ?14,
-                         reduce_motion = ?15, system_notifications = ?16
+                         reduce_motion = ?15, system_notifications = ?16,
+                         window_x = ?17, window_y = ?18,
+                         window_width = ?19, window_height = ?20,
+                         window_maximized = ?21
                      WHERE id = 1",
                     rusqlite::params![
                         scalars.volume,
@@ -4164,6 +4194,11 @@ impl SettingsStore for SqliteStore {
                         scalars.replaygain_mode,
                         i64::from(scalars.reduce_motion),
                         i64::from(scalars.system_notifications),
+                        scalars.window_x,
+                        scalars.window_y,
+                        scalars.window_width,
+                        scalars.window_height,
+                        i64::from(scalars.window_maximized),
                     ],
                 )
                 .map(|_| ())

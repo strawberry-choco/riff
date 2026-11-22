@@ -676,7 +676,7 @@ Done when.
 
 ### N16 Tests and artifacts
 
-Status: landed in code and CI, packaging not run locally. Evidence `evidence/nsh/n16/memo.md`; the nsh CLI download was blocked, so `nsh package` and artifact install are CI's proof.
+Status: landed in code and CI; Windows packaging run and launched locally. Evidence `evidence/nsh/n16/memo.md` (`logs/package-windows.log`, `shots/n16-packaged-shell.png`); Linux/macOS artifacts remain CI's proof.
 
 Depends on N15.
 

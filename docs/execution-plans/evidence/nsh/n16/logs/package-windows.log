@@ -1,0 +1,7 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.23s
+✓ built the Rust crate riff-gui-nsh (3.7s)
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 3m 47s
+✓ built the Windows runner of riff-gui-nsh (3m 47s)
+✓ packaged .nsh\out\riff and .nsh\out\riff.zip (2.7s)
+warn wrote .nsh\out\riff.iss but not the installer: install Inno Setup 6 (https://jrsoftware.org/isinfo.php, or `winget install JRSoftware.InnoSetup`) and package again, or run ISCC.exe on it

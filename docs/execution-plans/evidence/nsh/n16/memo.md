@@ -26,15 +26,24 @@ Evidence.
       `NSH_VERSION=v0.6.1` and runs `nsh package --target {windows,linux,macos}`
       from `crates/riff-gui-nsh`, then archives `.nsh/out/riff.zip` (Windows),
       `.nsh/out/riff.tar.gz` (Linux) and a zipped `.nsh/out/riff.app` (macOS).
-      The release notes' table and per-platform text describe the archive
-      shape.
-- [ ] Gap, environment: this machine could not download the nsh CLI.
-      `nsh.dev/install.ps1` and the GitHub release zip both failed
-      (connection reset, then a 120 s timeout). `nsh package` therefore was
-      not run locally, and no installer/artifact was produced or installed.
-      CI carries the pinned install and the packaging steps; the P0 memo
-      proves the output paths on Windows (`nsh 0.6.1`, `.nsh/out/riff/riff.exe`,
-      `riff.zip`, `riff.iss`).
+      The install steps set `NSH_INSTALL_DIR` and append its `bin` to
+      `$GITHUB_PATH` (the installers only patch the user PATH, so without this
+      the packaging steps could not see `nsh`), and each step asserts
+      `nsh --version` before moving on. The release notes' table and
+      per-platform text describe the archive shape.
+- [x] Packaging, Windows, run locally: the CLI was restored from the cached
+      P0 zip (`.scratch/nsh-p0/nsh-windows-x86_64.zip`, SHA256 matches the P0
+      memo) into `.scratch/nsh-cli/nsh/bin/nsh.exe` (`nsh 0.6.1`). Run from
+      `crates/riff-gui-nsh`: `nsh package --target windows -v` built the crate
+      (3.7 s) and the Windows runner (3 m 47 s), then wrote `.nsh/out/riff`
+      and `.nsh/out/riff.zip` (2.7 s). Artifact: `riff.zip` 17,541,580 bytes
+      (SHA256 `E01C4909…5A01A740`), `riff.exe` 41,293,312 bytes plus
+      `nsh/assets/@riff-gui-nsh/{brand,fonts,icons}`. The packaged exe opened
+      its window in 223 ms against the N3 fixture store and rendered the shell
+      (`shots/n16-packaged-shell.png`, launched by `tools/packaged-drive.ps1`);
+      log: `logs/package-windows.log`. Inno Setup 6 is not installed here, so
+      `riff.iss` was written but no `Setup.exe` was compiled — the workflow
+      archives the portable zip, not the installer.
 - [ ] Gap: the release runner moved from ubuntu-22.04 to 24.04 for GTK 4.14.
       The glibc 2.39 claim behind that move is still unverified, as the plan's
       risk section records.
@@ -42,4 +51,5 @@ Evidence.
       baselines exist.
 
 Files: `tests/nsh_flow_tests.rs`, `tests/nsh_perf_fixture.rs`,
-`tests/mod.rs`, `.github/workflows/release.yml`, the deleted golden doc.
+`tests/mod.rs`, `.github/workflows/release.yml`, `tools/packaged-drive.ps1`,
+the deleted golden doc.

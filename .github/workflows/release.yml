@@ -324,21 +324,34 @@ jobs:
           toolchain: 1.99.0
 
       # The nsh CLI is the packaging tool from N16 on. `NSH_VERSION` pins the
-      # installer to the same 0.6.1 the crates pin; the cache is the CLI's own
-      # `~/.nsh` tree, written by the installer.
-      - name: Install nsh
+      # installer to the same 0.6.1 the crates pin. The installer writes its
+      # runtimes under `NSH_INSTALL_DIR` and, on Unix, only symlinks into
+      # `~/.local/bin`; neither that directory nor the Windows user PATH is
+      # visible to a later step, so the bin directory is added to
+      # `$GITHUB_PATH` explicitly.
+      - name: Install nsh (Unix)
         if: runner.os != 'Windows'
         env:
           NSH_VERSION: v0.6.1
+          NSH_INSTALL_DIR: ${{ runner.temp }}/nsh
         shell: bash
-        run: curl -fsSL https://nsh.dev/install.sh | sh
+        run: |
+          set -euo pipefail
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$RUNNER_TEMP/nsh/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/nsh/bin/nsh" --version
 
-      - name: Install nsh
+      - name: Install nsh (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          NSH_VERSION: v0.6.1
+          NSH_INSTALL_DIR: ${{ runner.temp }}\nsh
         run: |
-          $env:NSH_VERSION = 'v0.6.1'
+          $ErrorActionPreference = 'Stop'
           irm https://nsh.dev/install.ps1 | iex
+          "$env:NSH_INSTALL_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$env:NSH_INSTALL_DIR\bin\nsh.exe" --version
 
       - name: Build
         run: cargo build --locked --release --workspace --bins

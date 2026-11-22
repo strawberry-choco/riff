@@ -73,7 +73,8 @@ pub(crate) struct TrackListingSpec {
     /// The listing the window serves (the flat seam or an album's display
     /// copy).
     pub kind: Listing,
-    /// The scroll memory slot the stage keeps.
+    /// The stage's identity; its scroll memory slot when the stage keeps
+    /// one ([`StageKind::remembers_scroll`]), which `Tracks` does not.
     pub stage_id: StageKind,
     /// The empty state's wording when no needle stands.
     pub plain: (&'static str, &'static str),
@@ -85,8 +86,8 @@ pub(crate) struct TrackListingSpec {
 
 /// The one track listing every track stage renders: the virtual list over
 /// the warm row window, its query-aware empty state, and the viewability
-/// handler that restores and remembers the stage's scroll position and
-/// drives the prefetch window.
+/// handler that restores and remembers the stage's scroll position when the
+/// stage keeps one, and drives the prefetch window.
 pub(crate) fn track_listing(
     model: Stored<UiModel>,
     state: UiState,
@@ -105,6 +106,7 @@ pub(crate) fn track_listing(
     );
     let kind = spec.kind;
     let memory_stage = spec.stage_id;
+    let remembers_scroll = memory_stage.remembers_scroll();
     virtual_list(
         move || total.get(),
         move |at| {
@@ -132,8 +134,10 @@ pub(crate) fn track_listing(
         // that order, or the save would overwrite the memory before the
         // restore read it.
         if let Some(viewable) = items.viewable {
-            restore_position(model, &state, &memory_stage, list, restore_armed);
-            remember_position(model, &state, &memory_stage, viewable.0);
+            if remembers_scroll {
+                restore_position(model, &state, &memory_stage, list, restore_armed);
+                remember_position(model, &state, &memory_stage, viewable.0);
+            }
             prefetch_as(model, &state, viewable, kind);
         }
     })

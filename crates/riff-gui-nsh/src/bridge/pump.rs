@@ -40,7 +40,7 @@ use crate::bridge::covers::{CoverArrival, CoverCache};
 use crate::bridge::runtime::UiModel;
 use crate::model::{
     CoverViews, EntityView, ListWindow, PlaybackView, PlaylistRow, SettingsSnapshot, SidebarView,
-    StageKind, album_rows, entity_rows, reads, stage_of_parts,
+    StageKind, StageRows, album_rows, entity_rows, reads, stage_plan_parts,
 };
 
 /// How far ahead of the current track the projection's Up Next window is
@@ -63,7 +63,7 @@ struct TickOutcome {
     covers_arrived: bool,
     list_total: Option<usize>,
     list_revision: Option<u64>,
-    browse: Option<Arc<[EntityView]>>,
+    columns: Option<Arc<[StageRows]>>,
     folder_roots: Option<Arc<[PathBuf]>>,
     custom_lists: Option<Result<Arc<[crate::model::CustomListRow]>, String>>,
     #[allow(clippy::option_option)]
@@ -91,10 +91,13 @@ pub(crate) struct PumpCache {
     primed: bool,
     list_total: usize,
     list_revision: u64,
-    /// The stage's identity the last build served: the kind, the search
-    /// needle, the listing sort and the entity roots' direction — the
-    /// content identity a move rebuilds against.
-    stage: Option<(StageKind, String, TrackSort, bool)>,
+    /// The column plan the last build served, the search needle, the listing
+    /// sort and the entity roots' direction — the content identity a move
+    /// rebuilds against.
+    stage: Option<(Vec<StageKind>, String, TrackSort, bool)>,
+    /// The entity stages' rows the last build read, kept across a plan move
+    /// so a drill-down reads only the column it added.
+    entity_rows: Vec<(StageKind, Arc<[EntityView]>)>,
     /// The custom smart lists last read, as the id/name pairs the sidebar
     /// and editor paint.
     custom_lists: Option<Vec<crate::model::CustomListRow>>,
@@ -130,6 +133,7 @@ impl PumpCache {
             list_total: 0,
             list_revision: 0,
             stage: None,
+            entity_rows: Vec::new(),
             custom_lists: None,
             open_playlist: None,
             open_smart_list: None,
@@ -278,8 +282,8 @@ pub fn install(model: Stored<UiModel>) {
         if let Some(revision) = outcome.list_revision {
             sigs.list_revision.set(revision);
         }
-        if let Some(rows) = outcome.browse {
-            sigs.browse.set(rows);
+        if let Some(rows) = outcome.columns {
+            sigs.columns.set(rows);
         }
         if let Some(roots) = outcome.folder_roots {
             sigs.folder_roots.set(roots);
@@ -345,7 +349,7 @@ fn tick(
         covers_arrived: false,
         list_total: None,
         list_revision: None,
-        browse: None,
+        columns: None,
         folder_roots: None,
         custom_lists: None,
         playlist_detail: None,
@@ -403,7 +407,7 @@ fn tick(
     //    discipline's one exception, not a habit.
     let folder_roots;
     let track_sort;
-    let stage;
+    let plan;
     let stage_desc;
     let mut stage_query: Option<String> = None;
     let mut path_views: Option<Arc<[crate::model::LibraryPathView]>> = None;
@@ -433,7 +437,7 @@ fn tick(
             );
         }
         track_sort = library.track_sort;
-        stage = stage_of_parts(
+        plan = stage_plan_parts(
             library.browse_mode,
             library.library_section,
             &library.browser_path,
@@ -648,73 +652,89 @@ fn tick(
 
     // 8. The stage's signals: the listing's total (the track stages' virtual
     //    list sizes with it; other stages size nothing), the warm row
-    //    window's freshness, and the entity stages' rows. The stage
-    //    identity — kind, search needle, listing sort, entity direction —
-    //    or the Library generation moving is a different listing behind the
-    //    bindings: the window resets and the list revision bumps, the
-    //    announcement the bindings repaint from (N6's sort/reset seam, now
-    //    answering for every stage). A search keystroke retargets the
-    //    projection the same way a sort change does.
-    let stage_moved =
-        cache
-            .stage
-            .as_ref()
-            .is_none_or(|(held, held_query, held_sort, held_desc)| {
-                held != &stage
-                    || held_query != stage_query.as_deref().unwrap_or("")
-                    || *held_sort != track_sort
-                    || *held_desc != stage_desc
-            });
-    if stage_moved {
-        let needle = stage_query.clone().unwrap_or_else(|| {
-            cache
-                .stage
-                .as_ref()
-                .map_or_else(String::new, |(_, held, _, _)| held.clone())
-        });
-        cache.stage = Some((stage.clone(), needle, track_sort, stage_desc));
-    }
+    //    window's freshness, and every entity column's rows. The plan,
+    //    search needle, listing sort and entity direction form the content
+    //    identity a move rebuilds against; a plan move that only appends the
+    //    Tracks column reuses the parent columns' rows and reads just the
+    //    stage it added.
+    let listing_moved = match cache.stage.as_ref() {
+        None => true,
+        Some((_, held_query, held_sort, held_desc)) => {
+            stage_query
+                .as_deref()
+                .is_some_and(|needle| needle != held_query.as_str())
+                || *held_sort != track_sort
+                || *held_desc != stage_desc
+        }
+    };
+    let plan_moved = cache
+        .stage
+        .as_ref()
+        .is_none_or(|(held, _, _, _)| held != &plan);
+    let stage_moved = listing_moved || plan_moved;
+    let entity_columns_moved = {
+        let next: Vec<&StageKind> = plan.iter().filter(|s| s.is_entity_listing()).collect();
+        let held: Vec<&StageKind> = cache.entity_rows.iter().map(|(stage, _)| stage).collect();
+        listing_moved || next != held
+    };
     let query: &str = stage_query.as_deref().unwrap_or_else(|| {
         cache
             .stage
             .as_ref()
             .map_or("", |(_, held, _, _)| held.as_str())
     });
-    let total = match &stage {
+    let deepest = plan
+        .last()
+        .expect("every stage plan names at least the section root");
+    let total = match deepest {
         StageKind::Flat => reads::track_count(&mut rt.session_views, query, track_sort),
         StageKind::Tracks { .. } => {
             if stage_moved {
-                *album_rows_out = album_rows(&mut rt.session_views, &stage, query, track_sort);
+                *album_rows_out = album_rows(&mut rt.session_views, deepest, query, track_sort);
             }
             album_rows_out.len()
         }
-        StageKind::ArtistsRoot
-        | StageKind::AlbumsRoot
-        | StageKind::GenresRoot
-        | StageKind::ArtistAlbums { .. }
-        | StageKind::GenreArtists { .. }
-        | StageKind::GenreArtistAlbums { .. } => {
-            if stage_moved {
-                outcome.browse = Some(entity_rows(
-                    &mut rt.session_views,
-                    &stage,
-                    query,
-                    stage_desc,
-                ));
-            }
-            0
-        }
-        StageKind::Folders => 0,
+        _ => 0,
     };
-    if total != cache.list_total {
-        cache.list_total = total;
-        outcome.list_total = Some(total);
+    if entity_columns_moved {
+        let retained = std::mem::take(&mut cache.entity_rows);
+        let mut rows = Vec::new();
+        for stage in plan.iter().filter(|stage| stage.is_entity_listing()) {
+            let held = retained
+                .iter()
+                .find(|(held, _)| held == stage)
+                .map(|(_, rows)| rows.clone());
+            let stage_rows = if listing_moved {
+                entity_rows(&mut rt.session_views, stage, query, stage_desc)
+            } else {
+                held.unwrap_or_else(|| entity_rows(&mut rt.session_views, stage, query, stage_desc))
+            };
+            rows.push(StageRows {
+                stage: stage.clone(),
+                rows: stage_rows,
+            });
+        }
+        cache.entity_rows = rows
+            .iter()
+            .map(|column| (column.stage.clone(), column.rows.clone()))
+            .collect();
+        outcome.columns = Some(Arc::from(rows));
     }
-    let window_dropped = list_window.set_query(query) | list_window.set_sort(track_sort);
-    if stage_moved || window_dropped {
+    if stage_moved {
+        let needle = stage_query
+            .clone()
+            .or_else(|| cache.stage.as_ref().map(|(_, held, _, _)| held.clone()))
+            .unwrap_or_default();
+        cache.stage = Some((plan.clone(), needle.clone(), track_sort, stage_desc));
+        list_window.set_query(needle.as_str());
+        list_window.set_sort(track_sort);
         list_window.reset();
         cache.list_revision += 1;
         outcome.list_revision = Some(cache.list_revision);
+    }
+    if total != cache.list_total {
+        cache.list_total = total;
+        outcome.list_total = Some(total);
     }
 
     // 8b. The background services' settled reports: the ReplayGain pass's

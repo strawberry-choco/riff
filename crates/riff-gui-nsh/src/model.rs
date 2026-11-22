@@ -159,16 +159,14 @@ impl Default for NavView {
     }
 }
 
-/// The Library view's stages: which single listing the browser area mounts.
-/// The egui crate's `column_plan` renders the stage as side-by-side columns
-/// (root beside drill); here the stage is the one `flex_1` region and shows
-/// the deepest active listing — the drill-down is a walk, and the parent's
-/// highlight rides the path (the unit's own adaptation, recorded in the
-/// trail).
+/// The Library view's stages: one variant per listing the browser can render.
+/// The pure [`stage_plan_parts`] lays the active section's stages out left to
+/// right, the pump reads a row batch per entity stage, and the stage renders
+/// one column per entry.
 ///
 /// One variant per listing the pump sizes and refreshes: the stage key the
 /// pump's step-8 comparison and the scroll memory's slots both name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StageKind {
     /// The flat All Tracks listing (the search query rides the row window).
     Flat,
@@ -195,69 +193,115 @@ pub enum StageKind {
     Folders,
 }
 
-/// The stage for one Library session's view state, the pure `column_plan`
-/// shape: the deepest active listing for the section and drill-down path.
-/// Path entries of the wrong kind for their level are ignored (section
-/// switches reset the path, but the plan stays defensive), so a stale or
-/// foreign entry falls back to the root listing.
+impl StageKind {
+    /// Whether the stage's rows are the entity list the pump reads in one
+    /// batch. `Flat`, `Tracks` and `Folders` render from other sources.
+    #[must_use]
+    pub fn is_entity_listing(&self) -> bool {
+        matches!(
+            self,
+            Self::ArtistsRoot
+                | Self::AlbumsRoot
+                | Self::GenresRoot
+                | Self::ArtistAlbums { .. }
+                | Self::GenreArtists { .. }
+                | Self::GenreArtistAlbums { .. }
+        )
+    }
+
+    /// Whether the stage keeps a remembered scroll position. Section roots
+    /// remember; every deeper column, the Tracks column included, resets on
+    /// a selection or content change (the egui scroll-memory contract).
+    #[must_use]
+    pub fn remembers_scroll(&self) -> bool {
+        matches!(
+            self,
+            Self::Flat | Self::ArtistsRoot | Self::AlbumsRoot | Self::GenresRoot
+        )
+    }
+}
+
+/// The Library stage's column plan, left to right, the egui `column_plan`
+/// shape ported: the Section's root, one stage per valid drill-down level,
+/// and the Tracks column when an album is selected. Path entries of the
+/// wrong kind for their level are ignored (section switches reset the path,
+/// but the plan stays defensive), so a stale or foreign entry falls back to
+/// the deepest valid prefix.
+#[must_use]
+pub fn stage_plan_parts(
+    browse_mode: BrowseMode,
+    section: LibrarySection,
+    path: &[BrowserSelection],
+) -> Vec<StageKind> {
+    match browse_mode {
+        BrowseMode::Folders => vec![StageKind::Folders],
+        BrowseMode::Library => match section {
+            LibrarySection::AllTracks => vec![StageKind::Flat],
+            LibrarySection::Artists => {
+                let mut plan = vec![StageKind::ArtistsRoot];
+                if let Some(BrowserSelection::Artist(artist)) = path.first() {
+                    plan.push(StageKind::ArtistAlbums {
+                        artist: artist.clone(),
+                    });
+                    if let Some(BrowserSelection::Album { artist, title }) = path.get(1) {
+                        plan.push(StageKind::Tracks {
+                            artist: artist.clone(),
+                            title: title.clone(),
+                            genre: None,
+                        });
+                    }
+                }
+                plan
+            }
+            LibrarySection::Albums => {
+                let mut plan = vec![StageKind::AlbumsRoot];
+                if let Some(BrowserSelection::Album { artist, title }) = path.first() {
+                    plan.push(StageKind::Tracks {
+                        artist: artist.clone(),
+                        title: title.clone(),
+                        genre: None,
+                    });
+                }
+                plan
+            }
+            LibrarySection::Genres => {
+                let mut plan = vec![StageKind::GenresRoot];
+                if let Some(BrowserSelection::Genre(genre)) = path.first() {
+                    plan.push(StageKind::GenreArtists {
+                        genre: genre.clone(),
+                    });
+                    if let Some(BrowserSelection::Artist(artist)) = path.get(1) {
+                        plan.push(StageKind::GenreArtistAlbums {
+                            artist: artist.clone(),
+                            genre: genre.clone(),
+                        });
+                        if let Some(BrowserSelection::Album { artist, title }) = path.get(2) {
+                            plan.push(StageKind::Tracks {
+                                artist: artist.clone(),
+                                title: title.clone(),
+                                genre: Some(genre.clone()),
+                            });
+                        }
+                    }
+                }
+                plan
+            }
+        },
+    }
+}
+
+/// The deepest stage for one Library session's view state, the plan's last
+/// entry. Path entries of the wrong kind for their level are ignored, so a
+/// stale or foreign entry falls back to the deepest valid prefix.
 #[must_use]
 pub fn stage_of_parts(
     browse_mode: BrowseMode,
     section: LibrarySection,
     path: &[BrowserSelection],
 ) -> StageKind {
-    match browse_mode {
-        BrowseMode::Folders => StageKind::Folders,
-        BrowseMode::Library => match section {
-            LibrarySection::AllTracks => StageKind::Flat,
-            LibrarySection::Artists => match path {
-                [BrowserSelection::Artist(artist)] => StageKind::ArtistAlbums {
-                    artist: artist.clone(),
-                },
-                [
-                    BrowserSelection::Artist(_),
-                    BrowserSelection::Album { artist, title },
-                ] => StageKind::Tracks {
-                    artist: artist.clone(),
-                    title: title.clone(),
-                    genre: None,
-                },
-                // The empty path and a foreign entry (a wrong-kind selection
-                // at this level) both land the root listing.
-                _ => StageKind::ArtistsRoot,
-            },
-            LibrarySection::Albums => match path {
-                [BrowserSelection::Album { artist, title }] => StageKind::Tracks {
-                    artist: artist.clone(),
-                    title: title.clone(),
-                    genre: None,
-                },
-                _ => StageKind::AlbumsRoot,
-            },
-            LibrarySection::Genres => match path {
-                [BrowserSelection::Genre(genre)] => StageKind::GenreArtists {
-                    genre: genre.clone(),
-                },
-                [
-                    BrowserSelection::Genre(genre),
-                    BrowserSelection::Artist(artist),
-                ] => StageKind::GenreArtistAlbums {
-                    artist: artist.clone(),
-                    genre: genre.clone(),
-                },
-                [
-                    BrowserSelection::Genre(genre),
-                    BrowserSelection::Artist(_),
-                    BrowserSelection::Album { artist, title },
-                ] => StageKind::Tracks {
-                    artist: artist.clone(),
-                    title: title.clone(),
-                    genre: Some(genre.clone()),
-                },
-                _ => StageKind::GenresRoot,
-            },
-        },
-    }
+    stage_plan_parts(browse_mode, section, path)
+        .pop()
+        .expect("every stage plan names at least the section root")
 }
 
 /// The stage the shell mounts for the nav state: `None` when the Library
@@ -295,6 +339,15 @@ pub struct EntityView {
     pub label: String,
     pub detail: String,
     pub cover_track: Option<TrackId>,
+}
+
+/// One entity column's batched rows, keyed by the stage that reads them.
+/// The pump publishes the active plan's entity stages as one vector; a
+/// column looks its own stage up and never reads the store per row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageRows {
+    pub stage: StageKind,
+    pub rows: Arc<[EntityView]>,
 }
 
 /// The track listings' display sort, the egui `sort_tracks` ported: the
@@ -974,21 +1027,17 @@ impl ListWindow {
 }
 
 /// Per-stage scroll memory, the egui `ui/scroll_memory.rs` contract adapted
-/// to the stage table: a stage's list unmounts on every navigation, so the
-/// position is saved continuously (every viewability report records it —
-/// the egui protocol's per-frame `end_section`) and restored at the first
-/// report after a remount, through `scroll_to_index`.
+/// to the stage table. Only the stages that keep a position ask for it
+/// ([`StageKind::remembers_scroll`]): a Section root or the flat list, whose
+/// list remounts after a section switch. Every deeper column resets on a
+/// selection or content change, so it never reads or writes a slot.
 ///
 /// The slot key is the stage's own identity ([`StageKind`], entity names
 /// included), the content fingerprint is the search query, the sort key and
-/// the Library generation the UI last saw — a fingerprint mismatch on
-/// restore resets to the top instead of restoring a stale offset, exactly
-/// the egui contract. The egui module held drill columns to no offset at
-/// all (their columns stayed mounted between selections, so egui's own
-/// state carried them); here every stage unmounts and the walk re-enters,
-/// so per-stage memory is the restoration contract the plan asks for.
-/// Slots are bounded (oldest evicted); a restart starts every stage at the
-/// top.
+/// the Library generation the UI last saw. A fingerprint mismatch on restore
+/// resets to the top instead of restoring a stale offset, exactly the egui
+/// contract. Slots are bounded (oldest evicted); a restart starts every
+/// stage at the top.
 #[derive(Default)]
 pub struct ScrollMemory {
     slots: Vec<(StageKind, ScrollSlot)>,
@@ -1659,8 +1708,8 @@ mod tests {
         );
     }
 
-    /// The stage plan: the deepest active listing per section and path, and
-    /// a path entry of the wrong kind for its level falls back to the root.
+    /// The stage plan: the side-by-side columns each section and path opens,
+    /// and a path entry of the wrong kind for its level adds no column.
     #[test]
     fn the_stage_plan_walks_the_drill_down_paths() {
         let artist = BrowserSelection::Artist("Amber Signals".to_owned());
@@ -1670,54 +1719,94 @@ mod tests {
         };
         let genre = BrowserSelection::Genre("Ambient".to_owned());
         assert_eq!(
-            stage_of_parts(BrowseMode::Library, LibrarySection::AllTracks, &[]),
-            StageKind::Flat
+            stage_plan_parts(BrowseMode::Library, LibrarySection::AllTracks, &[]),
+            vec![StageKind::Flat]
         );
         assert_eq!(
-            stage_of_parts(BrowseMode::Folders, LibrarySection::AllTracks, &[]),
-            StageKind::Folders
+            stage_plan_parts(BrowseMode::Folders, LibrarySection::AllTracks, &[]),
+            vec![StageKind::Folders]
         );
         assert_eq!(
-            stage_of_parts(BrowseMode::Library, LibrarySection::Artists, &[]),
-            StageKind::ArtistsRoot
+            stage_plan_parts(BrowseMode::Library, LibrarySection::Artists, &[]),
+            vec![StageKind::ArtistsRoot]
         );
         assert_eq!(
-            stage_of_parts(
+            stage_plan_parts(
                 BrowseMode::Library,
                 LibrarySection::Artists,
                 std::slice::from_ref(&artist)
             ),
-            StageKind::ArtistAlbums {
-                artist: "Amber Signals".to_owned()
-            }
+            vec![
+                StageKind::ArtistsRoot,
+                StageKind::ArtistAlbums {
+                    artist: "Amber Signals".to_owned()
+                },
+            ]
         );
         assert_eq!(
-            stage_of_parts(
+            stage_plan_parts(
                 BrowseMode::Library,
                 LibrarySection::Artists,
-                &[artist, album]
+                &[artist.clone(), album.clone()]
             ),
-            StageKind::Tracks {
+            vec![
+                StageKind::ArtistsRoot,
+                StageKind::ArtistAlbums {
+                    artist: "Amber Signals".to_owned()
+                },
+                StageKind::Tracks {
+                    artist: "Amber Signals".to_owned(),
+                    title: "Neon Tide".to_owned(),
+                    genre: None,
+                },
+            ]
+        );
+        assert_eq!(
+            stage_plan_parts(
+                BrowseMode::Library,
+                LibrarySection::Genres,
+                &[genre.clone(), artist.clone(), album]
+            ),
+            vec![
+                StageKind::GenresRoot,
+                StageKind::GenreArtists {
+                    genre: "Ambient".to_owned()
+                },
+                StageKind::GenreArtistAlbums {
+                    artist: "Amber Signals".to_owned(),
+                    genre: "Ambient".to_owned(),
+                },
+                StageKind::Tracks {
+                    artist: "Amber Signals".to_owned(),
+                    title: "Neon Tide".to_owned(),
+                    genre: Some("Ambient".to_owned()),
+                },
+            ]
+        );
+        // A foreign entry at the album level (a genre there, say) adds no
+        // track column: the plan keeps the root.
+        assert_eq!(
+            stage_plan_parts(BrowseMode::Library, LibrarySection::Albums, &[genre]),
+            vec![StageKind::AlbumsRoot]
+        );
+        let deepest = stage_plan_parts(
+            BrowseMode::Library,
+            LibrarySection::Artists,
+            &[
+                BrowserSelection::Artist("Amber Signals".to_owned()),
+                BrowserSelection::Album {
+                    artist: "Amber Signals".to_owned(),
+                    title: "Neon Tide".to_owned(),
+                },
+            ],
+        );
+        assert_eq!(
+            deepest.last(),
+            Some(&StageKind::Tracks {
                 artist: "Amber Signals".to_owned(),
                 title: "Neon Tide".to_owned(),
                 genre: None,
-            }
-        );
-        assert_eq!(
-            stage_of_parts(
-                BrowseMode::Library,
-                LibrarySection::Genres,
-                std::slice::from_ref(&genre)
-            ),
-            StageKind::GenreArtists {
-                genre: "Ambient".to_owned()
-            }
-        );
-        // A foreign entry at the album level (an artist there, say) never
-        // spawns a track listing: the plan falls back to the root listing.
-        assert_eq!(
-            stage_of_parts(BrowseMode::Library, LibrarySection::Albums, &[genre]),
-            StageKind::AlbumsRoot
+            })
         );
     }
 

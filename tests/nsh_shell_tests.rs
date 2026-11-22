@@ -1395,68 +1395,85 @@ fn start_browse() -> Headless {
     app
 }
 
-/// The Artists walk: the root lists the seeded artists; a row press lands
-/// the artist's albums; another lands the album's tracks — each stage
-/// rendering through the same stage slot, the session's drill-down path
-/// carried by the nav mirror.
+/// The Artists walk: the root and the artist's albums stay side by side as
+/// the album's Tracks column joins them; the session's drill-down path
+/// carries every selection.
 #[test]
 fn the_artists_walk_lands_on_albums_then_tracks() {
     let mut app = start_browse();
     app.press("id:nav-artists").unwrap();
-    app.wait_for("label:Paper Lanterns")
+    app.wait_for("id:column-artists >> label:Paper Lanterns")
         .expect("the artists root");
-    app.wait_for("label:Quiet Foxes").expect("every artist");
+    app.wait_for("id:column-artists >> label:Quiet Foxes")
+        .expect("every artist");
 
-    app.press("id:entity-row >> nth=1").unwrap();
-    app.wait_for("label:Golden Fields")
+    app.press("id:column-artists >> id:entity-row >> nth=1")
+        .unwrap();
+    app.wait_for("id:column-artist-albums >> label:Golden Fields")
         .expect("the artist's albums");
-    app.wait_for_gone("label:Quiet Foxes", Duration::from_secs(2))
-        .expect("the root's rows went with the drill");
+    app.wait_for("id:column-artists >> label:Quiet Foxes")
+        .expect("the parent column stays mounted");
 
-    app.press("id:entity-row >> nth=0").unwrap();
-    app.wait_for("text:Golden One").expect("the album's tracks");
-    app.wait_for("text:Golden Two")
+    app.press("id:column-artist-albums >> id:entity-row >> nth=0")
+        .unwrap();
+    app.wait_for("id:column-tracks >> text:Golden One")
+        .expect("the album's tracks");
+    app.wait_for("id:column-tracks >> text:Golden Two")
         .expect("both rows in canonical order");
+    app.wait_for("id:column-artists >> label:Paper Lanterns")
+        .expect("the root column stays beside the tracks");
 
     app.press("id:read-session").unwrap();
     app.wait_for("text:path artist Amber Signals > album Amber Signals / Golden Fields")
         .expect("the session's drill-down path holds both selections");
 }
 
-/// The Albums root walks straight to its tracks.
+/// The Albums root walks straight to its tracks, with the root column still
+/// beside them.
 #[test]
 fn the_albums_root_walks_to_its_tracks() {
     let mut app = start_browse();
     app.press("id:nav-albums").unwrap();
-    app.wait_for("label:Neon Tide").expect("the albums root");
-    app.wait_for("label:Paper Hearts").expect("every album");
+    app.wait_for("id:column-albums >> label:Neon Tide")
+        .expect("the albums root");
+    app.wait_for("id:column-albums >> label:Paper Hearts")
+        .expect("every album");
 
-    app.press("id:entity-row >> nth=0").unwrap();
-    app.wait_for("text:Neon One").expect("the album's tracks");
-    app.wait_for("text:Neon Two").expect("both rows");
+    app.press("id:column-albums >> id:entity-row >> nth=0")
+        .unwrap();
+    app.wait_for("id:column-tracks >> text:Neon One")
+        .expect("the album's tracks");
+    app.wait_for("id:column-tracks >> text:Neon Two")
+        .expect("both rows");
 }
 
 /// The Genres walk: genre, its artists, an artist's genre albums, and the
-/// album's genre-scoped tracks — four stages deep.
+/// album's genre-scoped tracks, four columns deep.
 #[test]
 fn the_genres_walk_reaches_the_tracks() {
     let mut app = start_browse();
     app.press("id:nav-genres").unwrap();
-    app.wait_for("label:Ambient").expect("the genres root");
-    app.wait_for("text:4 tracks")
+    app.wait_for("id:column-genres >> label:Ambient")
+        .expect("the genres root");
+    app.wait_for("id:column-genres >> text:4 tracks")
         .expect("the genre's count line");
 
-    app.press("id:entity-row >> nth=0").unwrap();
-    app.wait_for("label:Paper Lanterns")
+    app.press("id:column-genres >> id:entity-row >> nth=0")
+        .unwrap();
+    app.wait_for("id:column-genre-artists >> label:Paper Lanterns")
         .expect("the genre's artists");
 
-    app.press("id:entity-row >> nth=0").unwrap();
-    app.wait_for("label:Neon Tide")
+    app.press("id:column-genre-artists >> id:entity-row >> nth=0")
+        .unwrap();
+    app.wait_for("id:column-genre-artist-albums >> label:Neon Tide")
         .expect("the artist's albums in the genre");
 
-    app.press("id:entity-row >> nth=0").unwrap();
-    app.wait_for("text:Neon One")
+    app.press("id:column-genre-artist-albums >> id:entity-row >> nth=0")
+        .unwrap();
+    app.wait_for("id:column-tracks >> text:Neon One")
         .expect("the genre-scoped tracks");
+    app.wait_for("id:column-genres >> label:Ambient")
+        .expect("the root column stays at the left edge");
 }
 
 /// The search: the titlebar field's write filters the flat listing in real
@@ -1693,17 +1710,20 @@ fn n7_stage_drive_over_the_fixture_store() {
     // ROW, not the list (the stage mounts before the pump's build lands).
     timed_stage("nav-artists -> artists root (100 artists)", &mut || {
         app.press("id:nav-artists").unwrap();
-        app.wait_for("id:entity-row").unwrap();
+        app.wait_for("id:column-artists >> id:entity-row").unwrap();
     });
     // Drill into the first artist; the fixture's 100 artists each hold 5
     // albums.
     timed_stage("artist press -> albums stage", &mut || {
-        app.press("id:entity-row >> nth=0").unwrap();
-        app.wait_for("id:entity-row").unwrap();
+        app.press("id:column-artists >> id:entity-row >> nth=0")
+            .unwrap();
+        app.wait_for("id:column-artist-albums >> id:entity-row")
+            .unwrap();
     });
     timed_stage("album press -> tracks stage", &mut || {
-        app.press("id:entity-row >> nth=0").unwrap();
-        app.wait_for("id:row-title").unwrap();
+        app.press("id:column-artist-albums >> id:entity-row >> nth=0")
+            .unwrap();
+        app.wait_for("id:column-tracks >> id:row-title").unwrap();
     });
     timed_stage("nav-all-tracks -> flat stage", &mut || {
         app.press("id:nav-all-tracks").unwrap();
@@ -1711,11 +1731,11 @@ fn n7_stage_drive_over_the_fixture_store() {
     });
     timed_stage("nav-albums -> albums root (500 albums)", &mut || {
         app.press("id:nav-albums").unwrap();
-        app.wait_for("id:entity-row").unwrap();
+        app.wait_for("id:column-albums >> id:entity-row").unwrap();
     });
     timed_stage("nav-genres -> genres root (10 genres)", &mut || {
         app.press("id:nav-genres").unwrap();
-        app.wait_for("id:entity-row").unwrap();
+        app.wait_for("id:column-genres >> id:entity-row").unwrap();
     });
     timed_stage("nav-folders -> folders stage (no roots)", &mut || {
         app.press("id:nav-folders").unwrap();
@@ -1725,7 +1745,7 @@ fn n7_stage_drive_over_the_fixture_store() {
     // reads, so the same stage costs its machinery alone.
     timed_stage("nav-artists again (warm)", &mut || {
         app.press("id:nav-artists").unwrap();
-        app.wait_for("id:entity-row").unwrap();
+        app.wait_for("id:column-artists >> id:entity-row").unwrap();
     });
 }
 

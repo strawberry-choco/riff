@@ -13,10 +13,12 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
 use riff_backend::app::preferences::WindowGeometry;
+use riff_backend::app::state::{BrowseMode, LibrarySection, ViewMode};
+use riff_backend::domain::{PlaylistId, SmartPlaylistKind};
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
-use crate::model::StageKind;
+use crate::model::{NavView, StageKind};
 
 use super::player_bar;
 use super::sidebar;
@@ -38,6 +40,8 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
     let list = element_ref();
     let (focus, nav_focus, list_focus) = keyboard(model, search, list);
     clear_list_focus_on_stage_switch(state, list_focus);
+    let nav = state.nav;
+    let branch = computed(move || ShellBranch::of(&nav.get()));
 
     view()
         .flex_1()
@@ -46,7 +50,7 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         .bg(move || palette.get().background)
         .text_color(move || palette.get().ink)
         .child(title_bar::bar(model, state, &search, focus))
-        .child(middle(model, state, nav_focus, list_focus, list))
+        .child(middle(model, state, nav_focus, list_focus, list, branch))
         .child(dynamic(move || {
             if state.queue_open.get() {
                 crate::screens::queue::panel(model, state).into_element()
@@ -60,83 +64,94 @@ pub fn install(model: Stored<UiModel>) -> impl IntoElement {
         })
 }
 
-/// The middle region: the sidebar panel beside the stage slot. The slot is
-/// the stage table (N7): the stage the nav state names mounts there — the
-/// flat All Tracks listing, a browse drill-down, the Folders tree — and an
-/// empty surface for the views whose stages are later units' (playlists,
-/// smart lists, Now Playing, Settings). `flex_1` is load-bearing: without
-/// it the region sizes to its children and the stage collapses to nothing
-/// (P0 correction 21).
+/// Which top-level surface the stage slot mounts. It names only the fields
+/// that change the surface itself, so a selection write inside the browse
+/// columns leaves the composed tree mounted and the columns' `each` diffs in
+/// place instead of remounting every column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellBranch {
+    NowPlaying,
+    Settings,
+    Playlist(PlaylistId),
+    SmartList(SmartPlaylistKind),
+    CustomList(PlaylistId),
+    Folders,
+    Section(LibrarySection),
+}
+
+impl ShellBranch {
+    fn of(nav: &NavView) -> Self {
+        if nav.view_mode == ViewMode::NowPlaying {
+            return Self::NowPlaying;
+        }
+        if nav.view_mode == ViewMode::Settings {
+            return Self::Settings;
+        }
+        if let Some(playlist) = &nav.playlist {
+            return Self::Playlist(playlist.clone());
+        }
+        if let Some(kind) = nav.smart_list {
+            return Self::SmartList(kind);
+        }
+        if let Some(list) = &nav.custom_list {
+            return Self::CustomList(list.clone());
+        }
+        if nav.browse_mode == BrowseMode::Folders {
+            return Self::Folders;
+        }
+        Self::Section(nav.library_section)
+    }
+}
+
+/// The middle region: the sidebar panel beside the stage slot. The branch
+/// memo picks the surface; the browse stage builds its columns from the nav
+/// signal it reads itself. `flex_1` is load-bearing: without it the region
+/// sizes to its children and the stage collapses to nothing (P0 correction
+/// 21).
 fn middle(
     model: Stored<UiModel>,
     state: UiState,
     nav_focus: Signal<Option<usize>>,
     list_focus: Signal<Option<usize>>,
     list: ElementRef,
+    branch: Memo<ShellBranch>,
 ) -> impl IntoElement {
-    let nav = state.nav;
     view()
         .flex_1()
         .flex_row()
         .child(sidebar::panel(model, state, nav_focus))
-        .child(dynamic(move || {
-            let view = nav.get();
-            match view.view_mode {
-                riff_backend::app::state::ViewMode::NowPlaying => {
-                    crate::screens::now_playing::screen(model, state).into_element()
-                }
-                riff_backend::app::state::ViewMode::Settings => {
-                    crate::screens::settings::screen(model, state).into_element()
-                }
-                riff_backend::app::state::ViewMode::Library => {
-                    if view.playlist.is_some() {
-                        return crate::screens::playlists::stage(model, state).into_element();
-                    }
-                    if view.smart_list.is_some() || view.custom_list.is_some() {
-                        return crate::screens::smart_playlists::stage(model, state).into_element();
-                    }
-                    match crate::model::stage_of(&view) {
-                        None => empty_stage(state).into_element(),
-                        Some(StageKind::Flat) => {
-                            crate::screens::library::list::stage(model, state, list, list_focus)
-                                .into_element()
-                        }
-                        Some(StageKind::Folders) => {
-                            crate::screens::library::folders::stage(model, state).into_element()
-                        }
-                        Some(kind @ StageKind::Tracks { .. }) => {
-                            crate::screens::library::browse::tracks_stage(
-                                model, state, list, list_focus, kind,
-                            )
-                            .into_element()
-                        }
-                        Some(kind) => {
-                            crate::screens::library::browse::entity_stage(model, state, kind)
-                                .into_element()
-                        }
-                    }
-                }
+        .child(dynamic(move || match branch.get() {
+            ShellBranch::NowPlaying => {
+                crate::screens::now_playing::screen(model, state).into_element()
             }
+            ShellBranch::Settings => crate::screens::settings::screen(model, state).into_element(),
+            ShellBranch::Playlist(_) => {
+                crate::screens::playlists::stage(model, state).into_element()
+            }
+            ShellBranch::SmartList(_) | ShellBranch::CustomList(_) => {
+                crate::screens::smart_playlists::stage(model, state).into_element()
+            }
+            ShellBranch::Folders => {
+                crate::screens::library::folders::stage(model, state).into_element()
+            }
+            ShellBranch::Section(section) => match section {
+                LibrarySection::AllTracks => {
+                    crate::screens::library::list::stage(model, state, list, list_focus)
+                        .into_element()
+                }
+                _ => {
+                    crate::screens::library::browse::stage(model, state, section, list, list_focus)
+                        .into_element()
+                }
+            },
         }))
 }
-
-/// The stage slot's empty surface: a later unit's stage (the plan's N10
-/// playlists, N12 smart lists, N13 Now Playing and Settings).
-fn empty_stage(state: UiState) -> impl IntoElement {
-    let palette = state.palette;
-    view()
-        .flex_1()
-        .test_id("stage")
-        .bg(move || palette.get().surface_row)
-}
-
 /// The phantom-segment cleanup (N6's carried-forward flag): a stage switch
 /// unmounts the rows the traversal focused, and `list_focus` naming a row
-/// of a dead stage left the arrows walking an invisible segment. Any nav
-/// move remounts the slot — so every nav move clears the segment, not
-/// just Escape. The search retarget keeps the stage (its rows move under
-/// an unchanged focus, which the egui frame also kept) — the cleanup reads
-/// only the nav.
+/// of a dead stage left the arrows walking an invisible segment. Every nav
+/// move clears the segment, not just Escape. The search retarget keeps the
+/// listing (its rows move under an unchanged focus, which the egui frame
+/// also kept) — the cleanup reads only the nav.
 fn clear_list_focus_on_stage_switch(state: UiState, list_focus: Signal<Option<usize>>) {
     let nav = state.nav;
     effect(move || {

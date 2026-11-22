@@ -1,13 +1,11 @@
-//! The browse stages: the drill-downs the Library sections walk (Artists →
-//! albums → tracks; Albums → tracks; Genres → artists → albums → tracks)
-//! and the tracks stage every one of them ends at. The egui crate's
-//! `ui/app/browser_pane.rs` is the behavior contract — the stage plan over
-//! the drill-down path, the entity rows' facts, the selection writes, and
-//! the backend's matching rules under a query — with the egui elastic
-//! column stage collapsed to one listing: the nsh stage is the fixed
-//! `flex_1` region and shows the deepest active listing, the drill-down is
-//! a walk, and the parent's highlight rides the path (the unit's own
-//! adaptation, recorded in the trail).
+//! The browse stage: the side-by-side columns the Library sections open
+//! (Artists → albums → tracks; Albums → tracks; Genres → artists → albums →
+//! tracks) and the Tracks column every one of them can end at. The egui
+//! crate's `ui/app/browser_pane.rs` and `column_plan` are the behavior
+//! contract — the stage plan over the drill-down path, the entity rows'
+//! facts, the selection writes, and the backend's matching rules under a
+//! query — rendered here as one flex row of fixed-width columns whose last
+//! column absorbs the remainder.
 //!
 //! Two row shapes, one discipline. Entity listings read one batched answer
 //! per stage build (the pump's read, generation-cached; a stage rebuild
@@ -16,22 +14,24 @@
 //! ([`super::list`]): the window's refill indexes the stage's display copy
 //! the pump read — no per-row store reads either way.
 
+use std::sync::Arc;
+
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
-use riff_backend::app::state::BrowserSelection;
+use riff_backend::app::state::{BrowseMode, BrowserSelection, LibrarySection};
 use riff_backend::domain::TrackId;
 
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::components::cover;
-use crate::model::{EntityView, StageKind};
+use crate::model::{EntityView, StageKind, StageRows, stage_plan_parts};
 use crate::screens::library::list::{self, Listing, remember_position, restore_position};
 use crate::screens::library::search;
 use crate::theme::tokens;
 
-/// The stage's shell: the listing beside the inspector — the flat stage's
-/// shape, shared by every Library stage (the egui inspector followed the
-/// selection in all of them).
+/// The single-list stage's shell: the listing beside the inspector — the
+/// flat stage's shape and the playlist and smart-list stages'. The browse
+/// sections compose their own columns in [`stage`].
 pub(crate) fn stage_shell(
     model: Stored<UiModel>,
     state: UiState,
@@ -53,16 +53,113 @@ pub(crate) fn stage_shell(
         .child(crate::screens::inspector::panel(model, state))
 }
 
-/// An entity stage: the listing of the stage's batched rows, beside the
-/// inspector. Sized by the browse signal; the viewability handler asks the
-/// covers for the rows it shows (widened ahead of the viewport, the same
-/// discipline the track window keeps) and drives the stage's scroll memory.
-pub fn entity_stage(model: Stored<UiModel>, state: UiState, kind: StageKind) -> impl IntoElement {
-    let listing = entity_listing(model, state, kind);
-    stage_shell(model, state, listing)
+/// The browse stage: one column per entry of the section's plan, left to
+/// right, beside the inspector. The plan is the same pure
+/// [`stage_plan_parts`] the pump reads, so the columns and their row batches
+/// cannot disagree. Columns are keyed by [`StageKind`], so a parent column
+/// keeps its nodes and native scroll while a deeper selection replaces only
+/// the column it changes.
+pub fn stage(
+    model: Stored<UiModel>,
+    state: UiState,
+    section: LibrarySection,
+    list: ElementRef,
+    list_focus: Signal<Option<usize>>,
+) -> impl IntoElement {
+    let palette = state.palette;
+    let nav = state.nav;
+    view()
+        .flex_1()
+        .flex_row()
+        .test_id("library-stage")
+        .bg(move || palette.get().surface_row)
+        .child(each(
+            move || stage_plan_parts(BrowseMode::Library, section, &nav.get().browser_path),
+            StageKind::clone,
+            move |stage: ReadSignal<StageKind>, index: ReadSignal<usize>| {
+                column(model, state, section, stage.get(), index, list, list_focus)
+            },
+        ))
+        .child(crate::screens::inspector::panel(model, state))
 }
 
-/// The entity listing: the virtual list over the browse signal, its
+/// One list column: every column starts from the preferred `COLUMN_WIDTH`
+/// basis and shrinks with the stage; the last grows into the remainder. A
+/// hairline separates it from its neighbour. No horizontal scrolling.
+fn column(
+    model: Stored<UiModel>,
+    state: UiState,
+    section: LibrarySection,
+    kind: StageKind,
+    index: ReadSignal<usize>,
+    list: ElementRef,
+    list_focus: Signal<Option<usize>>,
+) -> AnyElement {
+    let palette = state.palette;
+    let nav = state.nav;
+    let is_last = move || {
+        index.get() + 1
+            == stage_plan_parts(BrowseMode::Library, section, &nav.get().browser_path).len()
+    };
+    let listing = match &kind {
+        StageKind::Tracks { .. } => list::track_listing(
+            model,
+            state,
+            list,
+            list_focus,
+            list::TrackListingSpec {
+                kind: Listing::Album,
+                stage_id: kind.clone(),
+                plain: ("No tracks here yet", "This selection has nothing to show."),
+                filtered: ("No matching tracks", "Nothing in this view matches"),
+                test_id: "entity-track-list",
+            },
+        )
+        .into_element(),
+        _ => entity_listing(model, state, kind.clone()).into_element(),
+    };
+    view()
+        .flex_col()
+        .min_w(px(0.0))
+        .flex_shrink(1.0)
+        .basis(px(tokens::COLUMN_WIDTH))
+        .flex_grow(move || if is_last() { 1.0_f32 } else { 0.0_f32 })
+        .overflow_hidden()
+        .border_r(move || {
+            if is_last() {
+                px(0.0)
+            } else {
+                px(tokens::BORDER_HAIRLINE)
+            }
+        })
+        .border_color(move || palette.get().line)
+        .test_id(column_test_id(&kind))
+        .child(
+            view()
+                .flex_1()
+                .flex_col()
+                .p(px(tokens::SPACE_LG))
+                .child(listing),
+        )
+        .into_element()
+}
+
+/// The stable test id one column carries, named by the listing it shows.
+fn column_test_id(kind: &StageKind) -> &'static str {
+    match kind {
+        StageKind::Flat => "column-flat",
+        StageKind::Tracks { .. } => "column-tracks",
+        StageKind::ArtistsRoot => "column-artists",
+        StageKind::ArtistAlbums { .. } => "column-artist-albums",
+        StageKind::AlbumsRoot => "column-albums",
+        StageKind::GenresRoot => "column-genres",
+        StageKind::GenreArtists { .. } => "column-genre-artists",
+        StageKind::GenreArtistAlbums { .. } => "column-genre-artist-albums",
+        StageKind::Folders => "column-folders",
+    }
+}
+
+/// The entity listing: the virtual list over the column's batched rows, its
 /// query-aware empty state, and the handler above.
 fn entity_listing(model: Stored<UiModel>, state: UiState, kind: StageKind) -> impl IntoElement {
     let palette = state.palette;
@@ -70,14 +167,21 @@ fn entity_listing(model: Stored<UiModel>, state: UiState, kind: StageKind) -> im
     let list = element_ref();
     let memory_stage = kind.clone();
     let covers_kind = kind.clone();
+    let remembers_scroll = kind.remembers_scroll();
+    let rows_signal = state.columns;
+    let rows_for = {
+        let kind = kind.clone();
+        move || stage_rows(rows_signal, &kind)
+    };
+    let count_rows = rows_for.clone();
     let (plain, filtered) = entity_copy(&kind);
     let empty = search::empty_state_for(palette, move || state.search.get(), plain, filtered);
     virtual_list(
-        move || state.browse.get().len(),
+        move || count_rows().len(),
         move |at| {
-            let rows = state.browse;
+            let rows = rows_for.clone();
             let kind = kind.clone();
-            let facts = move || rows.get().get(at.index()).cloned();
+            let facts = move || rows().get(at.index()).cloned();
             entity_row(model, state, kind, facts)
         },
     )
@@ -87,12 +191,28 @@ fn entity_listing(model: Stored<UiModel>, state: UiState, kind: StageKind) -> im
     .test_id("entity-list")
     .on_viewable_items_change(move |items: &ViewableItems| {
         if let Some(viewable) = items.viewable {
-            restore_position(model, &state, &memory_stage, list, restore_armed);
-            remember_position(model, &state, &memory_stage, viewable.0);
+            if remembers_scroll {
+                restore_position(model, &state, &memory_stage, list, restore_armed);
+                remember_position(model, &state, &memory_stage, viewable.0);
+            }
             want_entity_covers(model, &state, &covers_kind, viewable);
         }
     })
     .empty(empty)
+}
+
+/// One stage's rows out of the pump's per-column batches. A stage whose
+/// read has not landed yet reads as empty, the same one-frame window the
+/// single-stage build had.
+fn stage_rows(columns: Signal<Arc<[StageRows]>>, stage: &StageKind) -> Arc<[EntityView]> {
+    columns
+        .get()
+        .iter()
+        .find(|column| &column.stage == stage)
+        .map_or_else(
+            || Arc::<[EntityView]>::from([]),
+            |column| column.rows.clone(),
+        )
 }
 
 /// The covers the entity rows in `viewable` (widened ahead of the viewport,
@@ -108,7 +228,7 @@ fn want_entity_covers(
     kind: &StageKind,
     viewable: (usize, usize),
 ) {
-    let rows = state.browse.get();
+    let rows = stage_rows(state.columns, kind);
     let len = rows.len();
     if len == 0 {
         return;
@@ -147,33 +267,6 @@ fn row_cover_track(model: &mut UiModel, kind: &StageKind, row: &EntityView) -> O
         }
         _ => None,
     })
-}
-
-/// The tracks stage: the selected album's track listing — the same warm
-/// row window the flat list renders through, refilled from the stage's
-/// display copy (no store read per row), its element ref reaching the
-/// shell's traversal like the flat stage's.
-pub fn tracks_stage(
-    model: Stored<UiModel>,
-    state: UiState,
-    list: ElementRef,
-    list_focus: Signal<Option<usize>>,
-    kind: StageKind,
-) -> impl IntoElement {
-    let listing = list::track_listing(
-        model,
-        state,
-        list,
-        list_focus,
-        list::TrackListingSpec {
-            kind: Listing::Album,
-            stage_id: kind,
-            plain: ("No tracks here yet", "This selection has nothing to show."),
-            filtered: ("No matching tracks", "Nothing in this view matches"),
-            test_id: "entity-track-list",
-        },
-    );
-    stage_shell(model, state, listing)
 }
 
 /// One entity row: the egui `browser_row`'s anatomy — the cover tile (or

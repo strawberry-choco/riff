@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::model::{
-    AppearanceMode, CustomListRow, EntityView, LibraryPathView, NavView, PlaybackView,
-    PlaylistDetail, SettingsPage, SettingsSnapshot, SidebarView, SmartListDetail, TagDraft,
+    AppearanceMode, CustomListRow, LibraryPathView, NavView, PlaybackView, PlaylistDetail,
+    SettingsPage, SettingsSnapshot, SidebarView, SmartListDetail, StageRows, TagDraft,
 };
 use crate::screens::smart_playlists::rules::SmartDraft;
 use crate::theme::Palette;
@@ -93,11 +93,12 @@ pub struct UiState {
     /// serves custom views only, so the restore cannot ride a listener on
     /// the field itself.
     pub search_text: Signal<String>,
-    /// The active entity stage's rows (the artists/albums/genres listings),
-    /// read and shaped by the pump — one batched read per stage build.
-    /// `Flat`/`Tracks` render track rows out of the row window instead and
-    /// leave this signal untouched.
-    pub browse: Signal<Arc<[EntityView]>>,
+    /// The active browse plan's entity stages' rows (the artists/albums/
+    /// genres columns), read and shaped by the pump — one batched read per
+    /// entity stage build. `Flat`/`Tracks` render track rows out of the row
+    /// window instead and appear here only when the plan also holds entity
+    /// columns.
+    pub columns: Signal<Arc<[StageRows]>>,
     /// The Library session's folder roots, as the pump last read them —
     /// the Folders tree's top level. A session read a render binding cannot
     /// take (standing order 6); the pump already reads the paths every
@@ -210,7 +211,7 @@ impl UiState {
             covers: signal(0),
             search: signal(String::new()),
             search_text: signal(String::new()),
-            browse: signal(Arc::from([])),
+            columns: signal(Arc::from([])),
             folder_roots: signal(Arc::from([])),
             folder_open: signal(Arc::new(HashSet::new())),
             folder_selected: signal(None),

@@ -65,14 +65,18 @@ fn main() -> impl std::process::Termination {
             // persisted geometry.
             size: (1200, 800),
             fps: std::env::var_os("NSH_FPS").is_some(),
+            // The packaged app's icon comes from `nsh package`; a source
+            // `cargo run` has no executable resource or app bundle, so it
+            // hands the platform the brand file itself (Linux has no runtime
+            // icon option). The fonts and icons are compiled in (see
+            // `theme::fonts` and `theme::icons`), so `asset_base` stays
+            // unset.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            icon: riff_gui_nsh::platform::window_icon(),
             // Left to their defaults on purpose: `cache` is N6's (the cover
-            // pipeline decides where the image cache lives), `icon` is N16's
-            // (the packager writes the executable's icon), `login_item` is
+            // pipeline decides where the image cache lives), `login_item` is
             // already false, and `data_dir` stays the per-id default — N1
-            // opens no store, so no unit has claimed an override. The fonts
-            // and icons are compiled in (see `theme::fonts` and
-            // `theme::icons`), so `asset_base` stays unset until a unit
-            // names a real `asset:/` consumer with a verified layout.
+            // opens no store, so no unit has claimed an override.
             ..Default::default()
         },
     )

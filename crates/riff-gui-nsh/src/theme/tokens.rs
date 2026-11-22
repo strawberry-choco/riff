@@ -87,6 +87,13 @@ pub const MOTION_REDUCED: f32 = 0.0;
 
 /// `--riff-titlebar-h` — 56 px top bar.
 pub const TITLEBAR_H: f32 = 56.0;
+/// The titlebar brand mark's box: the egui strip's 18 x 20 equalizer glyph.
+pub const WORDMARK_MARK_W: f32 = 18.0;
+pub const WORDMARK_MARK_H: f32 = 20.0;
+/// The gap between the mark and the "riff" text: the egui strip's 16 px.
+pub const WORDMARK_GAP: f32 = 16.0;
+/// The "riff" wordmark's type size: the egui strip's 18 px `SemiBold`.
+pub const WORDMARK_TEXT: f32 = 18.0;
 /// `--riff-sidebar-w` — 280 px sidebar.
 pub const SIDEBAR_W: f32 = 280.0;
 /// Preferred width of an entity list column in the elastic column stage:

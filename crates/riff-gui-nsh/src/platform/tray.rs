@@ -7,6 +7,7 @@
 //! dispatches through the UI transport, so the tray is a second door to the
 //! same engine.
 
+use nsh_core::element::ImageSrc;
 use nsh_core::element::desktop::{MenuItem, set_tray, tray};
 use nsh_core::prelude::*;
 use riff_backend::app::MutexExt;
@@ -14,6 +15,7 @@ use riff_backend::app::MutexExt;
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::platform::window_state;
+use crate::theme::brand::MARK_SVG;
 
 /// Install the tray. Off desktops `set_tray` is a no-op.
 pub fn install(model: Stored<UiModel>, _state: UiState) {
@@ -40,7 +42,10 @@ pub fn install(model: Stored<UiModel>, _state: UiState) {
         MenuItem::separator(),
         MenuItem::new("Quit").on_select(quit),
     ];
+    // The mark is inline SVG, the same source the titlebar draws. The
+    // `asset:/` PNG needs an asset base that a dev `cargo run` does not
+    // have, and it failed there; the data URI never depends on the layout.
     let mut tray = tray().tooltip("riff").menu(items);
-    tray = tray.icon(asset!("brand/riff-1024.png"));
+    tray = tray.icon(ImageSrc::svg_markup(MARK_SVG));
     set_tray(tray.on_click(|_| window_state::show()));
 }

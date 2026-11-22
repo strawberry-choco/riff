@@ -13,12 +13,14 @@
 use nsh_base::input;
 use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
 use nsh_core::element::desktop::{current_window, title_bar};
+use nsh_core::element::{ImageSrc, svg};
 use nsh_core::prelude::*;
 
 use crate::APP_NAME;
 use crate::bridge::UiModel;
 use crate::bridge::state::UiState;
 use crate::theme::Palette;
+use crate::theme::brand::MARK_SVG;
 use crate::theme::fonts::{INTER_FAMILY, WEIGHT_SEMIBOLD};
 use crate::theme::tokens;
 
@@ -61,18 +63,36 @@ pub fn bar(
         .pl(move || title_bar().left + px(tokens::SPACE_LG))
         .pr(move || title_bar().right + px(tokens::SPACE_LG))
         .test_id("titlebar")
-        .child(wordmark(palette))
+        .child(brand(palette))
         .child(status(state))
         .child(search_field(model, state, search, focus))
 }
 
-/// The wordmark, at the egui store's hero pairing (`SemiBold` Inter).
+/// The brand cluster: the equalizer mark, then the "riff" wordmark — the
+/// egui strip's left cluster, both in the brand orange.
+fn brand(palette: Signal<Palette>) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(tokens::WORDMARK_GAP))
+        .child(
+            svg(ImageSrc::svg_markup(MARK_SVG))
+                .w(px(tokens::WORDMARK_MARK_W))
+                .h(px(tokens::WORDMARK_MARK_H))
+                .test_id("brand-mark"),
+        )
+        .child(wordmark(palette))
+}
+
+/// The wordmark, at the egui strip's 18 px `SemiBold` Inter, in the brand
+/// orange.
 fn wordmark(palette: Signal<Palette>) -> impl IntoElement {
     text(APP_NAME)
-        .text_sm()
+        .text_size(px(tokens::WORDMARK_TEXT))
         .font_family(INTER_FAMILY)
         .font_weight(WEIGHT_SEMIBOLD)
-        .text_color(move || palette.get().ink)
+        .text_color(move || palette.get().brand_primary)
+        .test_id("wordmark")
 }
 
 /// The status line: the newest typed notice, or nothing. `flex_1` gives

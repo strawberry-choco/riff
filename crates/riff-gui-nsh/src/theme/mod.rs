@@ -11,7 +11,9 @@
 //!   dimensions and the menu/window shadows.
 //! - [`fonts`] — the four vendored Inter weights and their asset constants.
 //! - [`icons`] — the 35 Lucide glyphs with the size-and-tint API.
+//! - [`brand`] — the riff equalizer mark shared by the titlebar and tray.
 
+pub mod brand;
 pub mod fonts;
 pub mod icons;
 pub mod palette;

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- riff brand mark: the wordmark's static equalizer glyph.
+       Four bars at WORDMARK_BARS ([0.55, 0.95, 0.7, 0.4]), 10% inset,
+       rx = bar-width/2, in BRAND_500 (#f0821e). The titlebar draws this
+       file through `svg()` and the tray hands the same markup to the
+       platform's image pipeline, so the two cannot drift. `riff-1024.png`
+       is the same mark for the packaged app icon. -->
+  <rect x="102.4"   y="286.72" width="128" height="450.56" rx="64" fill="#f0821e"/>
+  <rect x="332.8"   y="122.88" width="128" height="778.24" rx="64" fill="#f0821e"/>
+  <rect x="563.2"   y="225.28" width="128" height="573.44" rx="64" fill="#f0821e"/>
+  <rect x="793.6"   y="348.16" width="128" height="327.68" rx="64" fill="#f0821e"/>
+</svg>

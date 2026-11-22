@@ -6,9 +6,10 @@
 //! bridge's `UiState` — the same one `Signal<Palette>` store ADR 0004's
 //! amendment names.
 //!
-//! Debug builds open on the bridge readout (mod+alt+r toggles it, mod+alt+t
-//! opens the N2 fixture) and mount the shell only when the readout is
-//! hidden; release builds mount the shell at the root.
+//! Every build mounts the shell at the root; debug builds also carry the
+//! bridge readout (mod+alt+r, hidden by default) and the N2 fixture
+//! (mod+alt+t, hidden by default) as mutually exclusive overlays, so the
+//! shell's window-level keys never live beside theirs.
 
 use nsh_core::prelude::*;
 

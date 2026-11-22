@@ -21,10 +21,10 @@ use crate::bridge::state::UiState;
 use crate::theme::fonts::{INTER_FAMILY, WEIGHT_SEMIBOLD};
 use crate::theme::tokens;
 
-/// The readout's control surface: mod+alt+r toggles it. Debug builds open on
-/// the readout; the fixture stays reachable on mod+alt+t.
+/// The readout's control surface: mod+alt+r toggles it. It starts hidden, so
+/// debug builds open on the shell; the fixture stays reachable on mod+alt+t.
 pub fn install() -> Signal<bool> {
-    let show = signal(true);
+    let show = signal(false);
     on_key("mod+alt+r", move |_| show.update(|s| *s = !*s));
     show
 }
